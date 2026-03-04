@@ -283,10 +283,13 @@ window.handleLogin = async function () {
   document.getElementById('auth-submit').disabled = false;
 
   if (result.success) {
-    window.location.href = window.location.pathname; // clear params, reload
+    // Clear any ?invite= params without reload, then mount the app
+    history.replaceState(null, '', window.location.pathname);
+    showAppPage();
+    App.init();
   } else {
     showAuthError(errorEl, result.error === 'pending'
-      ? '⏳ Your account is awaiting admin approval.'
+      ? '\u23f3 Your account is awaiting admin approval.'
       : result.error);
   }
 };
@@ -295,8 +298,13 @@ window.handlePasskeyLogin = async function () {
   const email = document.getElementById('auth-email')?.value.trim();
   if (!email) { showAuthError(document.getElementById('auth-error'), 'Enter your email first.'); return; }
   const result = await AuthManager.loginWithPasskey(email);
-  if (result.success) window.location.href = window.location.pathname;
-  else showAuthError(document.getElementById('auth-error'), result.error);
+  if (result.success) {
+    history.replaceState(null, '', window.location.pathname);
+    showAppPage();
+    App.init();
+  } else {
+    showAuthError(document.getElementById('auth-error'), result.error);
+  }
 };
 
 window.handleRegister = async function () {
@@ -336,13 +344,22 @@ window.handleInviteRegister = async function (token) {
   btnText.textContent = 'Create My Account';
 
   if (result.success) {
-    document.querySelector('.auth-card').innerHTML = `
-            <div style="text-align:center;padding:24px 0;">
-                <div style="font-size:40px;">🎉</div>
-                <h3 style="color:var(--accent-green);margin:12px 0 6px;">Welcome to T-CMD!</h3>
-                <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">Your account is ready. Sign in to start trading.</p>
-                <a href="${window.location.pathname}" class="btn btn-primary" style="display:inline-block;">Sign In Now →</a>
-            </div>`;
+    // Auto-login and go straight to app
+    const loginResult = await AuthManager.login(email, password);
+    if (loginResult.success) {
+      history.replaceState(null, '', window.location.pathname);
+      showAppPage();
+      App.init();
+    } else {
+      // Fallback: show success + redirect to login
+      document.querySelector('.auth-card').innerHTML = `
+        <div style="text-align:center;padding:24px 0;">
+          <div style="font-size:40px;">\ud83c\udf89</div>
+          <h3 style="color:var(--accent-green);margin:12px 0 6px;">Account Created!</h3>
+          <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">Redirecting you to login...</p>
+        </div>`;
+      setTimeout(() => { history.replaceState(null, '', window.location.pathname); renderAuthPage(); }, 1500);
+    }
   } else {
     showAuthError(errorEl, result.error);
   }
@@ -514,6 +531,6 @@ function closeAdminPanel() {
 }
 
 window.showAuthPage = showAuthPage;
-window.showAppPage  = showAppPage;
-window.openAdminPanel  = openAdminPanel;
+window.showAppPage = showAppPage;
+window.openAdminPanel = openAdminPanel;
 window.closeAdminPanel = closeAdminPanel;

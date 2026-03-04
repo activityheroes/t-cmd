@@ -480,12 +480,25 @@ async function loadTicker() {
 // ══════════════════════════════════════════════════════
 
 const App = {
+  _initialized: false,
+
   init() {
     AuthManager.init();
-    if (!AuthManager.isLoggedIn()) { showAuthPage('login'); return; }
-    this.setupNav();
-    this.setupDrawer();
-    this.setupAdminPanel();
+    if (!AuthManager.isLoggedIn()) { showAuthPage(); return; }
+
+    // Clear any existing refresh interval from a previous init call
+    if (AppState.liveRefreshInterval) {
+      clearInterval(AppState.liveRefreshInterval);
+      AppState.liveRefreshInterval = null;
+    }
+
+    if (!this._initialized) {
+      this.setupNav();
+      this.setupDrawer();
+      this.setupAdminPanel();
+      this._initialized = true;
+    }
+
     this.gateFeatures();
     switchTab('signals');
     loadSignals();

@@ -4,109 +4,113 @@
 
 // ── Toast notifications ────────────────────────────────
 function showToast(icon, title, msg, type = 'info') {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.innerHTML = `
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `
     <span class="toast-icon">${icon}</span>
     <div><div class="toast-title">${title}</div>${msg ? `<div class="toast-msg">${msg}</div>` : ''}</div>
     <span class="toast-close" onclick="this.parentElement.remove()">×</span>`;
-    container.prepend(toast);
-    setTimeout(() => toast.remove(), 4000);
+  container.prepend(toast);
+  setTimeout(() => toast.remove(), 4000);
 }
 
 // ── Draw mini sparkline on canvas ──────────────────────
 function drawSparkline(canvas, data, color = '#4fc3f7') {
-    if (!canvas || !data || data.length < 2) return;
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width = canvas.offsetWidth;
-    const h = canvas.height = canvas.offsetHeight;
-    const min = Math.min(...data);
-    const max = Math.max(...data);
-    const range = max - min || 1;
-    ctx.clearRect(0, 0, w, h);
-    const grad = ctx.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, color + '44');
-    grad.addColorStop(1, color + '00');
-    ctx.beginPath();
-    data.forEach((v, i) => {
-        const x = (i / (data.length - 1)) * w;
-        const y = h - ((v - min) / range) * h;
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
+  if (!canvas || !data || data.length < 2) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.offsetWidth;
+  const h = canvas.height = canvas.offsetHeight;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  ctx.clearRect(0, 0, w, h);
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, color + '44');
+  grad.addColorStop(1, color + '00');
+  ctx.beginPath();
+  data.forEach((v, i) => {
+    const x = (i / (data.length - 1)) * w;
+    const y = h - ((v - min) / range) * h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
 }
 
 // ── State ──────────────────────────────────────────────
 const AppState = {
-    activeTab: 'signals',
-    signalFilter: 'all',
-    signalCoinFilter: 'ALL',
-    signalView: 'live',
-    signals: [],
-    scannerFilter: 'all',
-    scannerTokens: [],
-    autoScan: false,
-    scanInterval: null,
-    openDrawer: null,
-    liveRefreshInterval: null,
-    prices: {}
+  activeTab: 'signals',
+  signalFilter: 'all',
+  signalCoinFilter: 'ALL',
+  signalView: 'live',
+  signals: [],
+  customCoins: [],
+  scannerFilter: 'all',
+  scannerChain: 'all',
+  scannerScore: 0,
+  scannerQuery: '',
+  scannerTokens: [],
+  autoScan: false,
+  scanInterval: null,
+  openDrawer: null,
+  liveRefreshInterval: null,
+  prices: {}
 };
 
 // ── Coin config ────────────────────────────────────────
 const COINS = [
-    { sym: 'BTC', icon: '₿', name: 'Bitcoin', id: 'bitcoin' },
-    { sym: 'ETH', icon: 'Ξ', name: 'Ethereum', id: 'ethereum' },
-    { sym: 'SOL', icon: '◎', name: 'Solana', id: 'solana' }
+  { sym: 'BTC', icon: '₿', name: 'Bitcoin', id: 'bitcoin' },
+  { sym: 'ETH', icon: 'Ξ', name: 'Ethereum', id: 'ethereum' },
+  { sym: 'SOL', icon: '◎', name: 'Solana', id: 'solana' }
 ];
 const ALT_COINS = ['BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK', 'DOT', 'MATIC', 'UNI', 'ATOM', 'NEAR', 'APT', 'SUI', 'INJ', 'OP', 'ARB'];
 
 // ── Tab switching ──────────────────────────────────────
 function switchTab(tab) {
-    AppState.activeTab = tab;
-    document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
+  AppState.activeTab = tab;
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
 }
 
 // ── Format helpers ─────────────────────────────────────
 const fmt = {
-    price: SignalEngine.formatPrice,
-    vol: SignalEngine.formatVol,
-    pct: (v) => (v > 0 ? '+' : '') + parseFloat(v).toFixed(2) + '%',
-    rsi: (v) => v ? v.toFixed(0) : '—',
-    num: (v, d = 2) => parseFloat(v).toFixed(d)
+  price: SignalEngine.formatPrice,
+  vol: SignalEngine.formatVol,
+  pct: (v) => (v > 0 ? '+' : '') + parseFloat(v).toFixed(2) + '%',
+  rsi: (v) => v ? v.toFixed(0) : '—',
+  num: (v, d = 2) => parseFloat(v).toFixed(d)
 };
 
 // ── Live price updater ─────────────────────────────────
 async function updatePrices() {
-    try {
-        const syms = [...COINS.map(c => c.sym), 'BNB', 'XRP', 'ADA', 'AVAX'];
-        const ids = syms.map(s => API.cgId(s)).join(',');
-        const data = await API.CoinGecko.getPrices(syms);
-        for (const [id, val] of Object.entries(data)) {
-            const sym = Object.entries(API.COIN_IDS).find(([s, i]) => i === id)?.[0];
-            if (sym) {
-                const p = val.usd;
-                AppState.prices[sym] = p;
-                TradeLog.updatePrice(sym, p);
-                document.querySelectorAll(`[data-live-price="${sym}"]`).forEach(el => {
-                    el.textContent = fmt.price(p, sym);
-                });
-                document.querySelectorAll(`[data-live-change="${sym}"]`).forEach(el => {
-                    const ch = val.usd_24h_change || 0;
-                    el.textContent = fmt.pct(ch);
-                    el.className = el.className.replace(/num-\w+/, '');
-                    el.classList.add(ch >= 0 ? 'num-green' : 'num-red');
-                });
-            }
-        }
-        updateTradingLogPnL();
-    } catch (e) { console.warn('Price update error:', e); }
+  try {
+    const syms = [...COINS.map(c => c.sym), 'BNB', 'XRP', 'ADA', 'AVAX'];
+    const ids = syms.map(s => API.cgId(s)).join(',');
+    const data = await API.CoinGecko.getPrices(syms);
+    for (const [id, val] of Object.entries(data)) {
+      const sym = Object.entries(API.COIN_IDS).find(([s, i]) => i === id)?.[0];
+      if (sym) {
+        const p = val.usd;
+        AppState.prices[sym] = p;
+        TradeLog.updatePrice(sym, p);
+        document.querySelectorAll(`[data-live-price="${sym}"]`).forEach(el => {
+          el.textContent = fmt.price(p, sym);
+        });
+        document.querySelectorAll(`[data-live-change="${sym}"]`).forEach(el => {
+          const ch = val.usd_24h_change || 0;
+          el.textContent = fmt.pct(ch);
+          el.className = el.className.replace(/num-\w+/, '');
+          el.classList.add(ch >= 0 ? 'num-green' : 'num-red');
+        });
+      }
+    }
+    updateTradingLogPnL();
+  } catch (e) { console.warn('Price update error:', e); }
 }
 
 // ══════════════════════════════════════════════════════
@@ -114,29 +118,96 @@ async function updatePrices() {
 // ══════════════════════════════════════════════════════
 
 async function loadSignals() {
-    const grid = document.getElementById('signals-grid');
-    grid.innerHTML = renderSkeletons(3);
-    const sigs = [];
+  const grid = document.getElementById('signals-grid');
+  grid.innerHTML = renderSkeletons(3);
+  const sigs = [];
 
-    async function processSymbol(sym, icon, displayName) {
-        try {
-            const priceData = await API.CoinGecko.getPrices([sym]);
-            const chartData = await API.CoinGecko.getOHLCV(sym, 90);
-            const cgId = API.cgId(sym);
-            const price = API.normalizeCGPrice(cgId, priceData);
-            const sig = SignalEngine.generateSignal(sym, price, chartData);
-            if (sig) { sig.icon = icon; sig.displayName = displayName; sigs.push(sig); }
-        } catch (e) { console.warn(`Signal load failed for ${sym}:`, e); }
+  async function processSymbol(sym, icon, displayName) {
+    try {
+      const priceData = await API.CoinGecko.getPrices([sym]);
+      const chartData = await API.CoinGecko.getOHLCV(sym, 90);
+      const cgId = API.cgId(sym);
+      const price = API.normalizeCGPrice(cgId, priceData);
+      const sig = SignalEngine.generateSignal(sym, price, chartData);
+      if (sig) { sig.icon = icon; sig.displayName = displayName; sigs.push(sig); }
+    } catch (e) { console.warn(`Signal load failed for ${sym}:`, e); }
+  }
+
+  await Promise.allSettled(COINS.map(c => processSymbol(c.sym, c.icon, c.name)));
+  // Also load any user-added coins
+  if (AppState.customCoins && AppState.customCoins.length) {
+    await Promise.allSettled(AppState.customCoins.map(c => processSymbol(c.sym, c.icon, c.name)));
+  }
+  AppState.signals = sigs;
+  // Tag each signal as fresh or revived based on RSI / phase
+  AppState.signals.forEach(s => {
+    s.signalAge = (s.phase === 'Breakout' || s.confidence >= 75) ? 'fresh' : 'revived';
+  });
+  renderSignalCards();
+  updateSignalStats();
+}
+
+// Add Coin modal
+window.showAddCoinModal = function () {
+  const overlay = document.createElement('div');
+  overlay.id = 'add-coin-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:2000;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML = `
+      <div style="background:var(--bg-modal);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:28px;width:360px;box-shadow:var(--shadow-modal);">
+        <div style="font-size:16px;font-weight:700;margin-bottom:16px;">+ Add Coin Signal</div>
+        <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:16px;">Enter any Binance-listed trading pair (e.g. LINK, DOGE, AVAX, INJ)</div>
+        <input id="add-coin-input" class="form-input" type="text" placeholder="Symbol e.g. LINK" style="text-transform:uppercase;margin-bottom:12px;" />
+        <div id="add-coin-error" style="color:var(--accent-red);font-size:12px;margin-bottom:10px;display:none;"></div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn btn-primary" id="add-coin-confirm" style="flex:1;justify-content:center;">Generate Signal</button>
+          <button class="btn btn-ghost" id="add-coin-cancel" style="flex:1;justify-content:center;">Cancel</button>
+        </div>
+      </div>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector('#add-coin-input');
+  input.focus();
+  overlay.querySelector('#add-coin-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#add-coin-confirm').onclick = () => doAddCoin(input.value.trim().toUpperCase(), overlay);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') doAddCoin(input.value.trim().toUpperCase(), overlay); });
+};
+
+async function doAddCoin(sym, overlay) {
+  if (!sym) return;
+  const errEl = overlay.querySelector('#add-coin-error');
+  const btn = overlay.querySelector('#add-coin-confirm');
+  btn.textContent = 'Loading…'; btn.disabled = true;
+  try {
+    const priceData = await API.CoinGecko.getPrices([sym]);
+    const chartData = await API.CoinGecko.getOHLCV(sym, 90);
+    const cgId = Object.keys(priceData)[0];
+    if (!cgId || !priceData[cgId]?.usd) throw new Error('Not found on Binance');
+    const price = API.normalizeCGPrice(cgId, priceData);
+    const sig = SignalEngine.generateSignal(sym, price, chartData);
+    if (!sig) throw new Error('Could not generate signal');
+    sig.icon = sym.slice(0, 2);
+    sig.displayName = sym;
+    sig.signalAge = 'fresh';
+    sig.isCustom = true;
+    // Remove old custom signal for same coin if exists
+    AppState.signals = AppState.signals.filter(s => s.symbol !== sym || !s.isCustom);
+    AppState.signals.unshift(sig);
+    if (!AppState.customCoins) AppState.customCoins = [];
+    if (!AppState.customCoins.find(c => c.sym === sym)) {
+      AppState.customCoins.push({ sym, icon: sym.slice(0, 2), name: sym });
     }
-
-    await Promise.allSettled(COINS.map(c => processSymbol(c.sym, c.icon, c.name)));
-    AppState.signals = sigs;
+    overlay.remove();
     renderSignalCards();
     updateSignalStats();
+    showToast('📡', `${sym} Signal Added`, `${sig.direction} · ${sig.confidence}% confidence`, 'success');
+  } catch (e) {
+    errEl.textContent = e.message || 'Failed to fetch data for this symbol';
+    errEl.style.display = 'block';
+    btn.textContent = 'Generate Signal'; btn.disabled = false;
+  }
 }
 
 function renderSkeletons(n) {
-    return Array.from({ length: n }, () => `
+  return Array.from({ length: n }, () => `
     <div class="signal-card" style="gap:12px;">
       <div class="skeleton" style="height:18px;width:60%;"></div>
       <div class="skeleton" style="height:14px;width:40%;"></div>
@@ -146,47 +217,49 @@ function renderSkeletons(n) {
 }
 
 function filterSignals(sigs) {
-    let result = sigs;
-    if (AppState.signalCoinFilter !== 'ALL') {
-        result = result.filter(s => s.symbol === AppState.signalCoinFilter);
-    }
-    if (AppState.signalFilter === 'long') result = result.filter(s => s.direction === 'LONG');
-    if (AppState.signalFilter === 'short') result = result.filter(s => s.direction === 'SHORT');
-    if (AppState.signalFilter === 'breakout') result = result.filter(s => s.phase === 'Breakout');
-    if (AppState.signalFilter === 'accumulating') result = result.filter(s => s.phase === 'Accumulating');
-    return result;
+  let result = sigs;
+  if (AppState.signalCoinFilter !== 'ALL') {
+    result = result.filter(s => s.symbol === AppState.signalCoinFilter);
+  }
+  if (AppState.signalFilter === 'long') result = result.filter(s => s.direction === 'LONG');
+  if (AppState.signalFilter === 'short') result = result.filter(s => s.direction === 'SHORT');
+  if (AppState.signalFilter === 'breakout') result = result.filter(s => s.phase === 'Breakout');
+  if (AppState.signalFilter === 'accumulating') result = result.filter(s => s.phase === 'Accumulating');
+  if (AppState.signalFilter === 'fresh') result = result.filter(s => s.signalAge === 'fresh');
+  if (AppState.signalFilter === 'revived') result = result.filter(s => s.signalAge === 'revived');
+  return result;
 }
 
 function renderSignalCards() {
-    const grid = document.getElementById('signals-grid');
-    const sigs = filterSignals(AppState.signals);
-    if (sigs.length === 0) {
-        grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
+  const grid = document.getElementById('signals-grid');
+  const sigs = filterSignals(AppState.signals);
+  if (sigs.length === 0) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
       <div class="empty-state-icon">📡</div>
       <h3>No signals match your filter</h3>
       <p>Try a different filter or wait for the next scan cycle.</p>
       <button class="btn btn-outline" onclick="loadSignals()">🔄 Refresh Now</button>
     </div>`;
-        return;
+    return;
+  }
+  grid.innerHTML = sigs.map(renderSignalCard).join('');
+  sigs.forEach(s => {
+    const canvas = document.getElementById(`chart-${s.id}`);
+    if (canvas) {
+      const color = s.direction === 'LONG' ? '#26de81' : '#fc5c65';
+      drawSparkline(canvas, s.closes.slice(-30), color);
     }
-    grid.innerHTML = sigs.map(renderSignalCard).join('');
-    sigs.forEach(s => {
-        const canvas = document.getElementById(`chart-${s.id}`);
-        if (canvas) {
-            const color = s.direction === 'LONG' ? '#26de81' : '#fc5c65';
-            drawSparkline(canvas, s.closes.slice(-30), color);
-        }
-    });
+  });
 }
 
 function renderSignalCard(s) {
-    const isLong = s.direction === 'LONG';
-    const ta = SignalEngine.timeAgo(s.timestamp);
-    const phaseClass = s.phase === 'Breakout' ? 'amber' : s.phase === 'Accumulating' ? 'cyan' : 'red';
-    const pctMove = (((s.takeProfit - s.entry) / s.entry) * 100).toFixed(1);
-    const confColor = s.confidence >= 75 ? '#26de81' : s.confidence >= 55 ? '#f7b731' : '#fc5c65';
+  const isLong = s.direction === 'LONG';
+  const ta = SignalEngine.timeAgo(s.timestamp);
+  const phaseClass = s.phase === 'Breakout' ? 'amber' : s.phase === 'Accumulating' ? 'cyan' : 'red';
+  const pctMove = (((s.takeProfit - s.entry) / s.entry) * 100).toFixed(1);
+  const confColor = s.confidence >= 75 ? '#26de81' : s.confidence >= 55 ? '#f7b731' : '#fc5c65';
 
-    return `<div class="signal-card ${isLong ? 'long-card' : 'short-card'} animate-fadeInUp" onclick="openSignalDetail('${s.id}')">
+  return `<div class="signal-card ${isLong ? 'long-card' : 'short-card'} animate-fadeInUp" onclick="openSignalDetail('${s.id}')">
     <div class="card-top-row">
       <span class="card-type-badge"><span>✦</span> Fresh Signal</span>
       <div class="direction-badge ${isLong ? 'long' : 'short'}">${isLong ? '▲' : '▼'} ${s.direction}</div>
@@ -246,76 +319,76 @@ function renderSignalCard(s) {
 }
 
 function updateSignalStats() {
-    const sigs = AppState.signals;
-    document.getElementById('stat-signals-today').textContent = sigs.length;
-    const avgConf = sigs.length ? Math.round(sigs.reduce((a, s) => a + s.confidence, 0) / sigs.length) : 0;
-    document.getElementById('stat-avg-conf').textContent = avgConf + '%';
-    const avgRR = sigs.length ? (sigs.reduce((a, s) => a + parseFloat(s.rr), 0) / sigs.length).toFixed(1) : '—';
-    document.getElementById('stat-avg-rr').textContent = avgRR;
-    const stats = TradeLog.getStats();
-    document.getElementById('stat-win-rate').textContent = stats.winRate + '%';
+  const sigs = AppState.signals;
+  document.getElementById('stat-signals-today').textContent = sigs.length;
+  const avgConf = sigs.length ? Math.round(sigs.reduce((a, s) => a + s.confidence, 0) / sigs.length) : 0;
+  document.getElementById('stat-avg-conf').textContent = avgConf + '%';
+  const avgRR = sigs.length ? (sigs.reduce((a, s) => a + parseFloat(s.rr), 0) / sigs.length).toFixed(1) : '—';
+  document.getElementById('stat-avg-rr').textContent = avgRR;
+  const stats = TradeLog.getStats();
+  document.getElementById('stat-win-rate').textContent = stats.winRate + '%';
 }
 
 // ── Take Trade ─────────────────────────────────────────
 window.takeTrade = function (sigId) {
-    const sig = AppState.signals.find(s => s.id === sigId);
-    if (!sig) return;
-    if (!AuthManager.hasFeature('tradingLog')) {
-        showToast('🔒', 'Feature Locked', 'Admin has not enabled Trading Log for your account.', 'warning'); return;
-    }
-    TradeLog.addPosition({
-        symbol: sig.symbol, direction: sig.direction, entry: sig.entry,
-        stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, size: 1,
-        rr: sig.rr, fromSignalId: sig.id
-    });
-    showToast('💼', `${sig.direction} ${sig.symbol}`, `Entry: ${fmt.price(sig.entry, sig.symbol)} | R:R ${sig.rr}:1`, 'success');
-    if (AppState.activeTab !== 'log') {
-        setTimeout(() => { switchTab('log'); renderTradingLog(); }, 500);
-    }
+  const sig = AppState.signals.find(s => s.id === sigId);
+  if (!sig) return;
+  if (!AuthManager.hasFeature('tradingLog')) {
+    showToast('🔒', 'Feature Locked', 'Admin has not enabled Trading Log for your account.', 'warning'); return;
+  }
+  TradeLog.addPosition({
+    symbol: sig.symbol, direction: sig.direction, entry: sig.entry,
+    stopLoss: sig.stopLoss, takeProfit: sig.takeProfit, size: 1,
+    rr: sig.rr, fromSignalId: sig.id
+  });
+  showToast('💼', `${sig.direction} ${sig.symbol}`, `Entry: ${fmt.price(sig.entry, sig.symbol)} | R:R ${sig.rr}:1`, 'success');
+  if (AppState.activeTab !== 'log') {
+    setTimeout(() => { switchTab('log'); renderTradingLog(); }, 500);
+  }
 };
 
 // ── Signal Detail Drawer ───────────────────────────────
 window.openSignalDetail = function (sigId) {
-    const sig = AppState.signals.find(s => s.id === sigId);
-    if (!sig) return;
-    AppState.openDrawer = sigId;
-    const overlay = document.getElementById('drawer-overlay');
-    const drawer = document.getElementById('signal-drawer');
-    overlay.classList.add('open');
-    drawer.classList.add('open');
-    populateDrawer(sig);
+  const sig = AppState.signals.find(s => s.id === sigId);
+  if (!sig) return;
+  AppState.openDrawer = sigId;
+  const overlay = document.getElementById('drawer-overlay');
+  const drawer = document.getElementById('signal-drawer');
+  overlay.classList.add('open');
+  drawer.classList.add('open');
+  populateDrawer(sig);
 };
 
 function populateDrawer(sig) {
-    const isLong = sig.direction === 'LONG';
-    document.getElementById('drawer-coin-icon').textContent = sig.icon;
-    document.getElementById('drawer-coin-name').textContent = `${sig.symbol}/USDT`;
-    document.getElementById('drawer-coin-change').textContent = fmt.pct(sig.priceData.change24h || 0);
-    document.getElementById('drawer-coin-change').className = `drawer-coin-change ${(sig.priceData.change24h || 0) >= 0 ? 'num-green' : 'num-red'}`;
-    document.getElementById('drawer-dir-badge').className = `direction-badge ${isLong ? 'long' : 'short'}`;
-    document.getElementById('drawer-dir-badge').textContent = `${isLong ? '▲' : '▼'} ${sig.direction}`;
-    document.getElementById('drawer-vol').textContent = `Vol: ${fmt.vol(sig.priceData.volume24h)}`;
-    document.getElementById('drawer-description').textContent =
-        `${sig.symbol} is currently in a ${sig.phase} phase. RSI at ${sig.rsi} with ${sig.macdBullish ? 'bullish' : 'bearish'} MACD momentum. ` +
-        `Markov chain analysis shows ${Math.round(sig.markov.breakout * 100)}% probability of continued breakout in the next 5 sessions.`;
-    renderSignalHistoryTab(sig);
-    renderTechSocialTab(sig);
-    renderSmartTradesTab(sig);
-    switchDrawerTab('history');
+  const isLong = sig.direction === 'LONG';
+  document.getElementById('drawer-coin-icon').textContent = sig.icon;
+  document.getElementById('drawer-coin-name').textContent = `${sig.symbol}/USDT`;
+  document.getElementById('drawer-coin-change').textContent = fmt.pct(sig.priceData.change24h || 0);
+  document.getElementById('drawer-coin-change').className = `drawer-coin-change ${(sig.priceData.change24h || 0) >= 0 ? 'num-green' : 'num-red'}`;
+  document.getElementById('drawer-dir-badge').className = `direction-badge ${isLong ? 'long' : 'short'}`;
+  document.getElementById('drawer-dir-badge').textContent = `${isLong ? '▲' : '▼'} ${sig.direction}`;
+  document.getElementById('drawer-vol').textContent = `Vol: ${fmt.vol(sig.priceData.volume24h)}`;
+  document.getElementById('drawer-description').textContent =
+    `${sig.symbol} is currently in a ${sig.phase} phase. RSI at ${sig.rsi} with ${sig.macdBullish ? 'bullish' : 'bearish'} MACD momentum. ` +
+    `Markov chain analysis shows ${Math.round(sig.markov.breakout * 100)}% probability of continued breakout in the next 5 sessions.`;
+  renderSignalHistoryTab(sig);
+  renderTechSocialTab(sig);
+  renderSmartTradesTab(sig);
+  switchDrawerTab('history');
 }
 
 function switchDrawerTab(tab) {
-    document.querySelectorAll('.drawer-tab').forEach(t => t.classList.toggle('active', t.dataset.dtab === tab));
-    document.querySelectorAll('.drawer-tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
+  document.querySelectorAll('.drawer-tab').forEach(t => t.classList.toggle('active', t.dataset.dtab === tab));
+  document.querySelectorAll('.drawer-tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
 }
 window.switchDrawerTab = switchDrawerTab;
 
 function renderSignalHistoryTab(sig) {
-    const panel = document.getElementById('drawer-history-panel');
-    const closes = sig.closes;
-    const histWin = Math.round(sig.confidence / 10);
-    const histLoss = 10 - histWin;
-    panel.innerHTML = `
+  const panel = document.getElementById('drawer-history-panel');
+  const closes = sig.closes;
+  const histWin = Math.round(sig.confidence / 10);
+  const histLoss = 10 - histWin;
+  panel.innerHTML = `
     <div class="signal-history-stats">
       <div class="sh-stat"><div class="sh-stat-label">Win Rate</div><div class="sh-stat-value num-green">${histWin * 10}%</div></div>
       <div class="sh-stat"><div class="sh-stat-label">Signals</div><div class="sh-stat-value num-cyan">10</div></div>
@@ -328,35 +401,35 @@ function renderSignalHistoryTab(sig) {
       <thead><tr><th>Date</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Result</th></tr></thead>
       <tbody>${generateSignalHistoryRows(sig)}</tbody>
     </table>`;
-    setTimeout(() => {
-        const c = document.getElementById('drawer-chart');
-        if (c) drawSparkline(c, closes.slice(-40), sig.direction === 'LONG' ? '#26de81' : '#fc5c65');
-    }, 50);
+  setTimeout(() => {
+    const c = document.getElementById('drawer-chart');
+    if (c) drawSparkline(c, closes.slice(-40), sig.direction === 'LONG' ? '#26de81' : '#fc5c65');
+  }, 50);
 }
 
 function generateSignalHistoryRows(sig) {
-    const days = [6, 5, 4, 3, 2, 1, 0];
-    return days.map((d, i) => {
-        const win = i % 3 !== 1;
-        const diff = sig.direction === 'LONG' ? (win ? 0.055 : -0.025) : (win ? -0.055 : 0.025);
-        const exit = sig.entry * (1 + diff);
-        const pct = (diff * 100).toFixed(2);
-        const date = new Date(Date.now() - d * 86400000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        return `<tr ${d === 0 ? 'class="current-row"' : ''}>
+  const days = [6, 5, 4, 3, 2, 1, 0];
+  return days.map((d, i) => {
+    const win = i % 3 !== 1;
+    const diff = sig.direction === 'LONG' ? (win ? 0.055 : -0.025) : (win ? -0.055 : 0.025);
+    const exit = sig.entry * (1 + diff);
+    const pct = (diff * 100).toFixed(2);
+    const date = new Date(Date.now() - d * 86400000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `<tr ${d === 0 ? 'class="current-row"' : ''}>
       <td>${date}</td>
       <td class="${sig.direction === 'LONG' ? 'num-green' : 'num-red'}">${sig.direction}</td>
       <td>${fmt.price(sig.entry, sig.symbol)}</td>
       <td>${fmt.price(exit, sig.symbol)}</td>
       <td class="${win ? 'num-green' : 'num-red'}">${win ? '+' : ''}${pct}%</td>
     </tr>`;
-    }).join('');
+  }).join('');
 }
 
 function renderTechSocialTab(sig) {
-    const panel = document.getElementById('drawer-techsocial-panel');
-    const m = sig.markov;
-    const rsiBull = sig.rsi < 40;
-    panel.innerHTML = `
+  const panel = document.getElementById('drawer-techsocial-panel');
+  const m = sig.markov;
+  const rsiBull = sig.rsi < 40;
+  panel.innerHTML = `
     <div class="sentiment-card">
       <div class="sentiment-header">
         <div class="sentiment-title">⚙️ Technical Sentiment</div>
@@ -391,15 +464,15 @@ function renderTechSocialTab(sig) {
 }
 
 function renderSmartTradesTab(sig) {
-    const panel = document.getElementById('drawer-smarttrades-panel');
-    const traders = [
-        { name: 'Whale Alpha', avatar: 'W', bought: 125000, sold: 0, roi: null, age: 2 },
-        { name: 'Sigma Wolf', avatar: 'S', bought: 48000, sold: 22000, roi: '+38.2', age: 6 },
-        { name: 'Degen King', avatar: 'D', bought: 200000, sold: 0, roi: null, age: 14 },
-        { name: 'SOL Sniper', avatar: 'S', bought: 31000, sold: 31000, roi: '+12.8', age: 18 }
-    ];
-    const maxBought = Math.max(...traders.map(t => t.bought));
-    panel.innerHTML = `
+  const panel = document.getElementById('drawer-smarttrades-panel');
+  const traders = [
+    { name: 'Whale Alpha', avatar: 'W', bought: 125000, sold: 0, roi: null, age: 2 },
+    { name: 'Sigma Wolf', avatar: 'S', bought: 48000, sold: 22000, roi: '+38.2', age: 6 },
+    { name: 'Degen King', avatar: 'D', bought: 200000, sold: 0, roi: null, age: 14 },
+    { name: 'SOL Sniper', avatar: 'S', bought: 31000, sold: 31000, roi: '+12.8', age: 18 }
+  ];
+  const maxBought = Math.max(...traders.map(t => t.bought));
+  panel.innerHTML = `
     <div class="smart-trades-summary">
       <span>${traders.length} wallets bought</span>
       <strong>${fmt.vol(traders.reduce((a, t) => a + t.bought, 0))} total</strong>
@@ -407,21 +480,21 @@ function renderSmartTradesTab(sig) {
     <table class="smart-trades-table">
       <thead><tr><th>Wallet</th><th>Bought</th><th>Sold</th><th>ROI</th><th>Age</th></tr></thead>
       <tbody>${traders.map(t => {
-        const pct = Math.round((t.bought / maxBought) * 100);
-        return `<tr>
+    const pct = Math.round((t.bought / maxBought) * 100);
+    return `<tr>
           <td><div class="wallet-name"><div class="wallet-avatar">${t.avatar}</div>${t.name}</div></td>
           <td><div class="wallet-balance">${fmt.vol(t.bought)}</div><div class="balance-bar"><div class="balance-bar-fill green" style="width:${pct}%"></div></div></td>
           <td class="txn-counts">${t.sold ? fmt.vol(t.sold) : '—'}</td>
           <td class="roi-value ${t.roi ? (parseFloat(t.roi) > 0 ? 'roi-positive' : 'roi-negative') : ''}">${t.roi ? t.roi + '%' : '—'}</td>
           <td class="age-action">${t.age}h ago</td>
         </tr>`;
-    }).join('')}</tbody>
+  }).join('')}</tbody>
     </table>`;
 }
 
 function closeDrawer() {
-    document.getElementById('drawer-overlay').classList.remove('open');
-    document.getElementById('signal-drawer').classList.remove('open');
-    AppState.openDrawer = null;
+  document.getElementById('drawer-overlay').classList.remove('open');
+  document.getElementById('signal-drawer').classList.remove('open');
+  AppState.openDrawer = null;
 }
 window.closeDrawer = closeDrawer;

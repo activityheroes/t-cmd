@@ -93,6 +93,9 @@
               <span class="filter-pill" data-group="signal" data-value="short">▼ Short</span>
               <span class="filter-pill" data-group="signal" data-value="breakout">🚀 Breakout</span>
               <span class="filter-pill" data-group="signal" data-value="accumulating">📦 Accumulating</span>
+              <div class="divider" style="width:1px;height:20px;margin:0 4px;background:var(--border-subtle);"></div>
+              <span class="filter-pill" data-group="signal" data-value="fresh">✦ Fresh</span>
+              <span class="filter-pill" data-group="signal" data-value="revived">↺ Revived</span>
             </div>
           </div>
 
@@ -116,7 +119,11 @@
                 <div class="stat-label">Avg R:R</div>
               </div>
             </div>
-            <button class="btn btn-ghost" onclick="loadSignals()" style="font-size:12px;">🔄 Refresh</button>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-ghost" id="add-coin-btn"
+                style="font-size:12px;color:var(--accent-cyan);border-color:rgba(79,195,247,0.3);">+ Add Coin</button>
+              <button class="btn btn-ghost" onclick="loadSignals()" style="font-size:12px;">🔄 Refresh</button>
+            </div>
           </div>
         </div>
 
@@ -140,16 +147,33 @@
     ═══════════════════════════════════════════════ -->
       <div id="panel-scanner" class="tab-panel">
 
-        <!-- Header -->
         <div class="page-header">
           <div class="page-header-left">
-            <!-- Scanner filters -->
+            <!-- Row 1: Type filters -->
             <div class="filter-row">
               <span class="filter-pill active" data-group="scanner" data-value="all">All</span>
               <span class="filter-pill" data-group="scanner" data-value="hot">🔥 Hot</span>
               <span class="filter-pill" data-group="scanner" data-value="breakout">🚀 Breakout</span>
               <span class="filter-pill" data-group="scanner" data-value="accumulating">📦 Accumulating</span>
               <span class="filter-pill" data-group="scanner" data-value="risk">⚠️ Risk</span>
+              <div class="divider" style="width:1px;height:20px;margin:0 4px;background:var(--border-subtle);"></div>
+              <span class="filter-pill" data-group="scanner" data-value="fresh">✦ Fresh</span>
+              <span class="filter-pill" data-group="scanner" data-value="revived">↺ Revived</span>
+            </div>
+            <!-- Row 2: Chain + Score filters -->
+            <div class="filter-row" style="margin-top:4px;">
+              <span style="font-size:11px;color:var(--text-muted);margin-right:4px;">Chain:</span>
+              <span class="filter-pill active" data-group="chain" data-value="all">🌐 All</span>
+              <span class="filter-pill chain-sol" data-group="chain" data-value="solana">◎ SOL</span>
+              <span class="filter-pill chain-eth" data-group="chain" data-value="ethereum">Ξ ETH</span>
+              <span class="filter-pill chain-base" data-group="chain" data-value="base">🔵 BASE</span>
+              <span class="filter-pill chain-bsc" data-group="chain" data-value="bsc">🟡 BSC</span>
+              <div class="divider" style="width:1px;height:20px;margin:0 8px;background:var(--border-subtle);"></div>
+              <span style="font-size:11px;color:var(--text-muted);margin-right:4px;">Score:</span>
+              <span class="filter-pill active" data-group="score" data-value="0">All</span>
+              <span class="filter-pill" data-group="score" data-value="50">50+</span>
+              <span class="filter-pill" data-group="score" data-value="70">70+</span>
+              <span class="filter-pill" data-group="score" data-value="80">80+</span>
             </div>
             <!-- Stats -->
             <div id="scanner-stats" style="font-size:12px;color:var(--text-secondary);margin-top:2px;"></div>
@@ -159,7 +183,7 @@
             <!-- Search -->
             <div class="search-box" style="min-width:200px;">
               <span class="search-icon">🔍</span>
-              <input type="text" id="scanner-search" placeholder="Search token…">
+              <input type="text" id="scanner-search" placeholder="Search token or paste address…">
             </div>
 
             <!-- Auto scan toggle -->
@@ -256,6 +280,13 @@
           </div>
         </div>
         <div id="drawer-coin-change" class="drawer-coin-change num-green">—</div>
+      </div>
+      <!-- Trading terminal links (shown for scanner tokens) -->
+      <div id="drawer-terminal-links" style="display:none;margin-top:10px;">
+        <div
+          style="font-size:10.5px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.06em;">
+          Trade on</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;" id="drawer-terminal-btns"></div>
       </div>
       <div class="drawer-description" id="drawer-description"></div>
     </div>

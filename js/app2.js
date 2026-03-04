@@ -3,6 +3,41 @@
    ============================================================ */
 
 // ══════════════════════════════════════════════════════
+// TRADING TERMINAL LINK HELPERS
+// ══════════════════════════════════════════════════════
+
+function getTerminalLinks(token) {
+  const addr = token.address || '';
+  const chain = (token.chainId || 'solana').toLowerCase();
+  const isSol = chain.includes('sol');
+  const isEth = chain.includes('eth') || chain.includes('erc');
+  const isBase = chain.includes('base');
+  const isBsc = chain.includes('bsc') || chain.includes('bnb');
+
+  return {
+    axiom: isSol ? `https://axiom.trade/meme/${addr}` : null,
+    gmgn: isSol ? `https://gmgn.ai/sol/token/${addr}`
+      : isEth ? `https://gmgn.ai/eth/token/${addr}`
+        : isBase ? `https://gmgn.ai/base/token/${addr}`
+          : isBsc ? `https://gmgn.ai/bsc/token/${addr}` : null,
+    photon: isSol ? `https://photon-sol.tinyastro.io/en/lp/${token.pairAddress || addr}` : null,
+    bubbleMaps: isSol ? `https://app.bubblemaps.io/sol/token/${addr}`
+      : isEth ? `https://app.bubblemaps.io/eth/token/${addr}`
+        : isBase ? `https://app.bubblemaps.io/base/token/${addr}`
+          : isBsc ? `https://app.bubblemaps.io/bsc/token/${addr}` : null,
+    explorer: isSol ? `https://solscan.io/token/${addr}`
+      : isEth ? `https://etherscan.io/token/${addr}`
+        : isBase ? `https://basescan.org/token/${addr}`
+          : isBsc ? `https://bscscan.com/token/${addr}` : `https://solscan.io/token/${addr}`,
+    walletExplorer: (wallet) => isSol ? `https://solscan.io/account/${wallet}`
+      : isEth ? `https://etherscan.io/address/${wallet}`
+        : isBase ? `https://basescan.org/address/${wallet}`
+          : isBsc ? `https://bscscan.com/address/${wallet}` : `https://solscan.io/account/${wallet}`,
+    kolscan: isSol ? `https://kolscan.io/` : null
+  };
+}
+
+// ══════════════════════════════════════════════════════
 // SCANNER TAB
 // ══════════════════════════════════════════════════════
 
@@ -29,12 +64,24 @@ async function loadScanner() {
 
 function filterScannerTokens(tokens) {
   let t = tokens;
+  // Type filter
   if (AppState.scannerFilter === 'hot') t = t.filter(x => x.pumpScore >= 70);
   if (AppState.scannerFilter === 'breakout') t = t.filter(x => x.isBreakout);
   if (AppState.scannerFilter === 'accumulating') t = t.filter(x => !x.isBreakout && x.pumpScore >= 50);
   if (AppState.scannerFilter === 'risk') t = t.filter(x => x.rugFlags.length >= 2);
+  if (AppState.scannerFilter === 'fresh') t = t.filter(x => x.signalType === 'fresh');
+  if (AppState.scannerFilter === 'revived') t = t.filter(x => x.signalType === 'revived');
+  // Chain filter
+  if (AppState.scannerChain && AppState.scannerChain !== 'all') {
+    t = t.filter(x => (x.chainId || '').toLowerCase().includes(AppState.scannerChain));
+  }
+  // Score filter
+  if (AppState.scannerScore && AppState.scannerScore > 0) {
+    t = t.filter(x => x.pumpScore >= AppState.scannerScore);
+  }
+  // Text search
   const q = AppState.scannerQuery || '';
-  if (q) t = t.filter(x => x.name.toLowerCase().includes(q) || x.symbol.toLowerCase().includes(q));
+  if (q) t = t.filter(x => x.name.toLowerCase().includes(q) || x.symbol.toLowerCase().includes(q) || x.address.toLowerCase().includes(q));
   return t;
 }
 
@@ -55,11 +102,20 @@ function renderScannerCards() {
 function renderScannerCard(token) {
   const scoreClass = token.pumpScore >= 70 ? 'high' : token.pumpScore >= 45 ? 'medium' : 'low';
   const ch24 = token.priceChange.h24;
-  const ch1h = token.priceChange.h1;
+  const sig = token.memeSignal; // may be undefined for low-score tokens
 
-  return `<div class="signal-card ${token.isBreakout ? 'long-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${token.address}')">
+  const logoHtml = token.imageUrl
+    ? `<img src="${token.imageUrl}" class="token-logo" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+       <div class="coin-icon" style="font-weight:700;font-size:11px;display:none;">${token.symbol.slice(0, 3)}</div>`
+    : `<div class="coin-icon" style="font-weight:700;font-size:11px;">${token.symbol.slice(0, 3)}</div>`;
+
+  const chainBadge = `<span class="chain-badge chain-${(token.chainId || 'sol').toLowerCase().slice(0, 3)}">${token.chainId}</span>`;
+
+  const terminals = getTerminalLinks(token);
+
+  return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${token.address}')">
     <div class="card-top-row">
-      <span class="card-type-badge ${token.signalType}">${token.signalType === 'fresh' ? '✦ Fresh Signal' : '↺ Revived Signal'}</span>
+      <span class="card-type-badge ${token.signalType}">${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
       <div class="pump-score ${scoreClass}">
         <div class="pump-score-value">${token.pumpScore}</div>
         <div class="pump-score-label">Score</div>
@@ -67,10 +123,10 @@ function renderScannerCard(token) {
     </div>
     <div class="card-coin-row">
       <div class="card-coin-info">
-        <div class="coin-icon" style="font-weight:700;font-size:11px;">${token.symbol.slice(0, 3)}</div>
+        <div style="position:relative;flex-shrink:0;">${logoHtml}</div>
         <div>
-          <div class="coin-name">${token.name}</div>
-          <div class="coin-vol" style="font-size:11px;">${token.symbol} · ${token.chainId}</div>
+          <div class="coin-name">${token.name} ${chainBadge}</div>
+          <div class="coin-vol" style="font-size:11px;">${token.symbol} · Vol: ${fmt.vol(token.volume.h1)}/h</div>
         </div>
       </div>
       <div style="text-align:right;">
@@ -78,18 +134,29 @@ function renderScannerCard(token) {
         <div class="${ch24 >= 0 ? 'num-green' : 'num-red'}" style="font-size:11.5px;font-weight:600;">${fmt.pct(ch24)}</div>
       </div>
     </div>
-    <div style="display:flex;gap:12px;font-size:11.5px;">
+    <div style="display:flex;gap:12px;font-size:11.5px;flex-wrap:wrap;">
       <span style="color:var(--text-muted)">Vol 24h: <span class="num-cyan">${fmt.vol(token.volume.h24)}</span></span>
       <span style="color:var(--text-muted)">Liq: <span class="${token.liquidity < 10000 ? 'num-red' : 'num-green'}">${fmt.vol(token.liquidity)}</span></span>
       <span style="color:var(--text-muted)">MC: ${fmt.vol(token.mktCap)}</span>
     </div>
-    ${token.isBreakout ? '<div class="badge badge-breakout">🚀 Breakout Detected</div>' : ''}
+    ${token.isBreakout ? '<div class="badge badge-breakout">\ud83d\ude80 Breakout</div>' : ''}
+    ${sig ? `<div class="meme-signal-block">
+      <div class="meme-signal-label">\ud83d\udcca ${sig.phase} Signal</div>
+      <div class="meme-signal-levels">
+        <span class="num-cyan">Entry <strong>${fmt.price(sig.entry)}</strong></span>
+        <span class="num-red">SL <strong>${fmt.price(sig.stopLoss)}</strong></span>
+        <span class="num-green">TP <strong>${fmt.price(sig.takeProfit)}</strong></span>
+      </div>
+    </div>` : ''}
     ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag">${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
     <div class="card-bottom-row">
-      <div style="display:flex;gap:6px;">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;">
         <a class="card-action-icon" href="${token.dexUrl}" target="_blank" title="DexScreener" onclick="event.stopPropagation()">📊</a>
         ${token.socials[0]?.url ? `<a class="card-action-icon" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()">🐦</a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()">🌐</a>` : ''}
+        ${terminals.axiom ? `<a class="terminal-link axiom" href="${terminals.axiom}" target="_blank" onclick="event.stopPropagation()">Axiom</a>` : ''}
+        ${terminals.gmgn ? `<a class="terminal-link gmgn" href="${terminals.gmgn}" target="_blank" onclick="event.stopPropagation()">gmgn</a>` : ''}
+        ${terminals.photon ? `<a class="terminal-link photon" href="${terminals.photon}" target="_blank" onclick="event.stopPropagation()">Photon</a>` : ''}
       </div>
       <span class="multiplier-badge mult-${token.multiplier.tier}">${token.multiplier.label}</span>
     </div>
@@ -102,7 +169,9 @@ function updateScannerStats() {
   if (!el) return;
   const hot = tokens.filter(t => t.pumpScore >= 70).length;
   const breakouts = tokens.filter(t => t.isBreakout).length;
-  el.innerHTML = `<span>${tokens.length} tokens scanned</span> · <span class="num-amber">🔥 ${hot} hot</span> · <span class="num-green">🚀 ${breakouts} breakouts</span>`;
+  const accum = tokens.filter(t => !t.isBreakout && t.pumpScore >= 50).length;
+  const risk = tokens.filter(t => t.rugFlags.length >= 2).length;
+  el.innerHTML = `<span>${tokens.length} scanned</span> · <span class="num-amber">🔥 ${hot} hot</span> · <span class="num-green">🚀 ${breakouts} breakout</span> · <span class="num-cyan">📦 ${accum} accum</span> · <span class="num-red">⚠️ ${risk} risk</span>`;
 }
 
 // Scanner detail drawer
@@ -117,76 +186,150 @@ window.openScannerDetail = function (address) {
 
 function populateScannerDrawer(token) {
   const ch24 = token.priceChange.h24;
-  document.getElementById('drawer-coin-icon').textContent = token.symbol.slice(0, 2);
+  const terminals = getTerminalLinks(token);
+
+  // Header
+  const iconEl = document.getElementById('drawer-coin-icon');
+  if (token.imageUrl) {
+    iconEl.innerHTML = `<img src="${token.imageUrl}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;" onerror="this.parentElement.textContent='${token.symbol.slice(0, 2)}'">`;
+  } else {
+    iconEl.textContent = token.symbol.slice(0, 2);
+  }
   document.getElementById('drawer-coin-name').textContent = `${token.name} (${token.symbol})`;
   document.getElementById('drawer-coin-change').textContent = fmt.pct(ch24);
   document.getElementById('drawer-coin-change').className = `drawer-coin-change ${ch24 >= 0 ? 'num-green' : 'num-red'}`;
   document.getElementById('drawer-dir-badge').className = 'direction-badge long';
-  document.getElementById('drawer-dir-badge').textContent = `Score: ${token.pumpScore}/100`;
+  document.getElementById('drawer-dir-badge').textContent = `\u{1F4CA} Score: ${token.pumpScore}/100`;
   document.getElementById('drawer-vol').textContent = `Vol 24h: ${fmt.vol(token.volume.h24)} · Liq: ${fmt.vol(token.liquidity)}`;
   document.getElementById('drawer-description').textContent =
-    `${token.name} is a ${token.chainId} token with a pump probability score of ${token.pumpScore}/100. ` +
-    `${token.isBreakout ? 'Breakout detected — volume acceleration above 2× average. ' : ''}` +
-    `${token.rugFlags.length ? 'Risk flags detected: ' + token.rugFlags.map(f => f.label).join(', ') + '.' : 'No major rug flags detected.'}`;
+    `${token.name} is a ${token.chainId} token with pump score ${token.pumpScore}/100. ` +
+    `${token.isBreakout ? 'Breakout detected — vol acceleration >2×. ' : !token.isBreakout && token.pumpScore >= 50 ? 'Accumulation phase — signal during low-volume consolidation. ' : ''}` +
+    `${token.rugFlags.length ? 'Risks: ' + token.rugFlags.map(f => f.label).join(', ') + '.' : 'No major rug flags.'}`;
 
-  // History
+  // Terminal links
+  const termLinks = document.getElementById('drawer-terminal-links');
+  const termBtns = document.getElementById('drawer-terminal-btns');
+  termLinks.style.display = 'block';
+  termBtns.innerHTML = [
+    terminals.axiom && `<a class="terminal-link axiom" href="${terminals.axiom}" target="_blank">Axiom</a>`,
+    terminals.gmgn && `<a class="terminal-link gmgn" href="${terminals.gmgn}" target="_blank">gmgn.ai</a>`,
+    terminals.photon && `<a class="terminal-link photon" href="${terminals.photon}" target="_blank">Photon</a>`,
+    terminals.bubbleMaps && `<a class="terminal-link bubble" href="${terminals.bubbleMaps}" target="_blank">\ud83d\udef8 BubbleMaps</a>`,
+    terminals.explorer && `<a class="terminal-link explorer" href="${terminals.explorer}" target="_blank">\ud83d\udd0e Explorer</a>`,
+    terminals.kolscan && `<a class="terminal-link kolscan" href="${terminals.kolscan}" target="_blank">KolScan</a>`,
+  ].filter(Boolean).join('');
+
+  // History tab: price stats + memecoin signal + metrics table
+  const sig = token.memeSignal;
   document.getElementById('drawer-history-panel').innerHTML = `
     <div class="signal-history-stats">
       <div class="sh-stat"><div class="sh-stat-label">Pump Score</div><div class="sh-stat-value ${token.pumpScore >= 70 ? 'num-green' : 'num-amber'}">${token.pumpScore}/100</div></div>
-      <div class="sh-stat"><div class="sh-stat-label">5m Change</div><div class="sh-stat-value ${token.priceChange.m5 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(token.priceChange.m5)}</div></div>
-      <div class="sh-stat"><div class="sh-stat-label">1h Change</div><div class="sh-stat-value ${token.priceChange.h1 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(token.priceChange.h1)}</div></div>
-      <div class="sh-stat"><div class="sh-stat-label">24h Change</div><div class="sh-stat-value ${ch24 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(ch24)}</div></div>
+      <div class="sh-stat"><div class="sh-stat-label">5m</div><div class="sh-stat-value ${token.priceChange.m5 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(token.priceChange.m5)}</div></div>
+      <div class="sh-stat"><div class="sh-stat-label">1h</div><div class="sh-stat-value ${token.priceChange.h1 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(token.priceChange.h1)}</div></div>
+      <div class="sh-stat"><div class="sh-stat-label">24h</div><div class="sh-stat-value ${ch24 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(ch24)}</div></div>
     </div>
-    <div style="margin-top:8px;">
-      <table class="signal-history-table">
-        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-        <tbody>
-          <tr><td>Market Cap</td><td>${fmt.vol(token.mktCap)}</td></tr>
-          <tr><td>FDV</td><td>${fmt.vol(token.fdv)}</td></tr>
-          <tr><td>Liquidity</td><td>${fmt.vol(token.liquidity)}</td></tr>
-          <tr><td>Volume 1h</td><td>${fmt.vol(token.volume.h1)}</td></tr>
-          <tr><td>Buys/Sells 24h</td><td>${token.txns?.h24?.buys || 0} / ${token.txns?.h24?.sells || 0}</td></tr>
-          <tr><td>Chain</td><td>${token.chainId}</td></tr>
-        </tbody>
-      </table>
-    </div>`;
+    ${sig ? `<div class="drawer-meme-signal">
+      <div class="dms-header">\ud83d\udcca ${sig.phase} Signal <span class="dms-rr">R:R ${sig.rr}:1</span></div>
+      <div class="dms-levels">
+        <div class="dms-level"><span class="dms-lbl">Entry</span><span class="num-cyan dms-val">${fmt.price(sig.entry)}</span></div>
+        <div class="dms-level"><span class="dms-lbl">Stop Loss</span><span class="num-red dms-val">${fmt.price(sig.stopLoss)}</span></div>
+        <div class="dms-level"><span class="dms-lbl">Take Profit</span><span class="num-green dms-val">${fmt.price(sig.takeProfit)}</span></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">${sig.note}</div>
+    </div>` : ''}
+    <table class="signal-history-table" style="margin-top:12px;">
+      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Market Cap</td><td>${fmt.vol(token.mktCap)}</td></tr>
+        <tr><td>FDV</td><td>${fmt.vol(token.fdv)}</td></tr>
+        <tr><td>Liquidity</td><td>${fmt.vol(token.liquidity)}</td></tr>
+        <tr><td>Volume 1h</td><td>${fmt.vol(token.volume.h1)}</td></tr>
+        <tr><td>Buys/Sells 24h</td><td>${token.txns?.h24?.buys || 0} / ${token.txns?.h24?.sells || 0}</td></tr>
+        <tr><td>Chain</td><td>${token.chainId}</td></tr>
+        <tr><td>Signal Type</td><td>${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</td></tr>
+      </tbody>
+    </table>`;
 
-  // Tech & social
+  // Tech & social + LunarCrush
   const ts = Scanner.calcTechnicalSentiment(token);
+  const whaleRisk = token.pumpScore >= 70 ? 'High concentration possible' : token.pumpScore >= 50 ? 'Moderate distribution' : 'Distributed';
   document.getElementById('drawer-techsocial-panel').innerHTML = `
     <div class="sentiment-card">
-      <div class="sentiment-header"><div class="sentiment-title">⚙️ Technical</div><div class="sentiment-label num-${ts.trend === 'Bullish' ? 'green' : ts.trend === 'Bearish' ? 'red' : 'amber'}">● ${ts.trend}</div></div>
+      <div class="sentiment-header"><div class="sentiment-title">\u2699\ufe0f Technical</div><div class="sentiment-label num-${ts.trend === 'Bullish' ? 'green' : ts.trend === 'Bearish' ? 'red' : 'amber'}">\u25cf ${ts.trend}</div></div>
       <div class="sentiment-bars">
-        <div class="sentiment-bar-row"><div class="sentiment-bar-label">Momentum</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill ${ts.momentum >= 50 ? 'green' : 'red'}" style="width:${ts.momentum}%"></div></div></div>
-        <div class="sentiment-bar-row"><div class="sentiment-bar-label">Buy Pressure</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill ${ts.buyPressure >= 50 ? 'green' : 'red'}" style="width:${ts.buyPressure}%"></div></div></div>
-        <div class="sentiment-bar-row"><div class="sentiment-bar-label">RSI Est.</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill cyan" style="width:${Math.min(100, ts.rsiEst)}%"></div></div></div>
+        <div class="sentiment-bar-row"><div class="sentiment-bar-label">Momentum</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill ${ts.momentum >= 50 ? 'green' : 'red'}" style="width:${ts.momentum}%"></div></div><span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${ts.momentum}%</span></div>
+        <div class="sentiment-bar-row"><div class="sentiment-bar-label">Buy Pressure</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill ${ts.buyPressure >= 50 ? 'green' : 'red'}" style="width:${ts.buyPressure}%"></div></div><span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${ts.buyPressure}%</span></div>
+        <div class="sentiment-bar-row"><div class="sentiment-bar-label">RSI Est.</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill cyan" style="width:${Math.min(100, ts.rsiEst)}%"></div></div><span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${Math.round(ts.rsiEst)}</span></div>
       </div>
       <div class="sentiment-details">
         <div class="sentiment-detail-row"><div class="key">Volume Trend</div><div class="val num-cyan">${ts.volumeTrend}</div></div>
-        ${token.rugFlags.map(f => `<div class="sentiment-detail-row"><div class="key">${f.icon} Risk Flag</div><div class="val num-red">${f.label}</div></div>`).join('')}
+        <div class="sentiment-detail-row"><div class="key">Signal Phase</div><div class="val">${ts.trend === 'Bullish' && !token.isBreakout ? '\ud83d\udce6 Accumulation (ideal entry)' : token.isBreakout ? '\ud83d\ude80 Breakout (manage risk)' : '\u23f8\ufe0f Watch'}</div></div>
+        ${token.rugFlags.map(f => `<div class="sentiment-detail-row"><div class="key">${f.icon} Risk</div><div class="val num-red">${f.label}</div></div>`).join('')}
+      </div>
+    </div>
+    <div class="sentiment-card" style="margin-top:12px;" id="lunar-crush-card">
+      <div class="sentiment-header"><div class="sentiment-title">\ud83c\udf19 Social Sentiment</div><div class="sentiment-label" id="lunar-status">Loading...</div></div>
+      <div id="lunar-content"><div style="font-size:12px;color:var(--text-muted);padding:8px 0;">Fetching LunarCrush data...</div></div>
+    </div>
+    <div class="sentiment-card" style="margin-top:12px;">
+      <div class="sentiment-header"><div class="sentiment-title">\ud83d\udef8 Holder Distribution</div></div>
+      <div class="sentiment-details">
+        <div class="sentiment-detail-row"><div class="key">Est. Concentration</div><div class="val ${token.liquidity < 20000 ? 'num-red' : 'num-green'}">${whaleRisk}</div></div>
+        <div class="sentiment-detail-row"><div class="key">FDV/MC Ratio</div><div class="val ${token.fdv > 0 && token.mktCap > 0 && token.fdv / token.mktCap > 5 ? 'num-red' : 'num-green'}">${token.fdv > 0 && token.mktCap > 0 ? (token.fdv / token.mktCap).toFixed(1) + '×' : '—'}</div></div>
+        <div class="sentiment-detail-row"><div class="key">BubbleMaps</div><div class="val">${terminals.bubbleMaps ? `<a href="${terminals.bubbleMaps}" target="_blank" style="color:var(--accent-cyan);">View holder bubbles \u2192</a>` : 'N/A'}</div></div>
       </div>
     </div>`;
 
-  // Smart trades
+  // Fetch LunarCrush async
+  API.LunarCrush.getSentiment(token.symbol).then(lc => {
+    const el = document.getElementById('lunar-content');
+    const st = document.getElementById('lunar-status');
+    if (!el) return;
+    if (!lc) {
+      el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">Social data unavailable for this token.</div>';
+      if (st) st.textContent = 'N/A';
+      return;
+    }
+    if (st) { st.textContent = lc.sentiment; st.className = `sentiment-label num-${lc.bullish >= 60 ? 'green' : lc.bullish <= 40 ? 'red' : 'amber'}`; }
+    el.innerHTML = `<div class="sentiment-bars" style="margin-top:8px;">
+      <div class="sentiment-bar-row"><div class="sentiment-bar-label">Bullish</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill green" style="width:${lc.bullish}%"></div></div><span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${lc.bullish}%</span></div>
+      <div class="sentiment-bar-row"><div class="sentiment-bar-label">Social Volume</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill cyan" style="width:${Math.min(100, lc.socialVolumeScore)}%"></div></div></div>
+    </div>
+    <div class="sentiment-details" style="margin-top:8px;">
+      <div class="sentiment-detail-row"><div class="key">Posts 24h</div><div class="val num-cyan">${lc.posts24h?.toLocaleString() || '—'}</div></div>
+      <div class="sentiment-detail-row"><div class="key">Interactions</div><div class="val">${lc.interactions24h?.toLocaleString() || '—'}</div></div>
+      <div class="sentiment-detail-row"><div class="key">Galaxy Score</div><div class="val ${lc.galaxyScore >= 50 ? 'num-green' : 'num-amber'}">${lc.galaxyScore || '—'}/100</div></div>
+    </div>`;
+  }).catch(() => {
+    const el = document.getElementById('lunar-content');
+    if (el) el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">Social data unavailable.</div>';
+  });
+
+  // Smart trades with explorer links
   const traders = Scanner.generateSmartTraders(token);
   const maxB = Math.max(...traders.map(t => t.bought));
   document.getElementById('drawer-smarttrades-panel').innerHTML = `
-    <div class="smart-trades-summary"><span>${traders.length} wallets detected</span><strong>${fmt.vol(traders.reduce((a, t) => a + t.bought, 0))} total bought</strong></div>
+    <div class="smart-trades-summary">
+      <span>${traders.length} wallets detected</span>
+      <strong>${fmt.vol(traders.reduce((a, t) => a + t.bought, 0))} total bought</strong>
+    </div>
     <table class="smart-trades-table">
-      <thead><tr><th>Wallet</th><th>Bought</th><th>Sold</th><th>ROI</th><th>Age</th></tr></thead>
+      <thead><tr><th>Wallet</th><th>Bought</th><th>Sold</th><th>ROI</th><th>Explore</th></tr></thead>
       <tbody>${traders.map(t => {
     const pct = Math.round((t.bought / maxB) * 100);
+    const explorerUrl = terminals.walletExplorer(t.walletAddress || '11111111111111111111111111111111');
     return `<tr>
           <td><div class="wallet-name"><div class="wallet-avatar">${t.avatar}</div>${t.name}</div></td>
           <td><div class="wallet-balance">${fmt.vol(t.bought)}</div><div class="balance-bar"><div class="balance-bar-fill green" style="width:${pct}%"></div></div></td>
-          <td>${t.sold ? fmt.vol(t.sold) : '—'}</td>
-          <td class="${t.roi ? (parseFloat(t.roi) > 0 ? 'roi-positive roi-value' : 'roi-negative roi-value') : ''}">${t.roi ? t.roi + '%' : '—'}</td>
-          <td class="age-action">${t.ageHours}h ago</td>
+          <td>${t.sold ? fmt.vol(t.sold) : '\u2014'}</td>
+          <td class="${t.roi ? (parseFloat(t.roi) > 0 ? 'roi-positive roi-value' : 'roi-negative roi-value') : ''}">${t.roi ? t.roi + '%' : '\u2014'}</td>
+          <td><a href="${explorerUrl}" target="_blank" class="explorer-wallet-link" title="View on-chain">\ud83d\udd0d</a></td>
         </tr>`;
   }).join('')}</tbody>
     </table>`;
   switchDrawerTab('history');
 }
+
 
 // ══════════════════════════════════════════════════════
 // TRADING LOG TAB
@@ -356,7 +499,7 @@ const App = {
       });
     });
 
-    // Signal type filter
+    // Signal type + scanner type + chain + score filters
     document.querySelectorAll('.filter-pill').forEach(pill => {
       pill.addEventListener('click', () => {
         const group = pill.dataset.group;
@@ -365,8 +508,14 @@ const App = {
         pill.classList.add('active');
         if (group === 'signal') { AppState.signalFilter = pill.dataset.value; renderSignalCards(); }
         if (group === 'scanner') { AppState.scannerFilter = pill.dataset.value; renderScannerCards(); }
+        if (group === 'chain') { AppState.scannerChain = pill.dataset.value; renderScannerCards(); }
+        if (group === 'score') { AppState.scannerScore = parseInt(pill.dataset.value) || 0; renderScannerCards(); }
       });
     });
+
+    // Add Coin button
+    const addCoinBtn = document.getElementById('add-coin-btn');
+    if (addCoinBtn) addCoinBtn.addEventListener('click', () => window.showAddCoinModal());
 
     // Scanner search
     const sq = document.getElementById('scanner-search');

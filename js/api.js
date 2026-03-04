@@ -172,6 +172,34 @@ const API = (() => {
         }
     };
 
+    // ── LunarCrush (free public API) ───────────────────────
+    const LunarCrush = {
+        async getSentiment(symbol) {
+            const sym = symbol.toLowerCase();
+            return cached(`lc_${sym}`, 300_000, async () => {
+                try {
+                    // Try v4 public endpoint (no key needed for basic data)
+                    const data = await fetchJSON(
+                        `https://lunarcrush.com/api4/public/coins/${sym}/v1`
+                    );
+                    const d = data?.data || {};
+                    const bullish = d.sentiment ? Math.round(d.sentiment * 100) : 50;
+                    return {
+                        bullish,
+                        bearish: 100 - bullish,
+                        sentiment: bullish >= 60 ? 'Bullish' : bullish <= 40 ? 'Bearish' : 'Neutral',
+                        galaxyScore: d.galaxy_score || 0,
+                        posts24h: d.social_volume_24h || d.posts_24h || null,
+                        interactions24h: d.social_engagement_24h || null,
+                        socialVolumeScore: Math.min(100, Math.round((d.social_dominance || 0) * 200))
+                    };
+                } catch {
+                    return null; // gracefully return null if API unavailable
+                }
+            });
+        }
+    };
+
     // ── Normalizer (keeps compatibility with existing app code) ─
     function normalizeCGPrice(id, priceObj) {
         const d = priceObj[id] || {};
@@ -193,5 +221,5 @@ const API = (() => {
         }));
     }
 
-    return { CoinGecko, CoinCap, DexScreener, FearGreed, normalizeCGPrice, buildOHLCVFromChart, cgId, COIN_IDS };
+    return { CoinGecko, CoinCap, DexScreener, FearGreed, LunarCrush, normalizeCGPrice, buildOHLCVFromChart, cgId, COIN_IDS };
 })();

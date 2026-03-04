@@ -1797,3 +1797,145 @@
     border: 1px solid rgba(252, 92, 101, 0.2);
     color: var(--accent-red);
 }
+/* ── Token logo (scanner cards) ──────────────────────────────── */
+.token-logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+}
+
+/* ── Chain badge ──────────────────────────────────────────────── */
+.chain-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    vertical-align: middle;
+    margin-left: 4px;
+}
+.chain-sol { background: rgba(153,69,255,0.15); color: #9945ff; border: 1px solid rgba(153,69,255,0.3); }
+.chain-eth { background: rgba(98,126,234,0.15); color: #627eea; border: 1px solid rgba(98,126,234,0.3); }
+.chain-bas { background: rgba(0,130,252,0.15); color: #0082fc; border: 1px solid rgba(0,130,252,0.3); }
+.chain-bsc { background: rgba(240,185,11,0.15); color: #f0b90b; border: 1px solid rgba(240,185,11,0.3); }
+
+/* Chain filter pills */
+.filter-pill.chain-sol.active { background: rgba(153,69,255,0.15); border-color: #9945ff; color: #9945ff; }
+.filter-pill.chain-eth.active { background: rgba(98,126,234,0.15); border-color: #627eea; color: #627eea; }
+.filter-pill.chain-base.active { background: rgba(0,130,252,0.15); border-color: #0082fc; color: #0082fc; }
+.filter-pill.chain-bsc.active { background: rgba(240,185,11,0.15); border-color: #f0b90b; color: #f0b90b; }
+
+/* ── Accumulating card accent (cyan top border) ───────────────── */
+.accum-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--accent-cyan);
+    opacity: 1;
+}
+
+/* ── Memecoin signal block (card) ─────────────────────────────── */
+.meme-signal-block {
+    background: rgba(79,195,247,0.05);
+    border: 1px solid rgba(79,195,247,0.15);
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.meme-signal-label {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.meme-signal-levels {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 12px;
+}
+
+/* ── Trading terminal link buttons ────────────────────────────── */
+.terminal-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 9px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: var(--transition);
+    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.04);
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.terminal-link:hover { opacity: 0.85; transform: translateY(-1px); }
+.terminal-link.axiom   { background: rgba(255,95,31,0.12); border-color: rgba(255,95,31,0.3); color: #ff5f1f; }
+.terminal-link.gmgn    { background: rgba(38,222,129,0.1); border-color: rgba(38,222,129,0.25); color: var(--accent-green); }
+.terminal-link.photon  { background: rgba(167,139,250,0.1); border-color: rgba(167,139,250,0.25); color: var(--accent-purple); }
+.terminal-link.bubble  { background: rgba(79,195,247,0.1); border-color: rgba(79,195,247,0.2); color: var(--accent-cyan); }
+.terminal-link.explorer { background: rgba(247,183,49,0.08); border-color: rgba(247,183,49,0.2); color: var(--accent-amber); }
+.terminal-link.kolscan { background: rgba(255,255,255,0.05); border-color: var(--border-subtle); color: var(--text-secondary); }
+
+/* ── Drawer meme signal block ─────────────────────────────────── */
+.drawer-meme-signal {
+    background: rgba(79,195,247,0.06);
+    border: 1px solid rgba(79,195,247,0.2);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+}
+.dms-header {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.dms-rr {
+    font-size: 11px;
+    background: rgba(38,222,129,0.12);
+    border: 1px solid rgba(38,222,129,0.25);
+    color: var(--accent-green);
+    padding: 2px 7px;
+    border-radius: 4px;
+    margin-left: auto;
+}
+.dms-levels {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+.dms-level { display: flex; flex-direction: column; gap: 3px; }
+.dms-lbl { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.dms-val { font-size: 13px; font-weight: 700; font-family: var(--font-mono); }
+
+/* ── Wallet explorer link ──────────────────────────────────────── */
+.explorer-wallet-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-subtle);
+    text-decoration: none;
+    font-size: 13px;
+    transition: var(--transition);
+}
+.explorer-wallet-link:hover { background: rgba(79,195,247,0.1); border-color: var(--accent-cyan); }

@@ -117,6 +117,41 @@ const Scanner = (() => {
         return { label: '1.5x+', tier: 'gray' };
     }
 
+    // ── Memecoin Signal Generator ─────────────────────────
+    // Signals only during accumulation phase, NOT at peak pump.
+    // Strategy: enter quietly, TP at 2-3x, ride remainder risk-free.
+    function generateMemeSignal(pair, score) {
+        if (!pair || score < 60) return null;
+        const price = parseFloat(pair.priceUSD || 0);
+        if (!price || price <= 0) return null;
+
+        const ch5m = pair.priceChange?.m5 || 0;
+        const ch1h = pair.priceChange?.h1 || 0;
+        const isBreakout = pair.isBreakout;
+        const liquidity = pair.liquidity || 0;
+
+        // Don't signal at huge pumps — wait for pullback/accumulation
+        if (ch5m > 20 || ch1h > 50) return null; // already pumped, high risk
+
+        const volatility = Math.max(Math.abs(ch5m), Math.abs(ch1h)) / 100;
+        const stopBuffer = Math.max(0.08, Math.min(0.25, volatility * 1.5)); // 8%-25% SL
+        const tp1Mult = isBreakout ? 2.0 : 2.5; // TP at 2-2.5x
+        const tp2Mult = isBreakout ? 3.0 : 4.0; // Extended TP at 3-4x
+
+        const entry = price;
+        const stopLoss = price * (1 - stopBuffer);
+        const takeProfit = price * tp1Mult;
+        const tp2 = price * tp2Mult;
+        const rr = parseFloat((tp1Mult - 1) / stopBuffer).toFixed(1);
+
+        const phase = isBreakout ? 'Breakout' : 'Accumulating';
+        const note = isBreakout
+            ? `Volume acceleration detected. Scale out 50% at 2x, ride rest. Exit if whales start selling.`
+            : `Accumulation phase entry \u2014 low risk window. TP1 at 2.5x, TP2 at 4x. Watch big wallet exits.`;
+
+        return { entry, stopLoss, takeProfit, tp2, rr, phase, note };
+    }
+
     // ── Format pair data into a scanner token ─────────────
     function formatToken(pair, boostAmount = 0) {
         const base = pair.baseToken || {};
@@ -129,7 +164,7 @@ const Scanner = (() => {
         const socials = pair.info?.socials || [];
         const websites = pair.info?.websites || [];
 
-        return {
+        const tokenObj = {
             address: base.address || '',
             name: base.name || 'Unknown',
             symbol: base.symbol || '?',
@@ -164,11 +199,21 @@ const Scanner = (() => {
             dexUrl: pair.url || `https://dexscreener.com/${pair.chainId || 'solana'}/${pair.pairAddress || ''}`,
             imageUrl: pair.info?.imageUrl || null
         };
+        // Attach memecoin signal if score >= 60
+        tokenObj.memeSignal = generateMemeSignal(tokenObj, score);
+        return tokenObj;
     }
 
     // ── Mock smart traders (simulated wallet data) ────────
     function generateSmartTraders(token) {
         const names = ['Sigma Wolf', 'Alpha Whale', 'Degen King', 'SOL Sniper', 'Trench Wizard', 'Moon Chaser', 'Gem Hunter'];
+        const wallets = [
+            'CXPLy5g2D6pqT6HMHwGvpxEY8VqaDuDXMW4X4yEq2DfK',
+            'DkHPBkXxLQUqHPM8V6hB6JDJe6XbGqt7GadXV7PRqdSF',
+            'AXfhKei96sh4MBEyKSBdHv8ZLXB3N9RFb5y6SrP7yyKc',
+            'BmVh9rKjN4RQ9MKiJnxBxzBh5R3P7EJYxqtE3kZfB8e6',
+            'E7HpK9QG4CenMa3NdyMxqJ6WbXMLEusmtAKJE4WGbGzp'
+        ];
         const count = Math.floor(Math.random() * 5) + 2;
         return Array.from({ length: count }, (_, i) => {
             const bought = (Math.random() * 50000 + 1000).toFixed(0);
@@ -177,6 +222,7 @@ const Scanner = (() => {
             return {
                 name: names[i % names.length],
                 avatar: names[i % names.length][0],
+                walletAddress: wallets[i % wallets.length],
                 bought: parseFloat(bought),
                 sold: parseFloat(sold),
                 roi,

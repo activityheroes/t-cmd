@@ -1955,3 +1955,134 @@
     text-align: center;
 }
 .signal-age-clock::before { content: '⏱ '; }
+
+/* ── Demo mode badge ───────────────────────────────────────────── */
+.demo-mode-badge {
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--accent-amber);
+    background: rgba(247,183,49,0.08);
+    border: 1px solid rgba(247,183,49,0.2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin-bottom: 16px;
+}
+.demo-mode-badge a { color: var(--accent-cyan); }
+
+/* ── Invite banner ─────────────────────────────────────────────── */
+.invite-banner {
+    background: linear-gradient(135deg, rgba(38,222,129,0.1), rgba(79,195,247,0.08));
+    border: 1px solid rgba(38,222,129,0.25);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--accent-green);
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+/* ── Admin user table ──────────────────────────────────────────── */
+.admin-section { }
+.admin-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.admin-user-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.admin-user-table th {
+    text-align: left;
+    color: var(--text-muted);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.admin-user-table td {
+    padding: 8px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    vertical-align: middle;
+}
+.admin-row-pending td { background: rgba(247,183,49,0.04); }
+
+/* Role / Status badges */
+.role-badge, .status-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: capitalize;
+}
+.role-admin  { background: rgba(167,139,250,0.15); color: var(--accent-purple); border: 1px solid rgba(167,139,250,0.3); }
+.role-user   { background: rgba(79,195,247,0.1); color: var(--accent-cyan); border: 1px solid rgba(79,195,247,0.2); }
+.status-active   { background: rgba(38,222,129,0.1); color: var(--accent-green); border: 1px solid rgba(38,222,129,0.25); }
+.status-pending  { background: rgba(247,183,49,0.1); color: var(--accent-amber); border: 1px solid rgba(247,183,49,0.25); }
+.status-disabled { background: rgba(252,92,101,0.1); color: var(--accent-red); border: 1px solid rgba(252,92,101,0.25); }
+
+/* Feature checkboxes */
+.feat-toggle { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; font-size: 14px; }
+.feat-toggle input { cursor: pointer; }
+
+/* Admin action buttons */
+.admin-btn {
+    padding: 4px 10px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.05);
+    color: var(--text-secondary);
+    transition: var(--transition);
+}
+.admin-btn:hover { opacity: 0.8; }
+.admin-btn.approve { background: rgba(38,222,129,0.12); border-color: rgba(38,222,129,0.3); color: var(--accent-green); }
+.admin-btn.disable { background: rgba(252,92,101,0.08); border-color: rgba(252,92,101,0.2); color: var(--accent-red); }
+
+/* ── Invite generator section ─────────────────────────────────── */
+.invite-gen-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+.invite-gen-row .auth-input { flex: 1; min-width: 140px; }
+.invite-gen-btn { white-space: nowrap; }
+.invite-output-box {
+    background: rgba(79,195,247,0.05);
+    border: 1px solid rgba(79,195,247,0.2);
+    border-radius: 7px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+}
+.invite-output-label { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
+.invite-output-url {
+    font-size: 11.5px;
+    font-family: var(--font-mono);
+    color: var(--accent-cyan);
+    word-break: break-all;
+    cursor: pointer;
+    background: rgba(255,255,255,0.03);
+    padding: 6px 10px;
+    border-radius: 5px;
+    border: 1px solid var(--border-subtle);
+}
+.invite-output-url:hover { background: rgba(79,195,247,0.08); }
+.open-invite-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-wrap: wrap;
+}

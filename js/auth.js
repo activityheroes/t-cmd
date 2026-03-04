@@ -1,393 +1,519 @@
 /* ============================================================
-   T-CMD — Authentication System (Mock Passkey / localStorage)
+   T-CMD — Authentication System
+   Backend: Supabase (with localStorage fallback if not configured)
    ============================================================ */
 
 const AuthManager = (() => {
-  const STORAGE_KEY = 'tcmd_auth';
-  const USERS_KEY = 'tcmd_users';
+  const STORAGE_KEY = 'tcmd_auth'; // session only — always localStorage
 
-  // ── Default admin + demo user ──────────────────────────
-  const DEFAULT_USERS = [
-    {
-      id: 'admin-001',
-      email: 'admin@t-cmd.app',
-      name: 'Admin',
-      password: 'admin123',
-      role: 'admin',
-      status: 'active',
-      features: { coinSignals: true, memeScanner: true, tradingLog: true },
-      joined: '2025-01-01T00:00:00Z'
-    },
-    {
-      id: 'user-001',
-      email: 'demo@t-cmd.app',
-      name: 'Demo Trader',
-      password: 'demo123',
-      role: 'user',
-      status: 'active',
-      features: { coinSignals: true, memeScanner: true, tradingLog: true },
-      joined: '2025-02-01T00:00:00Z'
-    }
-  ];
-
-  // ── Init users ─────────────────────────────────────────
-  function initUsers() {
-    if (!localStorage.getItem(USERS_KEY)) {
-      localStorage.setItem(USERS_KEY, JSON.stringify(DEFAULT_USERS));
-    }
-  }
-
-  function getUsers() {
-    initUsers();
-    return JSON.parse(localStorage.getItem(USERS_KEY)) || [];
-  }
-
-  function saveUsers(users) {
-    localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  }
-
-  // ── Session ────────────────────────────────────────────
+  // ── Session (always local) ────────────────────────────────
   function getSession() {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { return null; }
   }
-
   function setSession(user) {
-    const session = { userId: user.id, role: user.role, name: user.name, email: user.email, features: user.features };
+    const session = {
+      userId: user.id,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+      features: user.features || { coinSignals: true, memeScanner: true, tradingLog: true }
+    };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
   }
+  function clearSession() { localStorage.removeItem(STORAGE_KEY); }
 
-  function clearSession() {
-    localStorage.removeItem(STORAGE_KEY);
-  }
-
-  // ── Public API ─────────────────────────────────────────
+  // ── Public (sync — safe for UI guards) ───────────────────
   return {
-    init() { initUsers(); },
+    init() { /* no-op, SupabaseDB self-initialises */ },
 
     isLoggedIn() { return !!getSession(); },
-
     getUser() { return getSession(); },
-
-    isAdmin() { const s = getSession(); return s && s.role === 'admin'; },
-
-    hasFeature(feature) {
-      const s = getSession();
-      return s && s.features && s.features[feature];
-    },
-
-    login(email, password) {
-      const users = getUsers();
-      const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
-      if (!user) return { success: false, error: 'Invalid email or password.' };
-      if (user.status === 'pending') return { success: false, error: 'pending', msg: 'Your account is awaiting admin approval.' };
-      if (user.status === 'disabled') return { success: false, error: 'Account is suspended. Contact admin.' };
-      setSession(user);
-      return { success: true, user };
-    },
-
-    loginWithPasskey(email) {
-      // Simulate passkey — just find by email, mark as passkey login
-      const users = getUsers();
-      const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
-      if (!user) return { success: false, error: 'No account found for this email.' };
-      if (user.status === 'pending') return { success: false, error: 'pending' };
-      setSession(user);
-      return { success: true, user };
-    },
-
+    isAdmin() { const s = getSession(); return s?.role === 'admin'; },
+    hasFeature(f) { const s = getSession(); return !!(s?.features?.[f]); },
     logout() { clearSession(); },
 
-    register(name, email) {
-      const users = getUsers();
-      if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
-        return { success: false, error: 'Email already registered.' };
+    // ── Async auth ─────────────────────────────────────────
+    async login(email, password) {
+      try {
+        const user = await SupabaseDB.getUserByEmail(email);
+        if (!user) return { success: false, error: 'Invalid email or password.' };
+        if (user.password !== password) return { success: false, error: 'Invalid email or password.' };
+        if (user.status === 'pending') return { success: false, error: 'pending', msg: 'Your account is awaiting admin approval.' };
+        if (user.status === 'disabled') return { success: false, error: 'Account is suspended. Contact admin.' };
+        setSession(user);
+        return { success: true, user };
+      } catch (e) {
+        console.error('Login error:', e);
+        return { success: false, error: 'Connection error. Please try again.' };
       }
-      const newUser = {
-        id: 'user-' + Date.now(),
-        email, name,
-        password: 'passkey',
-        role: 'user',
-        status: 'pending',
-        features: { coinSignals: false, memeScanner: false, tradingLog: false },
-        joined: new Date().toISOString()
-      };
-      users.push(newUser);
-      saveUsers(users);
-      return { success: true, user: newUser };
     },
 
-    // ── Admin functions ──────────────────────────────────
-
-    getAllUsers() { return getUsers(); },
-
-    approveUser(userId) {
-      const users = getUsers();
-      const idx = users.findIndex(u => u.id === userId);
-      if (idx === -1) return false;
-      users[idx].status = 'active';
-      users[idx].features = { coinSignals: true, memeScanner: true, tradingLog: true };
-      saveUsers(users);
-      return true;
+    async loginWithPasskey(email) {
+      try {
+        const user = await SupabaseDB.getUserByEmail(email);
+        if (!user) return { success: false, error: 'No account found for this email.' };
+        if (user.status === 'pending') return { success: false, error: 'pending' };
+        setSession(user);
+        return { success: true, user };
+      } catch (e) {
+        return { success: false, error: 'Connection error.' };
+      }
     },
 
-    disableUser(userId) {
-      const users = getUsers();
-      const idx = users.findIndex(u => u.id === userId);
-      if (idx === -1) return false;
-      users[idx].status = 'disabled';
-      saveUsers(users);
-      return true;
+    async register(name, email) {
+      try {
+        const user = await SupabaseDB.createUser({
+          email, name, password: 'passkey',
+          role: 'user', status: 'pending'
+        });
+        return { success: true, user };
+      } catch (e) {
+        return { success: false, error: e.message || 'Registration failed.' };
+      }
     },
 
-    deleteUser(userId) {
-      let users = getUsers();
-      users = users.filter(u => u.id !== userId);
-      saveUsers(users);
-    },
+    // ── Admin helpers (async) ──────────────────────────────
+    async getAllUsers() { return SupabaseDB.getAllUsers(); },
+    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true } }); },
+    async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
+    async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
 
-    inviteUser(email, name) {
-      return this.register(name || email.split('@')[0], email);
-    },
-
-    toggleFeature(userId, feature) {
-      const users = getUsers();
-      const idx = users.findIndex(u => u.id === userId);
-      if (idx === -1) return;
-      users[idx].features[feature] = !users[idx].features[feature];
-      saveUsers(users);
-      // Update session if self
+    // ── Invite helpers ────────────────────────────────────
+    async generateInvite(email = null, name = null) {
       const session = getSession();
-      if (session && session.userId === userId) {
-        session.features[feature] = users[idx].features[feature];
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+      return SupabaseDB.createInvite({ email, name, createdBy: session?.userId || null });
+    },
+    async getAllInvites() { return SupabaseDB.getAllInvites(); },
+
+    // Register via invite token (bypasses pending — creates active account)
+    async registerViaInvite(token, name, email, password) {
+      try {
+        const invite = await SupabaseDB.getInvite(token);
+        if (!invite) return { success: false, error: 'Invalid invite link.' };
+        if (invite.used_at) return { success: false, error: 'This invite has already been used.' };
+        if (new Date(invite.expires_at) < new Date()) return { success: false, error: 'This invite link has expired.' };
+
+        const user = await SupabaseDB.createUser({
+          email, name, password,
+          role: 'user', status: 'active',
+          features: { coinSignals: true, memeScanner: true, tradingLog: true }
+        });
+        await SupabaseDB.markInviteUsed(token);
+        return { success: true, user };
+      } catch (e) {
+        return { success: false, error: e.message || 'Registration failed.' };
       }
     }
   };
 })();
 
-/* ── UI: Show Auth Page ─────────────────────────────────── */
-function showAuthPage(view = 'login') {
-  document.getElementById('app').style.display = 'none';
+// ── Auth UI ───────────────────────────────────────────────────
+function renderAuthPage() {
   const page = document.getElementById('auth-page');
-  page.style.display = 'flex';
-  renderAuthView(view);
+  if (!page) return;
+
+  // ── Check for ?invite=TOKEN in URL ────────────────────────
+  const params = new URLSearchParams(window.location.search);
+  const inviteToken = params.get('invite');
+  if (inviteToken) { renderInvitePage(page, inviteToken); return; }
+
+  page.innerHTML = buildLoginForm();
+  attachLoginHandlers();
 }
 
-function hideAuthPage() {
-  document.getElementById('auth-page').style.display = 'none';
-  document.getElementById('app').style.display = 'flex';
+function buildLoginForm() {
+  const modeBadge = SUPABASE_READY
+    ? ''
+    : `<div class="demo-mode-badge">⚠️ Demo Mode (localStorage) — <a href="js/config.js" target="_blank">Configure Supabase</a></div>`;
+  return `
+    <div class="auth-container">
+        <div class="auth-logo">
+            <div class="auth-logo-icon">⚡</div>
+            <div class="auth-logo-name">T-CMD</div>
+            <div class="auth-logo-sub">Trade Command</div>
+        </div>
+        ${modeBadge}
+        <div class="auth-card" id="auth-card">
+            <div class="auth-tabs">
+                <button class="auth-tab active" id="tab-login" onclick="switchAuthTab('login')">Sign In</button>
+                <button class="auth-tab" id="tab-register" onclick="switchAuthTab('register')">Request Access</button>
+            </div>
+
+            <!-- Login form -->
+            <div id="auth-login-form">
+                <div class="auth-field">
+                    <label class="auth-label">Email</label>
+                    <input class="auth-input" type="email" id="auth-email" placeholder="you@example.com" autocomplete="email">
+                </div>
+                <div class="auth-field">
+                    <label class="auth-label">Password</label>
+                    <input class="auth-input" type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password">
+                </div>
+                <div class="auth-error" id="auth-error" style="display:none;"></div>
+                <button class="btn btn-primary auth-btn" id="auth-submit" onclick="handleLogin()">
+                    <span id="auth-btn-text">Sign In</span>
+                </button>
+                <div class="auth-divider"><span>or</span></div>
+                <button class="btn btn-outline auth-btn" onclick="handlePasskeyLogin()" style="gap:8px;">
+                    🔑 Sign In with Passkey
+                </button>
+            </div>
+
+            <!-- Register form -->
+            <div id="auth-register-form" style="display:none;">
+                <div class="auth-field">
+                    <label class="auth-label">Full Name</label>
+                    <input class="auth-input" type="text" id="reg-name" placeholder="Your name">
+                </div>
+                <div class="auth-field">
+                    <label class="auth-label">Email</label>
+                    <input class="auth-input" type="email" id="reg-email" placeholder="you@example.com">
+                </div>
+                <div class="auth-error" id="reg-error" style="display:none;"></div>
+                <button class="btn btn-primary auth-btn" onclick="handleRegister()">
+                    <span>Request Access</span>
+                </button>
+                <p class="auth-hint">Your request will be reviewed by an admin before you can log in.</p>
+            </div>
+        </div>
+    </div>`;
 }
 
-function renderAuthView(view) {
-  const page = document.getElementById('auth-page');
-
-  if (view === 'login') {
-    page.innerHTML = `
-      <div class="auth-container">
+async function renderInvitePage(page, token) {
+  // Show loading while we validate the token
+  page.innerHTML = `
+    <div class="auth-container">
         <div class="auth-logo">
-          <div class="auth-logo-icon">T</div>
-          <div>
-            <div class="auth-logo-text">T-CMD</div>
-            <div class="auth-logo-sub">Trade Command</div>
-          </div>
+            <div class="auth-logo-icon">⚡</div>
+            <div class="auth-logo-name">T-CMD</div>
         </div>
         <div class="auth-card">
-          <div class="auth-title">Welcome back</div>
-          <div class="auth-subtitle">Sign in to access your trading dashboard and AI signals.</div>
-
-          <div class="form-group">
-            <label class="form-label">Email</label>
-            <input class="form-input" type="email" id="login-email" placeholder="you@example.com" autocomplete="email">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Password</label>
-            <input class="form-input" type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
-          </div>
-          <div id="login-error" style="color:var(--accent-red);font-size:12.5px;margin-bottom:10px;display:none;"></div>
-          <button class="btn btn-primary" style="width:100%;justify-content:center;padding:11px;" id="login-btn">Sign In</button>
-
-          <div class="auth-divider">or</div>
-
-          <button class="passkey-btn" id="passkey-login-btn">
-            <span>🔐</span> Sign in with Passkey
-          </button>
-
-          <div class="auth-switch">
-            Don't have access? <span class="auth-switch-link" id="go-register">Request invite</span>
-          </div>
-          <a class="admin-login-link" id="go-admin-login">Admin access →</a>
+            <div style="text-align:center;padding:20px;">
+                <div style="font-size:28px;margin-bottom:12px;">🔗</div>
+                <div style="color:var(--text-secondary);">Validating invite link...</div>
+            </div>
         </div>
-      </div>`;
+    </div>`;
 
-    page.querySelector('#login-btn').addEventListener('click', () => doLogin());
-    page.querySelector('#login-email').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-    page.querySelector('#login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-    page.querySelector('#go-register').addEventListener('click', () => renderAuthView('register'));
-    page.querySelector('#go-admin-login').addEventListener('click', () => renderAuthView('admin-login'));
-    page.querySelector('#passkey-login-btn').addEventListener('click', () => doPasskeyLogin());
-    setTimeout(() => { page.querySelector('#login-email').focus(); }, 100);
+  let invite = null;
+  let inviteError = null;
+  try {
+    invite = await SupabaseDB.getInvite(token);
+    if (!invite) inviteError = 'This invite link is invalid.';
+    else if (invite.used_at) inviteError = 'This invite link has already been used.';
+    else if (new Date(invite.expires_at) < new Date()) inviteError = 'This invite link has expired.';
+  } catch (e) {
+    inviteError = 'Could not validate invite. Check your connection.';
+  }
 
-  } else if (view === 'register') {
+  if (inviteError) {
     page.innerHTML = `
-      <div class="auth-container">
+        <div class="auth-container">
+            <div class="auth-logo"><div class="auth-logo-icon">⚡</div><div class="auth-logo-name">T-CMD</div></div>
+            <div class="auth-card" style="text-align:center;">
+                <div style="font-size:36px;margin-bottom:12px;">⛔</div>
+                <h3 style="color:var(--accent-red);margin:0 0 8px;">${inviteError}</h3>
+                <p style="color:var(--text-muted);font-size:13px;">Contact the person who invited you for a new link.</p>
+                <a href="${window.location.pathname}" class="btn btn-outline" style="margin-top:16px;display:inline-block;">← Back to Login</a>
+            </div>
+        </div>`;
+    return;
+  }
+
+  const expires = new Date(invite.expires_at);
+  const daysLeft = Math.ceil((expires - Date.now()) / 86400000);
+
+  page.innerHTML = `
+    <div class="auth-container">
         <div class="auth-logo">
-          <div class="auth-logo-icon">T</div>
-          <div>
-            <div class="auth-logo-text">T-CMD</div>
-            <div class="auth-logo-sub">Trade Command</div>
-          </div>
+            <div class="auth-logo-icon">⚡</div>
+            <div class="auth-logo-name">T-CMD</div>
+            <div class="auth-logo-sub">You've been invited!</div>
         </div>
         <div class="auth-card">
-          <div class="auth-title">Request Access</div>
-          <div class="auth-subtitle">Your account will require admin approval before you can log in.</div>
-          <div class="form-group">
-            <label class="form-label">Name</label>
-            <input class="form-input" type="text" id="reg-name" placeholder="Your name">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Email</label>
-            <input class="form-input" type="email" id="reg-email" placeholder="you@example.com">
-          </div>
-          <div id="reg-error" style="color:var(--accent-red);font-size:12.5px;margin-bottom:10px;display:none;"></div>
-          <button class="btn btn-primary" style="width:100%;justify-content:center;padding:11px;" id="reg-btn">Submit Request</button>
-          <div class="auth-switch">Already have access? <span class="auth-switch-link" id="back-login">Sign in</span></div>
+            <div class="invite-banner">
+                🎉 You have a <strong>T-CMD invite</strong> — expires in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}
+            </div>
+            <div class="auth-field">
+                <label class="auth-label">Full Name</label>
+                <input class="auth-input" type="text" id="inv-name" placeholder="Your name" value="${invite.name || ''}">
+            </div>
+            <div class="auth-field">
+                <label class="auth-label">Email</label>
+                <input class="auth-input" type="email" id="inv-email" placeholder="you@example.com" value="${invite.email || ''}">
+            </div>
+            <div class="auth-field">
+                <label class="auth-label">Create Password</label>
+                <input class="auth-input" type="password" id="inv-password" placeholder="Choose a password (min 6 chars)" autocomplete="new-password">
+            </div>
+            <div class="auth-error" id="inv-error" style="display:none;"></div>
+            <button class="btn btn-primary auth-btn" id="inv-submit" onclick="handleInviteRegister('${token}')">
+                <span id="inv-btn-text">Create My Account</span>
+            </button>
         </div>
-      </div>`;
-    page.querySelector('#reg-btn').addEventListener('click', () => doRegister());
-    page.querySelector('#back-login').addEventListener('click', () => renderAuthView('login'));
+    </div>`;
+}
 
-  } else if (view === 'pending') {
-    page.innerHTML = `
-      <div class="auth-container">
-        <div class="auth-logo">
-          <div class="auth-logo-icon">T</div>
-          <div>
-            <div class="auth-logo-text">T-CMD</div>
-            <div class="auth-logo-sub">Trade Command</div>
-          </div>
+// ── Auth event handlers ───────────────────────────────────────
+window.switchAuthTab = function (tab) {
+  document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+  document.getElementById('tab-register').classList.toggle('active', tab === 'register');
+  document.getElementById('auth-login-form').style.display = tab === 'login' ? '' : 'none';
+  document.getElementById('auth-register-form').style.display = tab === 'register' ? '' : 'none';
+};
+
+function attachLoginHandlers() {
+  ['auth-email', 'auth-password'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') handleLogin(); });
+  });
+}
+
+window.handleLogin = async function () {
+  const email = document.getElementById('auth-email')?.value.trim();
+  const password = document.getElementById('auth-password')?.value;
+  const errorEl = document.getElementById('auth-error');
+  const btnText = document.getElementById('auth-btn-text');
+  if (!email || !password) { showAuthError(errorEl, 'Please enter email and password.'); return; }
+
+  btnText.textContent = 'Signing in…';
+  document.getElementById('auth-submit').disabled = true;
+  const result = await AuthManager.login(email, password);
+  btnText.textContent = 'Sign In';
+  document.getElementById('auth-submit').disabled = false;
+
+  if (result.success) {
+    window.location.href = window.location.pathname; // clear params, reload
+  } else {
+    showAuthError(errorEl, result.error === 'pending'
+      ? '⏳ Your account is awaiting admin approval.'
+      : result.error);
+  }
+};
+
+window.handlePasskeyLogin = async function () {
+  const email = document.getElementById('auth-email')?.value.trim();
+  if (!email) { showAuthError(document.getElementById('auth-error'), 'Enter your email first.'); return; }
+  const result = await AuthManager.loginWithPasskey(email);
+  if (result.success) window.location.href = window.location.pathname;
+  else showAuthError(document.getElementById('auth-error'), result.error);
+};
+
+window.handleRegister = async function () {
+  const name = document.getElementById('reg-name')?.value.trim();
+  const email = document.getElementById('reg-email')?.value.trim();
+  const errorEl = document.getElementById('reg-error');
+  if (!name || !email) { showAuthError(errorEl, 'Please fill in all fields.'); return; }
+
+  const result = await AuthManager.register(name, email);
+  if (result.success) {
+    document.getElementById('auth-register-form').innerHTML = `
+            <div style="text-align:center;padding:20px 0;">
+                <div style="font-size:36px;">✅</div>
+                <h3 style="color:var(--accent-green);margin:12px 0 6px;">Request Submitted!</h3>
+                <p style="color:var(--text-muted);font-size:13px;">An admin will review your request and activate your account. Come back soon!</p>
+            </div>`;
+  } else {
+    showAuthError(errorEl, result.error);
+  }
+};
+
+window.handleInviteRegister = async function (token) {
+  const name = document.getElementById('inv-name')?.value.trim();
+  const email = document.getElementById('inv-email')?.value.trim();
+  const password = document.getElementById('inv-password')?.value;
+  const errorEl = document.getElementById('inv-error');
+  const btnText = document.getElementById('inv-btn-text');
+  const btn = document.getElementById('inv-submit');
+
+  if (!name || !email || !password) { showAuthError(errorEl, 'Please fill in all fields.'); return; }
+  if (password.length < 6) { showAuthError(errorEl, 'Password must be at least 6 characters.'); return; }
+
+  btnText.textContent = 'Creating account…';
+  btn.disabled = true;
+  const result = await AuthManager.registerViaInvite(token, name, email, password);
+  btn.disabled = false;
+  btnText.textContent = 'Create My Account';
+
+  if (result.success) {
+    document.querySelector('.auth-card').innerHTML = `
+            <div style="text-align:center;padding:24px 0;">
+                <div style="font-size:40px;">🎉</div>
+                <h3 style="color:var(--accent-green);margin:12px 0 6px;">Welcome to T-CMD!</h3>
+                <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">Your account is ready. Sign in to start trading.</p>
+                <a href="${window.location.pathname}" class="btn btn-primary" style="display:inline-block;">Sign In Now →</a>
+            </div>`;
+  } else {
+    showAuthError(errorEl, result.error);
+  }
+};
+
+function showAuthError(el, msg) {
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+// ── Admin panel renderer ──────────────────────────────────────
+async function renderAdminPanel() {
+  const panel = document.getElementById('admin-panel-content');
+  if (!panel) return;
+  panel.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center;">Loading users...</div>`;
+
+  try {
+    const [users, invites] = await Promise.all([
+      AuthManager.getAllUsers(),
+      AuthManager.getAllInvites()
+    ]);
+    const currentUser = AuthManager.getUser();
+
+    const openInvites = invites.filter(i => !i.used_at && new Date(i.expires_at) > new Date());
+
+    panel.innerHTML = `
+        <div class="admin-section">
+            <div class="admin-section-title">👥 Users (${users.length})</div>
+            <table class="admin-user-table">
+                <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Features</th><th>Actions</th></tr></thead>
+                <tbody>${users.map(u => `
+                <tr class="${u.status === 'pending' ? 'admin-row-pending' : ''}">
+                    <td><strong>${u.name}</strong></td>
+                    <td style="font-size:11.5px;color:var(--text-muted);">${u.email}</td>
+                    <td><span class="role-badge role-${u.role}">${u.role}</span></td>
+                    <td><span class="status-badge status-${u.status}">${u.status}</span></td>
+                    <td>
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                            ${['coinSignals', 'memeScanner', 'tradingLog'].map(f => `
+                            <label class="feat-toggle" title="${f}">
+                                <input type="checkbox" ${u.features?.[f] ? 'checked' : ''} onchange="toggleFeature('${u.id}','${f}',this.checked)" ${u.id === currentUser?.userId ? 'disabled' : ''}>
+                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : '📋'}</span>
+                            </label>`).join('')}
+                        </div>
+                    </td>
+                    <td>
+                        <div style="display:flex;gap:4px;">
+                            ${u.status !== 'active' && u.id !== currentUser?.userId ? `<button class="admin-btn approve" onclick="adminApprove('${u.id}')">✓ Approve</button>` : ''}
+                            ${u.status !== 'disabled' && u.id !== currentUser?.userId ? `<button class="admin-btn disable" onclick="adminDisable('${u.id}')">⊘ Disable</button>` : ''}
+                            ${u.id === currentUser?.userId ? `<span style="color:var(--text-muted);font-size:11px;">You</span>` : ''}
+                        </div>
+                    </td>
+                </tr>`).join('')}
+                </tbody>
+            </table>
         </div>
-        <div class="auth-card auth-pending">
-          <div class="auth-pending-icon">⏳</div>
-          <h3>Access Pending</h3>
-          <p>Your request has been submitted. An admin will review and approve your account. You'll receive notification once approved.</p>
-          <button class="btn btn-outline" style="margin-top:20px;" id="back-login-btn">Back to Sign In</button>
+
+        <div class="admin-section" style="margin-top:20px;">
+            <div class="admin-section-title">🔗 Invite Links</div>
+            <div class="invite-gen-row">
+                <input class="auth-input" type="email" id="invite-email" placeholder="Pre-fill email (optional)">
+                <input class="auth-input" type="text" id="invite-name" placeholder="Pre-fill name (optional)">
+                <button class="btn btn-primary invite-gen-btn" onclick="generateInviteLink()">🔗 Generate Invite</button>
+            </div>
+            <div id="invite-output" style="display:none;" class="invite-output-box">
+                <div class="invite-output-label">📋 Invite link (valid 7 days) — click to copy:</div>
+                <div class="invite-output-url" id="invite-url-display" onclick="copyInviteUrl()" title="Click to copy"></div>
+                <div style="font-size:11px;color:var(--accent-green);margin-top:4px;" id="invite-copy-msg" style="display:none;">Copied!</div>
+            </div>
+            ${openInvites.length > 0 ? `
+            <div style="margin-top:14px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Active open invites (${openInvites.length})</div>
+                ${openInvites.map(i => `
+                <div class="open-invite-row">
+                    <span class="num-cyan" style="font-size:11px;font-family:var(--font-mono);">${i.token}</span>
+                    ${i.email ? `<span style="font-size:11px;color:var(--text-muted);">${i.email}</span>` : ''}
+                    <span style="font-size:11px;color:var(--text-muted);">Expires ${new Date(i.expires_at).toLocaleDateString()}</span>
+                    <button class="admin-btn" style="font-size:10px;padding:2px 8px;" onclick="copyUrl('${TCMD_CONFIG.APP_URL}?invite=${i.token}')">Copy</button>
+                </div>`).join('')}
+            </div>` : ''}
         </div>
-      </div>`;
-    page.querySelector('#back-login-btn').addEventListener('click', () => renderAuthView('login'));
-  } else if (view === 'admin-login') {
-    page.innerHTML = `
-      <div class="auth-container">
-        <div class="auth-logo">
-          <div class="auth-logo-icon">T</div>
-          <div>
-            <div class="auth-logo-text">T-CMD</div>
-            <div class="auth-logo-sub">Admin Access</div>
-          </div>
-        </div>
-        <div class="auth-card">
-          <div class="auth-title">Admin Sign In</div>
-          <div class="auth-subtitle">Enter your administrator credentials to continue.</div>
-          <div class="form-group">
-            <label class="form-label">Email</label>
-            <input class="form-input" type="email" id="adm-email" value="admin@t-cmd.app" autocomplete="email">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Password</label>
-            <input class="form-input" type="password" id="adm-password" value="admin123" autocomplete="current-password">
-          </div>
-          <div id="adm-error" style="color:var(--accent-red);font-size:12.5px;margin-bottom:10px;display:none;"></div>
-          <button class="btn btn-primary" style="width:100%;justify-content:center;padding:11px;" id="adm-btn">Sign In as Admin</button>
-          <div class="auth-switch"><span class="auth-switch-link" id="back-to-login">← Back to login</span></div>
-        </div>
-      </div>`;
-    page.querySelector('#adm-btn').addEventListener('click', () => {
-      const email = page.querySelector('#adm-email').value;
-      const pass = page.querySelector('#adm-password').value;
-      const result = AuthManager.login(email, pass);
-      if (result.success) { hideAuthPage(); App.init(); }
-      else { const el = page.querySelector('#adm-error'); el.textContent = result.error || result.msg; el.style.display = 'block'; }
-    });
-    page.querySelector('#back-to-login').addEventListener('click', () => renderAuthView('login'));
+
+        <div class="admin-section" style="margin-top:20px;">
+            <div class="admin-section-title">⚙️ System</div>
+            <div style="font-size:12px;color:var(--text-muted);">
+                Mode: <strong style="color:${SUPABASE_READY ? 'var(--accent-green)' : 'var(--accent-amber)'}">${SUPABASE_READY ? '🟢 Supabase (live)' : '🟡 localStorage (demo)'}</strong>
+                ${!SUPABASE_READY ? ' — <a href="js/config.js" target="_blank" style="color:var(--accent-cyan);">Configure Supabase →</a>' : ''}
+            </div>
+        </div>`;
+  } catch (e) {
+    panel.innerHTML = `<div style="color:var(--accent-red);padding:20px;">Failed to load users: ${e.message}</div>`;
   }
 }
 
-function doLogin() {
-  const page = document.getElementById('auth-page');
-  const email = page.querySelector('#login-email').value.trim();
-  const password = page.querySelector('#login-password').value;
-  const errEl = page.querySelector('#login-error');
-  errEl.style.display = 'none';
-  if (!email) { errEl.textContent = 'Please enter your email.'; errEl.style.display = 'block'; return; }
-  const result = AuthManager.login(email, password);
-  if (result.success) { hideAuthPage(); App.init(); }
-  else if (result.error === 'pending') { renderAuthView('pending'); }
-  else { errEl.textContent = result.error || result.msg; errEl.style.display = 'block'; }
+window.adminApprove = async function (id) {
+  await AuthManager.approveUser(id);
+  renderAdminPanel();
+};
+window.adminDisable = async function (id) {
+  await AuthManager.disableUser(id);
+  renderAdminPanel();
+};
+window.toggleFeature = async function (id, feature, enabled) {
+  const users = await AuthManager.getAllUsers();
+  const user = users.find(u => u.id === id);
+  if (!user) return;
+  const features = { ...user.features, [feature]: enabled };
+  await AuthManager.updateFeatures(id, features);
+};
+
+window.generateInviteLink = async function () {
+  const email = document.getElementById('invite-email')?.value.trim() || null;
+  const name = document.getElementById('invite-name')?.value.trim() || null;
+  const inv = await AuthManager.generateInvite(email, name);
+  const fullUrl = `${TCMD_CONFIG.APP_URL}?invite=${inv.token}`;
+  const output = document.getElementById('invite-output');
+  const display = document.getElementById('invite-url-display');
+  if (output && display) {
+    output.style.display = 'block';
+    display.textContent = fullUrl;
+    display.dataset.url = fullUrl;
+    navigator.clipboard.writeText(fullUrl).catch(() => { });
+    const msg = document.getElementById('invite-copy-msg');
+    if (msg) { msg.style.display = 'block'; setTimeout(() => msg.style.display = 'none', 2000); }
+  }
+};
+
+window.copyInviteUrl = function () {
+  const url = document.getElementById('invite-url-display')?.dataset.url;
+  if (url) { navigator.clipboard.writeText(url); }
+  const msg = document.getElementById('invite-copy-msg');
+  if (msg) { msg.style.display = 'block'; setTimeout(() => msg.style.display = 'none', 2000); }
+};
+
+window.copyUrl = function (url) {
+  navigator.clipboard.writeText(url).catch(() => { });
+};
+
+// ── Page navigation helpers ───────────────────────────────────
+function showAuthPage() {
+  const app = document.getElementById('app');
+  const authPage = document.getElementById('auth-page');
+  if (app) app.style.display = 'none';
+  if (authPage) {
+    authPage.style.display = 'flex';
+    renderAuthPage();
+  }
 }
 
-function doPasskeyLogin() {
-  const page = document.getElementById('auth-page');
-  const email = page.querySelector('#login-email').value.trim();
-  if (!email) { const errEl = page.querySelector('#login-error'); errEl.textContent = 'Enter your email first, then click Passkey.'; errEl.style.display = 'block'; return; }
-  const result = AuthManager.loginWithPasskey(email);
-  if (result.success) { hideAuthPage(); App.init(); }
-  else if (result.error === 'pending') { renderAuthView('pending'); }
-  else { const errEl = page.querySelector('#login-error'); errEl.textContent = result.error; errEl.style.display = 'block'; }
+function showAppPage() {
+  const app = document.getElementById('app');
+  const authPage = document.getElementById('auth-page');
+  if (app) app.style.display = '';
+  if (authPage) authPage.style.display = 'none';
 }
 
-function doRegister() {
-  const page = document.getElementById('auth-page');
-  const name = page.querySelector('#reg-name').value.trim();
-  const email = page.querySelector('#reg-email').value.trim();
-  const errEl = page.querySelector('#reg-error');
-  errEl.style.display = 'none';
-  if (!name || !email) { errEl.textContent = 'Please fill in all fields.'; errEl.style.display = 'block'; return; }
-  const result = AuthManager.register(name, email);
-  if (result.success) { renderAuthView('pending'); }
-  else { errEl.textContent = result.error; errEl.style.display = 'block'; }
-}
-
-/* ── Admin Panel ─────────────────────────────────────────── */
+// ── Admin panel open/close ────────────────────────────────────
 function openAdminPanel() {
-  if (!AuthManager.isAdmin()) return;
   const overlay = document.getElementById('admin-overlay');
-  overlay.classList.add('open');
+  if (overlay) overlay.classList.add('open');
   renderAdminPanel();
 }
 
 function closeAdminPanel() {
-  document.getElementById('admin-overlay').classList.remove('open');
+  const overlay = document.getElementById('admin-overlay');
+  if (overlay) overlay.classList.remove('open');
 }
 
-function renderAdminPanel() {
-  const users = AuthManager.getAllUsers();
-  const self = AuthManager.getUser();
-  const tbody = document.getElementById('admin-users-tbody');
-
-  tbody.innerHTML = users.map(u => {
-    const isSelf = u.id === self.userId;
-    const statusBadge = `<span class="user-status-badge status-${u.status}">${u.status}</span>`;
-    const actions = isSelf ? '<em style="color:var(--text-muted);font-size:12px;">You</em>' : `
-      ${u.status === 'pending' ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px;" onclick="adminApprove('${u.id}')">✅ Approve</button>` : ''}
-      ${u.status === 'active' ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px;" onclick="adminDisable('${u.id}')">🚫 Disable</button>` : ''}
-      <button class="btn btn-ghost" style="padding:4px 8px;font-size:11px;color:var(--accent-red);" onclick="adminDelete('${u.id}')">🗑</button>
-    `;
-    const features = ['coinSignals', 'memeScanner', 'tradingLog'].map(f => `
-      <div style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary);">
-        <div class="feature-toggle ${u.features[f] ? 'on' : ''}" onclick="adminToggleFeature('${u.id}','${f}')"></div>
-        ${f === 'coinSignals' ? 'Signals' : f === 'memeScanner' ? 'Scanner' : 'Log'}
-      </div>`).join('');
-
-    return `<tr>
-      <td>${u.name}<br><span style="font-size:11px;color:var(--text-muted);">${u.email}</span></td>
-      <td><span class="badge badge-neutral" style="font-size:11px;">${u.role}</span></td>
-      <td>${statusBadge}</td>
-      <td><div style="display:flex;gap:12px;flex-wrap:wrap;">${features}</div></td>
-      <td>${actions}</td>
-    </tr>`;
-  }).join('');
-}
-
-window.adminApprove = (id) => { AuthManager.approveUser(id); renderAdminPanel(); showToast('✅', 'User Approved', 'User can now sign in.', 'success'); };
-window.adminDisable = (id) => { AuthManager.disableUser(id); renderAdminPanel(); showToast('🚫', 'User Disabled', '', 'warning'); };
-window.adminDelete = (id) => { AuthManager.deleteUser(id); renderAdminPanel(); showToast('🗑', 'User Deleted', '', 'warning'); };
-window.adminToggleFeature = (id, feature) => { AuthManager.toggleFeature(id, feature); renderAdminPanel(); };
+window.showAuthPage = showAuthPage;
+window.showAppPage  = showAppPage;
+window.openAdminPanel  = openAdminPanel;
+window.closeAdminPanel = closeAdminPanel;

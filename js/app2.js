@@ -602,16 +602,10 @@ const App = {
 
   setupAdminPanel() {
     const overlay = document.getElementById('admin-overlay');
+    if (!overlay) return;
     overlay.addEventListener('click', e => { if (e.target === overlay) closeAdminPanel(); });
-    document.getElementById('admin-close-btn').addEventListener('click', closeAdminPanel);
-    document.getElementById('admin-invite-btn').addEventListener('click', () => {
-      const email = document.getElementById('invite-email').value.trim();
-      const name = document.getElementById('invite-name').value.trim();
-      if (!email) return;
-      const result = AuthManager.inviteUser(email, name);
-      if (result.success) { showToast('✉️', 'Invite Sent', email, 'success'); renderAdminPanel(); document.getElementById('invite-email').value = ''; document.getElementById('invite-name').value = ''; }
-      else showToast('⚠️', 'Error', result.error, 'warning');
-    });
+    document.getElementById('admin-close-btn')?.addEventListener('click', closeAdminPanel);
+    // The new invite generation is handled inside renderAdminPanel() from auth.js
   },
 
   gateFeatures() {

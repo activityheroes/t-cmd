@@ -60,10 +60,10 @@ const AuthManager = (() => {
       }
     },
 
-    async register(name, email) {
+    async register(name, email, password = 'passkey') {
       try {
         const user = await SupabaseDB.createUser({
-          email, name, password: 'passkey',
+          email, name, password,
           role: 'user', status: 'pending'
         });
         return { success: true, user };
@@ -169,11 +169,15 @@ function buildLoginForm() {
                     <label class="auth-label">Email</label>
                     <input class="auth-input" type="email" id="reg-email" placeholder="you@example.com">
                 </div>
+                <div class="auth-field">
+                    <label class="auth-label">Create Password</label>
+                    <input class="auth-input" type="password" id="reg-password" placeholder="Min 6 characters" autocomplete="new-password">
+                </div>
                 <div class="auth-error" id="reg-error" style="display:none;"></div>
                 <button class="btn btn-primary auth-btn" onclick="handleRegister()">
                     <span>Request Access</span>
                 </button>
-                <p class="auth-hint">Your request will be reviewed by an admin before you can log in.</p>
+                <p class="auth-hint">Your request will be reviewed by an admin. Once approved, sign in with your email and the password above.</p>
             </div>
         </div>
     </div>`;
@@ -310,16 +314,18 @@ window.handlePasskeyLogin = async function () {
 window.handleRegister = async function () {
   const name = document.getElementById('reg-name')?.value.trim();
   const email = document.getElementById('reg-email')?.value.trim();
+  const password = document.getElementById('reg-password')?.value;
   const errorEl = document.getElementById('reg-error');
-  if (!name || !email) { showAuthError(errorEl, 'Please fill in all fields.'); return; }
+  if (!name || !email || !password) { showAuthError(errorEl, 'Please fill in all fields.'); return; }
+  if (password.length < 6) { showAuthError(errorEl, 'Password must be at least 6 characters.'); return; }
 
-  const result = await AuthManager.register(name, email);
+  const result = await AuthManager.register(name, email, password);
   if (result.success) {
     document.getElementById('auth-register-form').innerHTML = `
             <div style="text-align:center;padding:20px 0;">
                 <div style="font-size:36px;">✅</div>
                 <h3 style="color:var(--accent-green);margin:12px 0 6px;">Request Submitted!</h3>
-                <p style="color:var(--text-muted);font-size:13px;">An admin will review your request and activate your account. Come back soon!</p>
+                <p style="color:var(--text-muted);font-size:13px;">An admin will review and activate your account.<br>Once approved, sign in with <strong>${email}</strong> and the password you just set.</p>
             </div>`;
   } else {
     showAuthError(errorEl, result.error);

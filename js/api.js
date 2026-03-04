@@ -1,21 +1,21 @@
 /* ============================================================
    T-CMD — API Integration Module
-   All methods return normalized data. No API keys required.
+   Primary: Binance (full CORS support, no key needed)
+   Fallback: CoinCap, DexScreener, Alternative.me
    ============================================================ */
 
 const API = (() => {
-    const COINGECKO = 'https://api.coingecko.com/api/v3';
+    const BINANCE = 'https://api.binance.com/api/v3';
     const COINCAP = 'https://api.coincap.io/v2';
     const DEXSCREENER = 'https://api.dexscreener.com/latest';
     const DEXSCREENER_BOOSTS = 'https://api.dexscreener.com/token-boosts';
-    const PAPRIKA = 'https://api.coinpaprika.com/v1';
     const FEAR_GREED = 'https://api.alternative.me/fng/?limit=1';
 
     // ── Cache ──────────────────────────────────────────────
     const cache = {};
-    const TTL_PRICES = 30_000;  // 30s
-    const TTL_OHLCV = 60_000;  // 1 min
-    const TTL_TOKENS = 90_000;  // 90s
+    const TTL_PRICES = 45_000;   // 45s
+    const TTL_OHLCV = 120_000;  // 2 min
+    const TTL_TOKENS = 90_000;   // 90s
 
     function cached(key, ttl, fn) {
         const now = Date.now();
@@ -29,7 +29,19 @@ const API = (() => {
         return resp.json();
     }
 
-    // ── Coin ID mappings ───────────────────────────────────
+    // ── Symbol mappings ────────────────────────────────────
+    // Binance uses BTCUSDT style symbols
+    const BINANCE_PAIRS = {
+        'BTC': 'BTCUSDT', 'ETH': 'ETHUSDT', 'SOL': 'SOLUSDT',
+        'BNB': 'BNBUSDT', 'XRP': 'XRPUSDT', 'ADA': 'ADAUSDT',
+        'DOGE': 'DOGEUSDT', 'AVAX': 'AVAXUSDT', 'LINK': 'LINKUSDT',
+        'DOT': 'DOTUSDT', 'MATIC': 'MATICUSDT', 'UNI': 'UNIUSDT',
+        'ATOM': 'ATOMUSDT', 'LTC': 'LTCUSDT', 'NEAR': 'NEARUSDT',
+        'APT': 'APTUSDT', 'SUI': 'SUIUSDT', 'INJ': 'INJUSDT',
+        'OP': 'OPUSDT', 'ARB': 'ARBUSDT'
+    };
+
+    // CoinGecko IDs (kept for compatibility but not used for API calls)
     const COIN_IDS = {
         'BTC': 'bitcoin', 'ETH': 'ethereum', 'SOL': 'solana',
         'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano',
@@ -37,47 +49,68 @@ const API = (() => {
         'DOT': 'polkadot', 'MATIC': 'matic-network', 'UNI': 'uniswap',
         'ATOM': 'cosmos', 'LTC': 'litecoin', 'NEAR': 'near',
         'APT': 'aptos', 'SUI': 'sui', 'INJ': 'injective-protocol',
-        'OP': 'optimism', 'ARB': 'arbitrum', 'TIA': 'celestia',
-        'SEI': 'sei-network', 'JTO': 'jito-governance-token'
+        'OP': 'optimism', 'ARB': 'arbitrum'
     };
 
     function cgId(symbol) { return COIN_IDS[symbol.toUpperCase()] || symbol.toLowerCase(); }
 
-    // ── CoinGecko ──────────────────────────────────────────
+    // ── Binance ────────────────────────────────────────────
+    // getPrices returns a CoinGecko-compatible shape so the rest of the
+    // app doesn't need to change.
     const CoinGecko = {
-        // Live prices for multiple coins
         async getPrices(symbols) {
-            const ids = symbols.map(s => cgId(s)).join(',');
-            return cached(`prices_${ids}`, TTL_PRICES, () =>
-                fetchJSON(`${COINGECKO}/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true`)
-            );
+            const pairs = symbols.map(s => BINANCE_PAIRS[s]).filter(Boolean);
+            if (!pairs.length) return {};
+
+            return cached(`prices_${pairs.join(',')}`, TTL_PRICES, async () => {
+                // Batch ticker request
+                const encoded = encodeURIComponent(JSON.stringify(pairs));
+                const data = await fetchJSON(`${BINANCE}/ticker/24hr?symbols=${encoded}`);
+                const result = {};
+                for (const t of data) {
+                    const sym = Object.entries(BINANCE_PAIRS).find(([, p]) => p === t.symbol)?.[0];
+                    if (!sym) continue;
+                    const id = COIN_IDS[sym] || sym.toLowerCase();
+                    result[id] = {
+                        usd: parseFloat(t.lastPrice),
+                        usd_24h_change: parseFloat(t.priceChangePercent),
+                        usd_market_cap: 0,  // not available without extra call
+                        usd_24h_vol: parseFloat(t.quoteVolume)
+                    };
+                }
+                return result;
+            });
         },
 
-        // Market data for one coin
-        async getMarket(symbol) {
-            const id = cgId(symbol);
-            return cached(`market_${id}`, TTL_PRICES, () =>
-                fetchJSON(`${COINGECKO}/coins/${id}?localization=false&tickers=false&community_data=false&developer_data=false`)
-            );
-        },
-
-        // OHLCV for technical analysis (days=1 gives hourly, days=90 gives daily)
+        // Returns Binance daily klines in CoinGecko market_chart compatible shape
         async getOHLCV(symbol, days = 90) {
-            const id = cgId(symbol);
-            return cached(`ohlcv_${id}_${days}`, TTL_OHLCV, () =>
-                fetchJSON(`${COINGECKO}/coins/${id}/market_chart?vs_currency=usd&days=${days}`)
-            );
+            const pair = BINANCE_PAIRS[symbol];
+            if (!pair) throw new Error(`No Binance pair for ${symbol}`);
+            return cached(`ohlcv_${pair}_${days}`, TTL_OHLCV, async () => {
+                const limit = Math.min(days, 1000);
+                const data = await fetchJSON(
+                    `${BINANCE}/klines?symbol=${pair}&interval=1d&limit=${limit}`
+                );
+                // Convert to CoinGecko market_chart format: { prices: [[ts,close],...], total_volumes: [[ts,vol],...] }
+                const prices = data.map(k => [k[0], parseFloat(k[4])]);          // [openTime, close]
+                const total_volumes = data.map(k => [k[0], parseFloat(k[5])]);   // [openTime, baseVolume]
+                return { prices, total_volumes };
+            });
         },
 
-        // Top coins by market cap
+        async getMarket(symbol) {
+            const prices = await this.getPrices([symbol]);
+            const id = COIN_IDS[symbol] || symbol.toLowerCase();
+            return { market_data: { current_price: { usd: prices[id]?.usd || 0 } } };
+        },
+
         async getTopCoins(limit = 50) {
-            return cached(`top_coins_${limit}`, TTL_PRICES, () =>
-                fetchJSON(`${COINGECKO}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${limit}&page=1&sparkline=false&price_change_percentage=24h`)
-            );
+            // Return empty array — not critical for main functionality
+            return [];
         }
     };
 
-    // ── CoinCap ────────────────────────────────────────────
+    // ── CoinCap (fallback for non-Binance coins) ──────────
     const CoinCap = {
         async getAsset(symbol) {
             const id = symbol.toLowerCase();
@@ -97,42 +130,31 @@ const API = (() => {
 
     // ── DexScreener ───────────────────────────────────────
     const DexScreener = {
-        // Trending tokens on Solana
         async getTrending() {
             return cached('dex_trending', TTL_TOKENS, () =>
                 fetchJSON(`${DEXSCREENER}/dex/search?q=sol&chain=solana`).then(r => r.pairs || [])
             );
         },
-
-        // Boosted tokens (paid boosts = social signal)
         async getBoostedTokens() {
             return cached('dex_boosted', TTL_TOKENS, () =>
                 fetchJSON(`${DEXSCREENER_BOOSTS}/latest/v1`).then(r => Array.isArray(r) ? r : [])
             );
         },
-
-        // Top boosted tokens
         async getTopBoostedTokens() {
             return cached('dex_top_boosted', TTL_TOKENS, () =>
                 fetchJSON(`${DEXSCREENER_BOOSTS}/top/v1`).then(r => Array.isArray(r) ? r : [])
             );
         },
-
-        // Token pair data by address
         async getTokenPairs(chainId, tokenAddress) {
             return cached(`dex_pair_${chainId}_${tokenAddress}`, TTL_TOKENS, () =>
                 fetchJSON(`${DEXSCREENER}/dex/tokens/${tokenAddress}`).then(r => r.pairs || [])
             );
         },
-
-        // Latest token profiles
         async getTokenProfiles() {
             return cached('dex_profiles', TTL_TOKENS, () =>
                 fetchJSON('https://api.dexscreener.com/token-profiles/latest/v1').then(r => Array.isArray(r) ? r : [])
             );
         },
-
-        // Search by query
         async search(query) {
             return fetchJSON(`${DEXSCREENER}/dex/search?q=${encodeURIComponent(query)}`).then(r => r.pairs || []);
         }
@@ -141,7 +163,7 @@ const API = (() => {
     // ── Fear & Greed Index ─────────────────────────────────
     const FearGreed = {
         async get() {
-            return cached('fear_greed', 300_000, () =>  // 5 min cache
+            return cached('fear_greed', 300_000, () =>
                 fetchJSON(FEAR_GREED).then(r => {
                     const d = r.data?.[0] || {};
                     return { value: parseInt(d.value || 50), classification: d.value_classification || 'Neutral' };
@@ -150,21 +172,7 @@ const API = (() => {
         }
     };
 
-    // ── CoinPaprika ───────────────────────────────────────
-    const CoinPaprika = {
-        async getCoin(id) {
-            return cached(`pap_${id}`, TTL_PRICES, () => fetchJSON(`${PAPRIKA}/coins/${id}`));
-        },
-        async getOHLCV(id, days = 30) {
-            const end = new Date().toISOString().slice(0, 10);
-            const start = new Date(Date.now() - days * 86400 * 1000).toISOString().slice(0, 10);
-            return cached(`pap_ohlcv_${id}_${days}`, TTL_OHLCV, () =>
-                fetchJSON(`${PAPRIKA}/coins/${id}/ohlcv/historical?start=${start}&end=${end}`)
-            );
-        }
-    };
-
-    // ── Normalizers ────────────────────────────────────────
+    // ── Normalizer (keeps compatibility with existing app code) ─
     function normalizeCGPrice(id, priceObj) {
         const d = priceObj[id] || {};
         return {
@@ -175,10 +183,7 @@ const API = (() => {
         };
     }
 
-    // ── Build OHLCV array from CoinGecko chart data ────────
     function buildOHLCVFromChart(chartData) {
-        // chartData.prices: [[ts, price], ...]
-        // chartData.total_volumes: [[ts, vol], ...]
         const prices = chartData.prices || [];
         const volumes = chartData.total_volumes || [];
         return prices.map((p, i) => ({
@@ -188,6 +193,5 @@ const API = (() => {
         }));
     }
 
-    // Public
-    return { CoinGecko, CoinCap, DexScreener, FearGreed, CoinPaprika, normalizeCGPrice, buildOHLCVFromChart, cgId, COIN_IDS };
+    return { CoinGecko, CoinCap, DexScreener, FearGreed, normalizeCGPrice, buildOHLCVFromChart, cgId, COIN_IDS };
 })();

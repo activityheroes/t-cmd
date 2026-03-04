@@ -330,7 +330,7 @@ const App = {
       updatePrices();
       updateTradingLogPnL();
       loadTicker();
-    }, 15000);
+    }, 60000);
   },
 
   setupNav() {

@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>T-CMD — Trade Command</title>
+  <meta name="description"
+    content="AI-powered crypto trading signals for BTC, ETH, SOL and altcoins. Real-time data, memecoin scanner, smart whale tracking.">
+  <link rel="stylesheet" href="styles/main.css">
+  <link rel="stylesheet" href="styles/components.css">
+</head>
+
+<body>
+
+  <!-- ── Auth Page ─────────────────────────────────────── -->
+  <div id="auth-page" style="display:none;"></div>
+
+  <!-- ── Main App ──────────────────────────────────────── -->
+  <div id="app" style="display:none;">
+
+    <!-- NAV -->
+    <nav class="app-nav">
+      <div class="nav-logo">
+        <div class="nav-logo-icon">T</div>
+        <div class="nav-logo-text">T-CMD</div>
+      </div>
+
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-tab="signals">📡 Coin Signals</button>
+        <button class="nav-tab" data-tab="scanner">🔍 Memecoin Scanner</button>
+        <button class="nav-tab" data-tab="log">📒 Trading Log</button>
+      </div>
+
+      <div class="nav-actions">
+        <!-- Ticker strip -->
+        <div id="ticker-bar" class="ticker-bar" style="margin-right:12px;"></div>
+
+        <!-- Fear & Greed mini -->
+        <div
+          style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(255,255,255,0.04);border:1px solid var(--border-subtle);border-radius:6px;font-size:12px;">
+          <span style="color:var(--text-muted)">F&G</span>
+          <span id="fear-greed-value"
+            style="font-weight:700;font-family:var(--font-mono);color:var(--accent-amber);">—</span>
+          <span id="fear-greed-sent" class="fg-sentiment">—</span>
+        </div>
+
+        <!-- Telegram -->
+        <a href="https://t.me" target="_blank" class="nav-icon-btn" title="Telegram Alerts">✈️</a>
+
+        <!-- Admin -->
+        <button class="nav-icon-btn" id="admin-btn" style="display:none;color:var(--accent-amber);"
+          title="Admin Panel">⚙️</button>
+
+        <!-- User -->
+        <div
+          style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(255,255,255,0.04);border:1px solid var(--border-subtle);border-radius:6px;font-size:12px;color:var(--text-secondary);">
+          <span>👤</span><span id="nav-user-name">—</span>
+        </div>
+
+        <!-- Logout -->
+        <button class="nav-icon-btn" id="logout-btn" title="Logout" style="color:var(--accent-red);">⏻</button>
+      </div>
+    </nav>
+
+    <div class="main-content">
+
+      <!-- ══════════════════════════════════════════════
+         SIGNALS TAB
+    ═══════════════════════════════════════════════ -->
+      <div id="panel-signals" class="tab-panel active">
+
+        <!-- Header -->
+        <div class="page-header">
+          <div class="page-header-left">
+            <!-- Live / History toggle -->
+            <div class="live-toggle">
+              <button class="live-btn active"><span class="live-dot"></span> Live Signals</button>
+              <button class="history-btn">📋 History</button>
+            </div>
+            <!-- Coin filters -->
+            <div class="filter-row">
+              <button class="coin-filter-btn active" data-coin="ALL" title="All">🌐</button>
+              <button class="coin-filter-btn" data-coin="BTC" title="Bitcoin">₿</button>
+              <button class="coin-filter-btn" data-coin="ETH" title="Ethereum">Ξ</button>
+              <button class="coin-filter-btn" data-coin="SOL" title="Solana">◎</button>
+              <div class="divider" style="width:1px;height:20px;margin:0 4px;background:var(--border-subtle);"></div>
+              <!-- Type filters -->
+              <span class="filter-pill active" data-group="signal" data-value="all">All</span>
+              <span class="filter-pill" data-group="signal" data-value="long">▲ Long</span>
+              <span class="filter-pill" data-group="signal" data-value="short">▼ Short</span>
+              <span class="filter-pill" data-group="signal" data-value="breakout">🚀 Breakout</span>
+              <span class="filter-pill" data-group="signal" data-value="accumulating">📦 Accumulating</span>
+            </div>
+          </div>
+
+          <div class="page-header-right">
+            <!-- Stats bar -->
+            <div class="stats-bar">
+              <div class="stat-item">
+                <div class="stat-value stat-cyan" id="stat-signals-today">—</div>
+                <div class="stat-label">Signals Today</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-value stat-green" id="stat-win-rate">—</div>
+                <div class="stat-label">Win Rate</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-value" id="stat-avg-conf" style="color:var(--accent-amber)">—</div>
+                <div class="stat-label">Avg Confidence</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-value" id="stat-avg-rr" style="color:var(--accent-purple)">—</div>
+                <div class="stat-label">Avg R:R</div>
+              </div>
+            </div>
+            <button class="btn btn-ghost" onclick="loadSignals()" style="font-size:12px;">🔄 Refresh</button>
+          </div>
+        </div>
+
+        <!-- Tagline -->
+        <div
+          style="padding:12px 24px 0;font-size:13px;color:var(--text-secondary);line-height:1.6;border-bottom:1px solid var(--border-subtle);margin-bottom:0;padding-bottom:12px;">
+          AI-powered signals combining RSI, MACD, EMA crossovers, Markov Chain state analysis &amp; Monte Carlo
+          simulations.
+          Every signal comes with entry, stop-loss, take-profit and a minimum <span
+            style="color:var(--accent-cyan)">1:2</span> risk-reward ratio.
+        </div>
+
+        <!-- Grid -->
+        <div class="signals-grid" id="signals-grid">
+          <!-- Cards injected here -->
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════════════════════
+         SCANNER TAB
+    ═══════════════════════════════════════════════ -->
+      <div id="panel-scanner" class="tab-panel">
+
+        <!-- Header -->
+        <div class="page-header">
+          <div class="page-header-left">
+            <!-- Scanner filters -->
+            <div class="filter-row">
+              <span class="filter-pill active" data-group="scanner" data-value="all">All</span>
+              <span class="filter-pill" data-group="scanner" data-value="hot">🔥 Hot</span>
+              <span class="filter-pill" data-group="scanner" data-value="breakout">🚀 Breakout</span>
+              <span class="filter-pill" data-group="scanner" data-value="accumulating">📦 Accumulating</span>
+              <span class="filter-pill" data-group="scanner" data-value="risk">⚠️ Risk</span>
+            </div>
+            <!-- Stats -->
+            <div id="scanner-stats" style="font-size:12px;color:var(--text-secondary);margin-top:2px;"></div>
+          </div>
+
+          <div class="page-header-right" style="flex-direction:row;align-items:center;gap:10px;">
+            <!-- Search -->
+            <div class="search-box" style="min-width:200px;">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="scanner-search" placeholder="Search token…">
+            </div>
+
+            <!-- Auto scan toggle -->
+            <div class="auto-scan-toggle">
+              <div class="toggle-switch" id="auto-scan-toggle"></div>
+              <span>Auto</span>
+            </div>
+
+            <!-- Scan now -->
+            <button class="scan-now-btn" id="scan-now-btn">
+              <span class="scan-icon">⟳</span> Scan Now
+            </button>
+          </div>
+        </div>
+
+        <!-- Tagline -->
+        <div
+          style="padding:12px 24px;font-size:13px;color:var(--text-secondary);border-bottom:1px solid var(--border-subtle);">
+          Auto-discovers trending Solana memecoins via DexScreener. Scores each by pump probability, flags rug risks,
+          and identifies breakout momentum.
+        </div>
+
+        <!-- Grid -->
+        <div class="signals-grid" id="scanner-grid">
+          <div class="empty-state" style="grid-column:1/-1;">
+            <div class="empty-state-icon">🔍</div>
+            <h3>Scanner Ready</h3>
+            <p>Click <strong>Scan Now</strong> to discover trending Solana memecoins and get ranked pump probability
+              scores.</p>
+            <button class="btn btn-primary" onclick="loadScanner()">🔍 Start Scanning</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════════════════════
+         TRADING LOG TAB
+    ═══════════════════════════════════════════════ -->
+      <div id="panel-log" class="tab-panel">
+
+        <!-- Header -->
+        <div class="page-header">
+          <div class="page-header-left">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <h2 style="font-size:16px;">Open Positions</h2>
+              <div class="positions-counter">
+                <span>Positions</span>
+                <strong id="log-stat-open">0</strong>
+              </div>
+            </div>
+          </div>
+          <div class="page-header-right">
+            <div class="stats-bar">
+              <div class="stat-item">
+                <div class="stat-value stat-green" id="log-stat-win">—</div>
+                <div class="stat-label">Win Rate</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-value" id="log-stat-pnl" style="color:var(--accent-cyan)">—</div>
+                <div class="stat-label">Total P&amp;L</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-value stat-cyan" id="log-stat-count">0</div>
+                <div class="stat-label">Closed Trades</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Positions -->
+        <div id="trading-log-container" class="trading-log-wrapper"></div>
+      </div>
+
+    </div><!-- /main-content -->
+  </div><!-- /app -->
+
+  <!-- ── Signal / Scanner Detail Drawer ─────────────────── -->
+  <div class="signal-drawer-overlay" id="drawer-overlay"></div>
+  <div class="signal-drawer" id="signal-drawer">
+    <div class="drawer-header">
+      <div class="drawer-title">
+        <span id="drawer-dir-badge" class="direction-badge long">LONG</span>
+        Signal Details
+      </div>
+      <button class="drawer-close" id="drawer-close-btn">×</button>
+    </div>
+
+    <div class="drawer-coin-info">
+      <div class="drawer-coin-row">
+        <div class="drawer-coin-left">
+          <div class="drawer-coin-icon" id="drawer-coin-icon">₿</div>
+          <div>
+            <div class="drawer-coin-name" id="drawer-coin-name">BTC/USDT</div>
+            <div class="drawer-coin-age" id="drawer-vol">Vol: —</div>
+          </div>
+        </div>
+        <div id="drawer-coin-change" class="drawer-coin-change num-green">—</div>
+      </div>
+      <div class="drawer-description" id="drawer-description"></div>
+    </div>
+
+    <div class="drawer-body">
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-dtab="history">Signal History</button>
+        <button class="drawer-tab" data-dtab="techsocial">Technical &amp; Social</button>
+        <button class="drawer-tab" data-dtab="smarttrades">Smart Trades</button>
+      </div>
+
+      <div class="drawer-tab-panel active" data-panel="history" id="drawer-history-panel">
+        <!-- Populated by JS -->
+      </div>
+      <div class="drawer-tab-panel" data-panel="techsocial" id="drawer-techsocial-panel">
+        <!-- Populated by JS -->
+      </div>
+      <div class="drawer-tab-panel" data-panel="smarttrades" id="drawer-smarttrades-panel">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Admin Panel Overlay ────────────────────────────── -->
+  <div class="admin-overlay" id="admin-overlay">
+    <div class="admin-panel">
+      <div class="admin-panel-header">
+        <h2 style="font-size:16px;font-weight:700;">⚙️ Admin Panel — User Management</h2>
+        <button class="drawer-close" id="admin-close-btn">×</button>
+      </div>
+      <div class="admin-panel-body">
+        <table class="user-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Feature Access</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="admin-users-tbody">
+            <!-- Populated by JS -->
+          </tbody>
+        </table>
+      </div>
+      <div class="invite-form">
+        <input type="email" id="invite-email" placeholder="Email address…">
+        <input type="text" id="invite-name" placeholder="Name (optional)">
+        <button class="btn btn-primary" id="admin-invite-btn">+ Invite</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Toast Container ────────────────────────────────── -->
+  <div id="toast-container"></div>
+
+  <!-- ── Scripts ─────────────────────────────────────────── -->
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/signals.js"></script>
+  <script src="js/scanner.js"></script>
+  <script src="js/trading-log.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/app2.js"></script>
+
+</body>
+
+</html>

@@ -139,12 +139,14 @@ async function loadSignals() {
     await Promise.allSettled(AppState.customCoins.map(c => processSymbol(c.sym, c.icon, c.name)));
   }
   AppState.signals = sigs;
-  // Tag each signal as fresh or revived based on RSI / phase
+  // Tag each signal as fresh or revived, and record generation time
   AppState.signals.forEach(s => {
     s.signalAge = (s.phase === 'Breakout' || s.confidence >= 75) ? 'fresh' : 'revived';
+    if (!s.generatedAt) s.generatedAt = Date.now();
   });
   renderSignalCards();
   updateSignalStats();
+  if (typeof startSignalTimers === 'function') startSignalTimers();
 }
 
 // Add Coin modal
@@ -261,7 +263,8 @@ function renderSignalCard(s) {
 
   return `<div class="signal-card ${isLong ? 'long-card' : 'short-card'} animate-fadeInUp" onclick="openSignalDetail('${s.id}')">
     <div class="card-top-row">
-      <span class="card-type-badge"><span>✦</span> Fresh Signal</span>
+      <span class="card-type-badge ${s.signalAge || 'fresh'}"><span>✦</span> ${s.signalAge === 'revived' ? '↺ Revived' : '✦ Fresh'} Signal</span>
+      ${s.generatedAt ? `<span class="signal-age-clock" data-signal-ts="${s.generatedAt}">${typeof fmtAge === 'function' ? fmtAge(s.generatedAt) : '< 1m'}</span>` : ''}
       <div class="direction-badge ${isLong ? 'long' : 'short'}">${isLong ? '▲' : '▼'} ${s.direction}</div>
     </div>
     <div class="card-phase"><span class="phase-dot ${phaseClass}"></span>${s.phase} Phase</div>

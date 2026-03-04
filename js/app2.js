@@ -20,7 +20,7 @@ function getTerminalLinks(token) {
       : isEth ? `https://gmgn.ai/eth/token/${addr}`
         : isBase ? `https://gmgn.ai/base/token/${addr}`
           : isBsc ? `https://gmgn.ai/bsc/token/${addr}` : null,
-    photon: isSol ? `https://photon-sol.tinyastro.io/en/lp/${token.pairAddress || addr}` : null,
+    padre: isSol ? `https://trade.padre.gg/${addr}` : null,
     bubbleMaps: isSol ? `https://app.bubblemaps.io/sol/token/${addr}`
       : isEth ? `https://app.bubblemaps.io/eth/token/${addr}`
         : isBase ? `https://app.bubblemaps.io/base/token/${addr}`
@@ -35,6 +35,27 @@ function getTerminalLinks(token) {
           : isBsc ? `https://bscscan.com/address/${wallet}` : `https://solscan.io/account/${wallet}`,
     kolscan: isSol ? `https://kolscan.io/` : null
   };
+}
+
+// ── Signal age timer ───────────────────────────────────────────
+function fmtAge(ts) {
+  if (!ts) return '';
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if (mins < 1) return '< 1m';
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem > 0 ? `${hrs}h ${rem}m` : `${hrs}h`;
+}
+
+let _timerInterval = null;
+function startSignalTimers() {
+  if (_timerInterval) clearInterval(_timerInterval);
+  _timerInterval = setInterval(() => {
+    document.querySelectorAll('[data-signal-ts]').forEach(el => {
+      el.textContent = fmtAge(parseInt(el.dataset.signalTs));
+    });
+  }, 30000);
 }
 
 // ══════════════════════════════════════════════════════
@@ -52,6 +73,7 @@ async function loadScanner() {
     AppState.scannerTokens = tokens;
     renderScannerCards();
     updateScannerStats();
+    startSignalTimers();
     showToast('🔍', 'Scan Complete', `Found ${tokens.length} tokens`, 'success');
   } catch (e) {
     grid.innerHTML = `<div style="grid-column:1/-1;" class="empty-state">
@@ -116,6 +138,7 @@ function renderScannerCard(token) {
   return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${token.address}')">
     <div class="card-top-row">
       <span class="card-type-badge ${token.signalType}">${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
+      <span class="signal-age-clock" data-signal-ts="${token.scannedAt || Date.now()}">${fmtAge(token.scannedAt || Date.now())}</span>
       <div class="pump-score ${scoreClass}">
         <div class="pump-score-value">${token.pumpScore}</div>
         <div class="pump-score-label">Score</div>
@@ -156,7 +179,7 @@ function renderScannerCard(token) {
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()">🌐</a>` : ''}
         ${terminals.axiom ? `<a class="terminal-link axiom" href="${terminals.axiom}" target="_blank" onclick="event.stopPropagation()">Axiom</a>` : ''}
         ${terminals.gmgn ? `<a class="terminal-link gmgn" href="${terminals.gmgn}" target="_blank" onclick="event.stopPropagation()">gmgn</a>` : ''}
-        ${terminals.photon ? `<a class="terminal-link photon" href="${terminals.photon}" target="_blank" onclick="event.stopPropagation()">Photon</a>` : ''}
+        ${terminals.padre ? `<a class="terminal-link padre" href="${terminals.padre}" target="_blank" onclick="event.stopPropagation()">Padre</a>` : ''}
       </div>
       <span class="multiplier-badge mult-${token.multiplier.tier}">${token.multiplier.label}</span>
     </div>

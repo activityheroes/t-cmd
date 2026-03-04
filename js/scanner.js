@@ -197,7 +197,8 @@ const Scanner = (() => {
             boostAmount,
             createdAt: pair.pairCreatedAt || Date.now(),
             dexUrl: pair.url || `https://dexscreener.com/${pair.chainId || 'solana'}/${pair.pairAddress || ''}`,
-            imageUrl: pair.info?.imageUrl || null
+            imageUrl: pair.info?.imageUrl || null,
+            scannedAt: Date.now()
         };
         // Attach memecoin signal if score >= 60
         tokenObj.memeSignal = generateMemeSignal(tokenObj, score);

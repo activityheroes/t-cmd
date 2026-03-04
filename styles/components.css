@@ -1939,3 +1939,19 @@
     transition: var(--transition);
 }
 .explorer-wallet-link:hover { background: rgba(79,195,247,0.1); border-color: var(--accent-cyan); }
+
+/* ── Signal age clock ──────────────────────────────────────────── */
+.signal-age-clock {
+    font-size: 10.5px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border-subtle);
+    padding: 2px 7px;
+    border-radius: 20px;
+    white-space: nowrap;
+    flex: 1;
+    text-align: center;
+}
+.signal-age-clock::before { content: '⏱ '; }

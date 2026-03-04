@@ -2086,3 +2086,26 @@
     border-bottom: 1px solid var(--border-subtle);
     flex-wrap: wrap;
 }
+
+/* ── Contract address copy button ──────────────────────────────── */
+.ca-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.04);
+    color: var(--text-muted);
+    transition: var(--transition);
+    white-space: nowrap;
+}
+.ca-copy-btn:hover {
+    background: rgba(79,195,247,0.1);
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+}

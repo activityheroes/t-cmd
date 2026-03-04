@@ -173,7 +173,10 @@ function renderScannerCard(token) {
     </div>` : ''}
     ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag">${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
     <div class="card-bottom-row">
-      <div style="display:flex;gap:4px;flex-wrap:wrap;">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+        <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${token.address}',this)" title="Copy Contract Address: ${token.address}">
+          📋 ${token.address ? token.address.slice(0, 4) + '…' + token.address.slice(-4) : 'CA'}
+        </button>
         <a class="card-action-icon" href="${token.dexUrl}" target="_blank" title="DexScreener" onclick="event.stopPropagation()">📊</a>
         ${token.socials[0]?.url ? `<a class="card-action-icon" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()">🐦</a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()">🌐</a>` : ''}
@@ -635,3 +638,23 @@ const App = {
 
 // ── Kick off ───────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => App.init());
+
+// ── Copy contract address ────────────────────────────────
+window.copyCa = function (address, btn) {
+  if (!address) return;
+  navigator.clipboard.writeText(address).then(() => {
+    const orig = btn.innerHTML;
+    btn.innerHTML = '✓ Copied!';
+    btn.style.color = 'var(--accent-green)';
+    btn.style.borderColor = 'var(--accent-green)';
+    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; btn.style.borderColor = ''; }, 2000);
+  }).catch(() => {
+    // Fallback for browsers without clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = address;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  });
+};

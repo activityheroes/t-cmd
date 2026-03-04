@@ -49,7 +49,7 @@ const AppState = {
   signalCoinFilter: 'ALL',
   signalView: 'live',
   signals: [],
-  customCoins: [],
+  customCoins: JSON.parse(localStorage.getItem('tcmd_custom_coins') || '[]'),
   scannerFilter: 'all',
   scannerChain: 'all',
   scannerScore: 0,
@@ -196,6 +196,7 @@ async function doAddCoin(sym, overlay) {
     if (!AppState.customCoins) AppState.customCoins = [];
     if (!AppState.customCoins.find(c => c.sym === sym)) {
       AppState.customCoins.push({ sym, icon: sym.slice(0, 2), name: sym });
+      localStorage.setItem('tcmd_custom_coins', JSON.stringify(AppState.customCoins));
     }
     overlay.remove();
     renderSignalCards();

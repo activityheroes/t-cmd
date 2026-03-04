@@ -314,35 +314,39 @@
   <div class="admin-overlay" id="admin-overlay">
     <div class="admin-panel">
       <div class="admin-panel-header">
-        <h2 style="font-size:16px;font-weight:700;">⚙️ Admin Panel — User Management</h2>
+        <h2 style="font-size:16px;font-weight:700;">⚙️ Admin Panel</h2>
         <button class="drawer-close" id="admin-close-btn">×</button>
       </div>
-      <div class="admin-panel-body">
-        <table class="user-table">
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Role</th>
-              <th>Status</th>
-              <th>Feature Access</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="admin-users-tbody">
-            <!-- Populated by JS -->
-          </tbody>
-        </table>
-      </div>
-      <div class="invite-form">
-        <input type="email" id="invite-email" placeholder="Email address…">
-        <input type="text" id="invite-name" placeholder="Name (optional)">
-        <button class="btn btn-primary" id="admin-invite-btn">+ Invite</button>
+      <div class="admin-panel-body" id="admin-panel-content">
+        <!-- Populated by renderAdminPanel() in auth.js -->
+        <div style="color:var(--text-muted);padding:20px;text-align:center;">Loading…</div>
       </div>
     </div>
   </div>
 
   <!-- ── Toast Container ────────────────────────────────── -->
   <div id="toast-container"></div>
+
+  <!-- ── Extension error suppression ──────────────────── -->
+  <script>
+    // Suppress errors from crypto wallet browser extensions
+    // (Phantom, Bitget, etc.) so the app works without incognito mode
+    window.addEventListener('error', function(e) {
+      const msg = e.message || '';
+      const src = e.filename || '';
+      if (src.includes('extension') || src.includes('chrome-extension') ||
+          msg.includes('FrameDoesNotExist') || msg.includes('message port closed') ||
+          msg.includes('registerSolanaInjectedWallet') || msg.includes('lockdown')) {
+        e.preventDefault(); e.stopPropagation(); return true;
+      }
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+      const msg = String(e.reason || '');
+      if (msg.includes('FrameDoesNotExist') || msg.includes('message port')) {
+        e.preventDefault(); return;
+      }
+    });
+  </script>
 
   <!-- ── Scripts ─────────────────────────────────────────── -->
   <script src="js/config.js"></script>

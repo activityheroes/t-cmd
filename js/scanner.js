@@ -303,5 +303,139 @@ const Scanner = (() => {
         return results.sort((a, b) => b.pumpScore - a.pumpScore);
     }
 
-    return { fetchAndScore, calcPumpScore, detectRugFlags, detectBreakout, formatToken, generateSmartTraders, calcTechnicalSentiment };
+    // ══════════════════════════════════════════════════════════
+    // HOLDER ANALYSIS — Markov Chain + Monte Carlo TP Prediction
+    // ══════════════════════════════════════════════════════════
+    const HolderAnalysis = {
+
+        // Fetch top holders using Solana public RPC
+        async fetchTopHolders(mint) {
+            try {
+                const rpc = 'https://api.mainnet-beta.solana.com';
+                const res = await fetch(rpc, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jsonrpc: '2.0', id: 1,
+                        method: 'getTokenLargestAccounts', params: [mint, { commitment: 'confirmed' }]
+                    })
+                });
+                const data = await res.json();
+                return (data.result?.value || []).map(h => ({
+                    address: h.address, amount: parseFloat(h.uiAmountString || 0)
+                }));
+            } catch { return []; }
+        },
+
+        // Estimate average whale buy-in MC using historical price changes
+        estimateWhaleBuyInMc(token, holderCount) {
+            const currentMc = token.mktCap || 0;
+            if (!currentMc) return { low: 0, high: 0, avg: 0 };
+
+            // Use price change percentages to back-calculate when whales likely entered
+            const ch5m = parseFloat(token.priceChange?.m5 || 0) / 100;
+            const ch1h = parseFloat(token.priceChange?.h1 || 0) / 100;
+            const ch6h = parseFloat(token.priceChange?.h6 || 0) / 100;
+            const ch24h = parseFloat(token.priceChange?.h24 || 0) / 100;
+
+            // Reconstruct historical MCs
+            const mc5mAgo = currentMc / (1 + ch5m);
+            const mc1hAgo = currentMc / (1 + ch1h);
+            const mc6hAgo = currentMc / (1 + ch6h);
+            const mc24hAgo = currentMc / (1 + ch24h);
+
+            // Weight by holder concentration — big holders entered earlier
+            const weights = [0.10, 0.25, 0.40, 0.25]; // 5m, 1h, 6h, 24h
+            const mcs = [mc5mAgo, mc1hAgo, mc6hAgo, mc24hAgo];
+            const avgBuyInMc = mcs.reduce((sum, mc, i) => sum + mc * weights[i], 0);
+
+            return {
+                low: Math.min(...mcs),
+                high: Math.max(...mcs),
+                avg: avgBuyInMc
+            };
+        },
+
+        // Markov Chain state transition matrix for token price phases
+        // States: ACCUMULATION(0), MARKUP(1), DISTRIBUTION(2), EXIT(3)
+        _markovMatrix: [
+            [0.55, 0.35, 0.05, 0.05], // From ACCUMULATING
+            [0.10, 0.40, 0.40, 0.10], // From MARKUP
+            [0.05, 0.20, 0.35, 0.40], // From DISTRIBUTION
+            [0.20, 0.10, 0.10, 0.60]  // From EXIT/DUMP
+        ],
+
+        // Determine initial state from token metrics
+        _getInitialState(token) {
+            if (token.isBreakout) return 1;           // Markup
+            const bp = token.txns?.h24?.buys / Math.max(1, token.txns?.h24?.buys + token.txns?.h24?.sells);
+            if (bp > 0.65) return 0;                  // Accumulation
+            if (bp < 0.40) return 3;                  // Exit
+            return Math.round(token.pumpScore / 34);   // Score-based
+        },
+
+        // Monte Carlo simulation: predict where whales will take profits
+        simulateTpZone(token, iterations = 1000) {
+            const currentMc = token.mktCap || 0;
+            if (!currentMc) return null;
+            const supply = currentMc / (token.priceUSD || 1);
+            const buyIn = this.estimateWhaleBuyInMc(token, 10);
+            const initState = this._getInitialState(token);
+            const matrix = this._markovMatrix;
+
+            // Seed RNG deterministically from token address for consistent results
+            let seed = (token.address || '').split('').reduce((a, c) => ((a << 5) - a) + c.charCodeAt(0), 0) >>> 0;
+            const rand = () => {
+                seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+                return (seed >>> 0) / 4294967296;
+            };
+
+            const exitMcs = [];
+            for (let i = 0; i < iterations; i++) {
+                let state = initState;
+                let mc = currentMc;
+                let steps = 0;
+
+                while (state !== 3 && steps < 50) {
+                    // State transition
+                    const row = matrix[state];
+                    const r = rand();
+                    let cumPr = 0;
+                    for (let s = 0; s < row.length; s++) {
+                        cumPr += row[s];
+                        if (r <= cumPr) { state = s; break; }
+                    }
+                    // Price change each step (roughly 5m intervals)
+                    const drift = state === 1 ? 0.04  // Markup: +4%
+                        : state === 2 ? 0.01  // Distribution: +1%
+                            : state === 3 ? -0.08 // Exit: -8%
+                                : 0.005;              // Accumulation: +0.5%
+                    const noise = (rand() - 0.5) * 0.06;
+                    mc = mc * (1 + drift + noise);
+                    steps++;
+                }
+                // Record MC at exit
+                if (mc > buyIn.avg * 1.1) exitMcs.push(mc); // Only profit-taking exits
+            }
+
+            if (!exitMcs.length) return null;
+            exitMcs.sort((a, b) => a - b);
+            const p25 = exitMcs[Math.floor(exitMcs.length * 0.25)];
+            const p50 = exitMcs[Math.floor(exitMcs.length * 0.50)];
+            const p75 = exitMcs[Math.floor(exitMcs.length * 0.75)];
+
+            return {
+                lowMc: p25,
+                medMc: p50,
+                highMc: p75,
+                lowPrice: p25 / supply,
+                medPrice: p50 / supply,
+                highPrice: p75 / supply,
+                confidence: Math.min(95, Math.round(50 + token.pumpScore * 0.4)),
+                avgBuyInMc: buyIn.avg,
+                currentMc
+            };
+        }
+    };
+
+    return { fetchAndScore, calcPumpScore, detectRugFlags, detectBreakout, formatToken, generateSmartTraders, calcTechnicalSentiment, HolderAnalysis };
 })();

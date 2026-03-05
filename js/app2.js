@@ -162,15 +162,25 @@ function renderScannerCard(token) {
       <span style="color:var(--text-muted)">Liq: <span class="${token.liquidity < 10000 ? 'num-red' : 'num-green'}">${fmt.vol(token.liquidity)}</span></span>
       <span style="color:var(--text-muted)">MC: ${fmt.vol(token.mktCap)}</span>
     </div>
-    ${token.isBreakout ? '<div class="badge badge-breakout">\ud83d\ude80 Breakout</div>' : ''}
-    ${sig ? `<div class="meme-signal-block">
-      <div class="meme-signal-label">\ud83d\udcca ${sig.phase} Signal</div>
-      <div class="meme-signal-levels">
-        <span class="num-cyan">Entry <strong>${fmt.price(sig.entry)}</strong></span>
-        <span class="num-red">SL <strong>${fmt.price(sig.stopLoss)}</strong></span>
-        <span class="num-green">TP <strong>${fmt.price(sig.takeProfit)}</strong></span>
+    ${sig ? (() => {
+      const supply = token.mktCap > 0 && token.priceUSD > 0 ? token.mktCap / token.priceUSD : 0;
+      const toMc = p => supply > 0 ? fmt.vol(p * supply) : fmt.price(p);
+      const addr = token.address;
+      return `<div class="meme-signal-block" id="msb-${addr}">
+      <div class="meme-signal-header">
+        <div class="meme-signal-label">📊 ${sig.phase} Signal</div>
+        <button class="mc-toggle-btn" onclick="event.stopPropagation();toggleMcMode('${addr}')" title="Switch Price / Market Cap">
+          <span class="mc-toggle-price">💲 Price</span>
+          <span class="mc-toggle-mc" style="display:none;">📈 Mkt Cap</span>
+        </button>
       </div>
-    </div>` : ''}
+      <div class="meme-signal-levels" id="msb-levels-${addr}">
+        <span class="num-cyan">Entry <strong class="msb-entry-p">${fmt.price(sig.entry)}</strong><span class="msb-entry-mc" style="display:none"> <em>${toMc(sig.entry)}</em></span></span>
+        <span class="num-red">SL <strong class="msb-sl-p">${fmt.price(sig.stopLoss)}</strong><span class="msb-sl-mc" style="display:none"> <em>${toMc(sig.stopLoss)}</em></span></span>
+        <span class="num-green">TP <strong class="msb-tp-p">${fmt.price(sig.takeProfit)}</strong><span class="msb-tp-mc" style="display:none"> <em>${toMc(sig.takeProfit)}</em></span></span>
+      </div>
+    </div>`;
+    })() : ''}
     ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag">${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
     <div class="card-bottom-row">
       <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
@@ -331,8 +341,7 @@ function populateScannerDrawer(token) {
     if (el) el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">Social data unavailable.</div>';
   });
 
-  // Smart trades with explorer links
-  // ── Smart Trades: Real DexScreener data ───────────────
+  // ── Smart Trades: Real DexScreener data + TP Prediction ──────
   const tx = token.txns || {};
   const vol = token.volume || {};
   const periods = [
@@ -341,12 +350,45 @@ function populateScannerDrawer(token) {
     { label: '6h', buys: tx.h6?.buys || 0, sells: tx.h6?.sells || 0, vol: vol.h6 || 0 },
     { label: '24h', buys: tx.h24?.buys || 0, sells: tx.h24?.sells || 0, vol: vol.h24 || 0 }
   ];
-
   const h24Total = periods[3].buys + periods[3].sells;
   const buyPct = h24Total > 0 ? Math.round((periods[3].buys / h24Total) * 100) : 50;
   const buyPressureColor = buyPct >= 60 ? 'var(--accent-green)' : buyPct <= 40 ? 'var(--accent-red)' : 'var(--accent-amber)';
 
-  document.getElementById('drawer-smarttrades-panel').innerHTML = `
+  // Run Monte Carlo TP prediction
+  const tpZone = Scanner.HolderAnalysis.simulateTpZone(token);
+  const tpHtml = tpZone ? `
+    <div class="tp-prediction-card">
+      <div class="tp-pred-header">
+        <span>🎯 Whale TP Prediction</span>
+        <span class="tp-confidence" style="color:var(--accent-cyan);">${tpZone.confidence}% confidence</span>
+      </div>
+      <div class="tp-pred-subtitle">Markov Chain + Monte Carlo (1,000 simulations) · Based on holder buy-ins</div>
+      <div class="tp-zone-row">
+        <div class="tp-zone-item">
+          <div class="tp-zone-label">Conservative</div>
+          <div class="tp-zone-val num-amber">${fmt.price(tpZone.lowPrice)}</div>
+          <div class="tp-zone-mc">${fmt.vol(tpZone.lowMc)} MC</div>
+        </div>
+        <div class="tp-zone-item tp-zone-median">
+          <div class="tp-zone-label">Most Likely</div>
+          <div class="tp-zone-val num-green" style="font-size:15px;">${fmt.price(tpZone.medPrice)}</div>
+          <div class="tp-zone-mc">${fmt.vol(tpZone.medMc)} MC</div>
+        </div>
+        <div class="tp-zone-item">
+          <div class="tp-zone-label">Optimistic</div>
+          <div class="tp-zone-val num-cyan">${fmt.price(tpZone.highPrice)}</div>
+          <div class="tp-zone-mc">${fmt.vol(tpZone.highMc)} MC</div>
+        </div>
+      </div>
+      <div class="tp-pred-info">
+        Est. whale avg buy-in: <strong>${fmt.vol(tpZone.avgBuyInMc)}</strong> MC
+        · Current: <strong>${fmt.vol(tpZone.currentMc)}</strong> MC
+        · Upside to median TP: <strong class="num-green">+${tpZone.medMc > tpZone.currentMc ? ((tpZone.medMc / tpZone.currentMc - 1) * 100).toFixed(0) : '0'}%</strong>
+      </div>
+    </div>` : '';
+
+  const stPanel = document.getElementById('drawer-smarttrades-panel');
+  stPanel.innerHTML = `
     <div class="dex-source-badge">
       📊 Live data from <a href="${token.dexUrl}" target="_blank" style="color:var(--accent-cyan);">DexScreener</a>
       <span style="margin-left:auto;font-size:10px;color:var(--text-muted);">Pair: ${token.pairAddress ? token.pairAddress.slice(0, 8) + '…' : 'N/A'}</span>
@@ -376,6 +418,10 @@ function populateScannerDrawer(token) {
   }).join('')}</tbody>
     </table>
 
+    ${tpHtml}
+
+    <div id="tracked-wallets-alert"></div>
+
     <div style="margin-top:16px;display:flex;flex-wrap:wrap;gap:6px;">
       ${terminals.axiom ? `<a class="terminal-link axiom" href="${terminals.axiom}" target="_blank">Trade on Axiom</a>` : ''}
       ${terminals.gmgn ? `<a class="terminal-link gmgn" href="${terminals.gmgn}" target="_blank">gmgn.ai</a>` : ''}
@@ -384,8 +430,25 @@ function populateScannerDrawer(token) {
       <a class="terminal-link explorer" href="${terminals.explorer}" target="_blank">🔎 Explorer</a>
     </div>`;
 
+  // Async: check if any tracked wallets hold this token
+  if (token.address && token.chainId?.toLowerCase().includes('sol')) {
+    WalletTracker.checkWalletHoldings(token.address).then(matches => {
+      const alertEl = document.getElementById('tracked-wallets-alert');
+      if (!alertEl || !matches.length) return;
+      alertEl.innerHTML = `
+        <div class="tracked-wallet-alert">
+          🐋 <strong>${matches.length} tracked wallet${matches.length > 1 ? 's' : ''} hold this token!</strong>
+          ${matches.map(m => `<div class="tracked-wallet-row">
+            <span>${m.wallet.label}</span>
+            <span class="num-cyan">${m.holding.amount.toLocaleString()} tokens</span>
+          </div>`).join('')}
+        </div>`;
+    }).catch(() => { });
+  }
+
   switchDrawerTab('history');
 }
+
 
 
 // ══════════════════════════════════════════════════════
@@ -688,4 +751,20 @@ window.copyCa = function (address, btn) {
     document.execCommand('copy');
     document.body.removeChild(ta);
   });
+};
+
+// ── Price ↔ Market Cap toggle ─────────────────────────────────
+window.toggleMcMode = function (addr) {
+  const block = document.getElementById('msb-' + addr);
+  if (!block) return;
+  const isMc = block.dataset.mcMode === '1';
+  block.dataset.mcMode = isMc ? '0' : '1';
+  const priceEls = block.querySelectorAll('[class*="-p"]');
+  const mcEls = block.querySelectorAll('[class*="-mc"]');
+  const btnPrice = block.querySelector('.mc-toggle-price');
+  const btnMc = block.querySelector('.mc-toggle-mc');
+  priceEls.forEach(el => el.style.display = isMc ? '' : 'none');
+  mcEls.forEach(el => el.style.display = isMc ? 'none' : 'inline');
+  if (btnPrice) btnPrice.style.display = isMc ? 'inline' : 'none';
+  if (btnMc) btnMc.style.display = isMc ? 'none' : 'inline';
 };

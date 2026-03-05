@@ -456,6 +456,22 @@ async function renderAdminPanel() {
                 Mode: <strong style="color:${SUPABASE_READY ? 'var(--accent-green)' : 'var(--accent-amber)'}">${SUPABASE_READY ? '🟢 Supabase (live)' : '🟡 localStorage (demo)'}</strong>
                 ${!SUPABASE_READY ? ' — <a href="js/config.js" target="_blank" style="color:var(--accent-cyan);">Configure Supabase →</a>' : ''}
             </div>
+        </div>
+
+        <div class="admin-section" style="margin-top:20px;">
+            <div class="admin-section-title">🐋 Wallet Tracker</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+                Track smart money wallets across chains. When a tracked wallet holds a scanned memecoin, you'll see an alert in Smart Trades.
+            </div>
+            <div class="wallet-tracker-chains">
+                <button class="wt-chain-tab active" data-chain="SOL" onclick="switchWtChain('SOL',this)">◎ SOL</button>
+                <button class="wt-chain-tab" data-chain="ETH" onclick="switchWtChain('ETH',this)">Ξ ETH</button>
+                <button class="wt-chain-tab" data-chain="BASE" onclick="switchWtChain('BASE',this)">B BASE</button>
+                <button class="wt-chain-tab" data-chain="BSC" onclick="switchWtChain('BSC',this)">B BSC</button>
+            </div>
+            <div id="wt-panel">
+                <div style="color:var(--text-muted);font-size:12px;padding:8px 0;">Loading wallets…</div>
+            </div>
         </div>`;
   } catch (e) {
     panel.innerHTML = `<div style="color:var(--accent-red);padding:20px;">Failed to load users: ${e.message}</div>`;
@@ -540,3 +556,116 @@ window.showAuthPage = showAuthPage;
 window.showAppPage = showAppPage;
 window.openAdminPanel = openAdminPanel;
 window.closeAdminPanel = closeAdminPanel;
+
+// ── Wallet Tracker admin UI ──────────────────────────────────
+let _wtCurrentChain = 'SOL';
+
+window.switchWtChain = async function (chain, btn) {
+  _wtCurrentChain = chain;
+  document.querySelectorAll('.wt-chain-tab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  await renderWtPanel();
+};
+
+async function renderWtPanel() {
+  const panel = document.getElementById('wt-panel');
+  if (!panel) return;
+  const chain = _wtCurrentChain;
+  const allWallets = await WalletTracker.getWallets();
+  const wallets = allWallets.filter(w => w.chain === chain);
+  const cfg = WalletTracker.CHAIN_CONFIG[chain];
+
+  // EVM key input for non-SOL chains
+  const keySection = chain !== 'SOL' ? `
+    <div class="wt-api-key-row">
+      <span style="font-size:11px;color:var(--text-muted);">${chain} API Key (Etherscan/Basescan/BSCScan — free):</span>
+      <input id="wt-api-key-input" class="auth-input" type="text" placeholder="Paste API key…" 
+        style="width:200px;" value="${localStorage.getItem('tcmd_evm_keys') ? (JSON.parse(localStorage.getItem('tcmd_evm_keys') || '{}'))[chain] || '' : ''}">
+      <button class="btn btn-ghost" style="font-size:11px;" onclick="saveWtApiKey('${chain}')">Save</button>
+      <a href="https://${chain === 'ETH' ? 'etherscan.io' : chain === 'BASE' ? 'basescan.org' : 'bscscan.com'}/register" 
+         target="_blank" style="font-size:11px;color:var(--accent-cyan);">Get free key →</a>
+    </div>` : '';
+
+  panel.innerHTML = `
+    ${keySection}
+    <div class="wt-add-row">
+      <input id="wt-addr-input" class="auth-input" type="text" placeholder="${cfg?.label} wallet address…" style="flex:1;">
+      <input id="wt-label-input" class="auth-input" type="text" placeholder="Label (e.g. Whale123)" style="width:130px;">
+      <button class="btn btn-primary" style="font-size:11px;white-space:nowrap;" onclick="addTrackedWallet('${chain}')">+ Track</button>
+    </div>
+    <div id="wt-wallet-list">
+      ${wallets.length === 0 
+        ? `<div style="color:var(--text-muted);font-size:12px;padding:10px 0;">No wallets tracked on ${cfg?.label || chain} yet.</div>`
+        : wallets.map(w => `
+          <div class="wt-wallet-row" id="wt-row-${w.id}">
+            <div class="wt-wallet-info">
+              <span class="wt-wallet-label">${w.label}</span>
+              <a href="${cfg?.explorer(w.address) || '#'}" target="_blank" 
+                 class="wt-wallet-addr" title="${w.address}">${w.address.slice(0,8)}…${w.address.slice(-4)}</a>
+            </div>
+            <div class="wt-wallet-actions">
+              <button class="wt-fetch-btn" onclick="fetchWtActivity('${w.id}','${w.address}','${chain}')">📋 Activity</button>
+              <button class="wt-remove-btn" onclick="removeTrackedWallet('${w.id}','${w.address}')">×</button>
+            </div>
+          </div>
+          <div class="wt-activity-row" id="wt-activity-${w.id}" style="display:none;"></div>`
+        ).join('')}
+    </div>`;
+}
+
+window.saveWtApiKey = function (chain) {
+  const val = document.getElementById('wt-api-key-input')?.value.trim();
+  if (val) { WalletTracker.setApiKey(chain, val); showToast('✅', 'API Key Saved', `${chain} API key saved`, 'success'); }
+};
+
+window.addTrackedWallet = async function (chain) {
+  const addr = document.getElementById('wt-addr-input')?.value.trim();
+  const label = document.getElementById('wt-label-input')?.value.trim();
+  if (!addr) return;
+  await WalletTracker.addWallet(chain, addr, label);
+  showToast('✅', 'Wallet Added', `${label || addr.slice(0,8)} tracked on ${chain}`, 'success');
+  await renderWtPanel();
+};
+
+window.removeTrackedWallet = async function (id, address) {
+  await WalletTracker.removeWallet(id, address);
+  showToast('🗑️', 'Wallet Removed', 'Wallet removed from tracker', 'info');
+  await renderWtPanel();
+};
+
+window.fetchWtActivity = async function (id, address, chain) {
+  const el = document.getElementById(`wt-activity-${id}`);
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--text-muted);font-size:11px;padding:6px 0 6px 12px;">Fetching…</div>';
+  const activity = chain === 'SOL'
+    ? await WalletTracker.fetchSolanaActivity(address, 5)
+    : await WalletTracker.fetchEvmActivity(address, chain);
+
+  if (activity.error) {
+    el.innerHTML = `<div style="color:var(--accent-amber);font-size:11px;padding:6px 0 6px 12px;">⚠️ ${activity.error}</div>`;
+    return;
+  }
+  if (!activity.recent?.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:11px;padding:6px 0 6px 12px;">No recent activity found.</div>';
+    return;
+  }
+  el.innerHTML = `<div class="wt-activity-list">
+    ${activity.recent.map(tx => `
+      <div class="wt-tx-row">
+        ${tx.type ? `<span class="wt-tx-type ${tx.type.toLowerCase()}">${tx.type}</span>` : ''}
+        ${tx.token ? `<span class="wt-tx-token">${tx.token}</span>` : ''}
+        ${tx.amount ? `<span class="wt-tx-amount">${tx.amount}</span>` : ''}
+        <span class="wt-tx-time">${tx.timeAgo}</span>
+        ${tx.url ? `<a href="${tx.url}" target="_blank" class="wt-tx-link">↗</a>` : ''}
+        ${tx.sig ? `<a href="${tx.url}" target="_blank" class="wt-tx-link" title="${tx.sig}">tx ↗</a>` : ''}
+      </div>`).join('')}
+  </div>`;
+};
+
+// Re-render wallet panel after admin panel loads
+const _origOpenAdmin = window.openAdminPanel;
+window.openAdminPanel = function () {
+  if (_origOpenAdmin) _origOpenAdmin();
+  setTimeout(() => { _wtCurrentChain = 'SOL'; renderWtPanel(); }, 300);
+};

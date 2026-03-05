@@ -68,6 +68,22 @@ const COINS = [
   { sym: 'ETH', icon: 'Ξ', name: 'Ethereum', id: 'ethereum' },
   { sym: 'SOL', icon: '◎', name: 'Solana', id: 'solana' }
 ];
+
+// ── Coin logo helper ───────────────────────────────────
+const COIN_LOGO_CACHE = {};
+function getCoinLogoUrl(sym) {
+  if (COIN_LOGO_CACHE[sym]) return COIN_LOGO_CACHE[sym];
+  const s = (sym || '').toLowerCase().replace(/usdt?$/, '');
+  return `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/${s}.svg`;
+}
+
+function coinLogoHtml(sym, icon, size = 36) {
+  const url = getCoinLogoUrl(sym);
+  return `<img src="${url}" class="coin-logo" width="${size}" height="${size}"
+    onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
+    alt="${sym}">
+  <div class="coin-icon" style="display:none;">${icon || sym.slice(0, 2)}</div>`;
+}
 const ALT_COINS = ['BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK', 'DOT', 'MATIC', 'UNI', 'ATOM', 'NEAR', 'APT', 'SUI', 'INJ', 'OP', 'ARB'];
 
 // ── Tab switching ──────────────────────────────────────
@@ -396,7 +412,7 @@ function renderSignalCard(s) {
     <div class="card-phase"><span class="phase-dot ${phaseClass}"></span>${s.phase} Phase</div>
     <div class="card-coin-row">
       <div class="card-coin-info">
-        <div class="coin-icon">${s.icon}</div>
+        <div style="position:relative;flex-shrink:0;display:flex;align-items:center;">${coinLogoHtml(s.symbol, s.icon)}</div>
         <div>
           <div class="coin-name">${s.symbol}/USDT</div>
           <div class="coin-vol">RSI: <span class="${s.rsi < 35 ? 'num-green' : s.rsi > 65 ? 'num-red' : 'num-cyan'}">${s.rsi}</span></div>

@@ -2121,3 +2121,117 @@
     margin-bottom: 12px;
     line-height: 1.4;
 }
+
+/* ── Altcoins panel ────────────────────────────────────────────── */
+.altcoins-panel {
+    padding: 20px 24px;
+    max-width: 900px;
+}
+.altcoins-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.altcoin-chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+    min-height: 36px;
+    align-items: center;
+}
+.altcoin-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(79,195,247,0.08);
+    border: 1px solid rgba(79,195,247,0.25);
+    border-radius: 20px;
+    padding: 4px 12px 4px 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    transition: var(--transition);
+}
+.altcoin-chip:hover { background: rgba(79,195,247,0.14); }
+.altcoin-chip-icon {
+    font-size: 11px;
+    color: var(--accent-cyan);
+    font-weight: 700;
+    font-family: var(--font-mono);
+}
+.altcoin-chip-name { font-family: var(--font-mono); }
+.altcoin-chip-remove {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    margin-left: 2px;
+    transition: color 0.15s;
+}
+.altcoin-chip-remove:hover { color: var(--accent-red); }
+.altcoin-add-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+.altcoins-signals-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+}
+.altcoins-tab-btn {
+    font-size: 12px;
+    padding: 4px 12px !important;
+    border-radius: 6px !important;
+}
+
+/* ── DexScreener real data badge & buy pressure ─────────────────── */
+.dex-source-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    background: rgba(79,195,247,0.05);
+    border: 1px solid rgba(79,195,247,0.15);
+    border-radius: 6px;
+    padding: 7px 12px;
+    margin-bottom: 14px;
+}
+.buy-pressure-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+.buy-pressure-bar {
+    flex: 1;
+    height: 8px;
+    background: rgba(252,92,101,0.2);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.buy-pressure-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+}
+.terminal-link.bubble {
+    background: rgba(167,139,250,0.12);
+    border-color: rgba(167,139,250,0.3);
+    color: #a78bfa;
+}
+.terminal-link.explorer {
+    background: rgba(79,195,247,0.08);
+    border-color: rgba(79,195,247,0.25);
+    color: var(--accent-cyan);
+}

@@ -209,6 +209,122 @@ async function doAddCoin(sym, overlay) {
   }
 }
 
+// ── Altcoins panel ─────────────────────────────────────
+function renderAltcoinsPanel(grid) {
+  const coins = AppState.customCoins || [];
+  grid.style.display = 'block'; // full width, not grid
+  grid.innerHTML = `
+    <div class="altcoins-panel">
+      <div class="altcoins-panel-header">
+        <div>
+          <div style="font-size:16px;font-weight:700;margin-bottom:4px;">🪙 Altcoin Signals</div>
+          <div style="font-size:12.5px;color:var(--text-muted);">Track any Binance-listed coin. Signals generate on demand.</div>
+        </div>
+        ${coins.length ? `<button class="btn btn-primary" onclick="generateAltcoinSignals()" style="font-size:12px;">📡 Generate Signals</button>` : ''}
+      </div>
+
+      <div class="altcoin-chips-row" id="altcoin-chips">
+        ${coins.length === 0
+      ? `<div style="color:var(--text-muted);font-size:13px;">No altcoins tracked yet. Add one below.</div>`
+      : coins.map(c => `
+          <div class="altcoin-chip">
+            <span class="altcoin-chip-icon">${c.icon || c.sym.slice(0, 2)}</span>
+            <span class="altcoin-chip-name">${c.sym}</span>
+            <button class="altcoin-chip-remove" onclick="removeCustomCoin('${c.sym}')" title="Remove ${c.sym}">×</button>
+          </div>`).join('')}
+      </div>
+
+      <div class="altcoin-add-row">
+        <input id="alts-quick-input" class="auth-input" type="text"
+          placeholder="Enter symbol, e.g. LINK, DOGE, INJ, AVAX…"
+          style="flex:1;max-width:320px;text-transform:uppercase;"
+          onkeydown="if(event.key==='Enter')addCoinInline()">
+        <button class="btn btn-primary" onclick="addCoinInline()" id="alts-add-btn">+ Add Coin</button>
+      </div>
+      <div id="alts-quick-error" style="color:var(--accent-red);font-size:12px;margin-top:6px;display:none;"></div>
+
+      ${coins.length ? `
+      <div class="altcoins-signals-section" id="altcoins-signals-grid">
+        <div style="color:var(--text-muted);font-size:13px;padding:20px 0;">Click "Generate Signals" to load live signals for your altcoins.</div>
+      </div>` : ''}
+    </div>`;
+
+  // Reset grid display back to grid when user leaves ALTS tab
+  document.querySelector('.signals-grid')?.style.removeProperty('display');
+}
+
+window.removeCustomCoin = function (sym) {
+  AppState.customCoins = (AppState.customCoins || []).filter(c => c.sym !== sym);
+  AppState.signals = AppState.signals.filter(s => s.symbol !== sym || !s.isCustom);
+  localStorage.setItem('tcmd_custom_coins', JSON.stringify(AppState.customCoins));
+  renderAltcoinsPanel(document.getElementById('signals-grid'));
+  showToast('🗑️', `${sym} Removed`, 'Altcoin removed from tracking', 'info');
+};
+
+window.addCoinInline = async function () {
+  const input = document.getElementById('alts-quick-input');
+  const errEl = document.getElementById('alts-quick-error');
+  const btn = document.getElementById('alts-add-btn');
+  const sym = (input?.value || '').trim().toUpperCase();
+  if (!sym) return;
+  if ((AppState.customCoins || []).find(c => c.sym === sym)) {
+    errEl.textContent = `${sym} is already tracked.`; errEl.style.display = 'block';
+    setTimeout(() => { errEl.style.display = 'none'; }, 3000); return;
+  }
+  btn.textContent = 'Loading…'; btn.disabled = true;
+  try {
+    const priceData = await API.CoinGecko.getPrices([sym]);
+    const cgId = Object.keys(priceData)[0];
+    if (!cgId || !priceData[cgId]?.usd) throw new Error(`"${sym}" not found. Try another symbol.`);
+    if (!AppState.customCoins) AppState.customCoins = [];
+    AppState.customCoins.push({ sym, icon: sym.slice(0, 2), name: sym });
+    localStorage.setItem('tcmd_custom_coins', JSON.stringify(AppState.customCoins));
+    input.value = '';
+    errEl.style.display = 'none';
+    renderAltcoinsPanel(document.getElementById('signals-grid'));
+    showToast('✅', `${sym} Added`, 'Click Generate Signals to load live signal', 'success');
+  } catch (e) {
+    errEl.textContent = e.message; errEl.style.display = 'block';
+  } finally {
+    btn.textContent = '+ Add Coin'; btn.disabled = false;
+  }
+};
+
+window.generateAltcoinSignals = async function () {
+  const grid = document.getElementById('altcoins-signals-grid');
+  if (!grid) return;
+  grid.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:12px 0;">⏳ Generating signals…</div>';
+  const coins = AppState.customCoins || [];
+  const sigs = [];
+  await Promise.allSettled(coins.map(async c => {
+    try {
+      const priceData = await API.CoinGecko.getPrices([c.sym]);
+      const chartData = await API.CoinGecko.getOHLCV(c.sym, 90);
+      const cgId = Object.keys(priceData)[0];
+      if (!cgId || !priceData[cgId]?.usd) return;
+      const price = API.normalizeCGPrice(cgId, priceData);
+      const sig = SignalEngine.generateSignal(c.sym, price, chartData);
+      if (sig) { sig.icon = c.icon; sig.displayName = c.sym; sig.isCustom = true; sig.generatedAt = Date.now(); sig.signalAge = 'fresh'; sigs.push(sig); }
+    } catch (e) { console.warn(`Alt signal failed for ${c.sym}:`, e); }
+  }));
+  // Merge into main signals
+  AppState.signals = AppState.signals.filter(s => !s.isCustom);
+  AppState.signals.push(...sigs);
+  if (!sigs.length) { grid.innerHTML = '<div style="color:var(--accent-red);font-size:13px;padding:12px 0;">Could not generate signals. Check symbols or try again.</div>'; return; }
+  // Render signal cards inside panel
+  grid.style.display = 'grid';
+  grid.style.gridTemplateColumns = 'repeat(auto-fill,minmax(320px,1fr))';
+  grid.style.gap = '14px';
+  grid.style.marginTop = '16px';
+  grid.innerHTML = sigs.map(sig => buildSignalCardHTML(sig)).join('');
+  if (typeof startSignalTimers === 'function') startSignalTimers();
+};
+
+// Helper: build a single signal card HTML (wraps renderSignalCard)
+function buildSignalCardHTML(sig) {
+  return renderSignalCard(sig);
+}
+
 function renderSkeletons(n) {
   return Array.from({ length: n }, () => `
     <div class="signal-card" style="gap:12px;">
@@ -221,7 +337,9 @@ function renderSkeletons(n) {
 
 function filterSignals(sigs) {
   let result = sigs;
-  if (AppState.signalCoinFilter !== 'ALL') {
+  if (AppState.signalCoinFilter === 'ALTS') {
+    result = result.filter(s => s.isCustom);
+  } else if (AppState.signalCoinFilter !== 'ALL') {
     result = result.filter(s => s.symbol === AppState.signalCoinFilter);
   }
   if (AppState.signalFilter === 'long') result = result.filter(s => s.direction === 'LONG');
@@ -235,6 +353,13 @@ function filterSignals(sigs) {
 
 function renderSignalCards() {
   const grid = document.getElementById('signals-grid');
+
+  // ── Altcoins tab: show manager panel ──────────────────
+  if (AppState.signalCoinFilter === 'ALTS') {
+    renderAltcoinsPanel(grid);
+    return;
+  }
+
   const sigs = filterSignals(AppState.signals);
   if (sigs.length === 0) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">

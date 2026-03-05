@@ -332,27 +332,58 @@ function populateScannerDrawer(token) {
   });
 
   // Smart trades with explorer links
-  const traders = Scanner.generateSmartTraders(token);
-  const maxB = Math.max(...traders.map(t => t.bought));
+  // ── Smart Trades: Real DexScreener data ───────────────
+  const tx = token.txns || {};
+  const vol = token.volume || {};
+  const periods = [
+    { label: '5m', buys: tx.m5?.buys || 0, sells: tx.m5?.sells || 0, vol: vol.m5 || 0 },
+    { label: '1h', buys: tx.h1?.buys || 0, sells: tx.h1?.sells || 0, vol: vol.h1 || 0 },
+    { label: '6h', buys: tx.h6?.buys || 0, sells: tx.h6?.sells || 0, vol: vol.h6 || 0 },
+    { label: '24h', buys: tx.h24?.buys || 0, sells: tx.h24?.sells || 0, vol: vol.h24 || 0 }
+  ];
+
+  const h24Total = periods[3].buys + periods[3].sells;
+  const buyPct = h24Total > 0 ? Math.round((periods[3].buys / h24Total) * 100) : 50;
+  const buyPressureColor = buyPct >= 60 ? 'var(--accent-green)' : buyPct <= 40 ? 'var(--accent-red)' : 'var(--accent-amber)';
+
   document.getElementById('drawer-smarttrades-panel').innerHTML = `
-    <div class="smart-trades-summary">
-      <span>${traders.length} wallets detected</span>
-      <strong>${fmt.vol(traders.reduce((a, t) => a + t.bought, 0))} total bought</strong>
+    <div class="dex-source-badge">
+      📊 Live data from <a href="${token.dexUrl}" target="_blank" style="color:var(--accent-cyan);">DexScreener</a>
+      <span style="margin-left:auto;font-size:10px;color:var(--text-muted);">Pair: ${token.pairAddress ? token.pairAddress.slice(0, 8) + '…' : 'N/A'}</span>
     </div>
-    <table class="smart-trades-table">
-      <thead><tr><th>Wallet</th><th>Bought</th><th>Sold</th><th>ROI</th><th>Explore</th></tr></thead>
-      <tbody>${traders.map(t => {
-    const pct = Math.round((t.bought / maxB) * 100);
-    const explorerUrl = terminals.walletExplorer(t.walletAddress || '11111111111111111111111111111111');
+
+    <div class="buy-pressure-row">
+      <span style="font-size:12px;font-weight:700;color:var(--accent-green);">Buys ${buyPct}%</span>
+      <div class="buy-pressure-bar">
+        <div class="buy-pressure-fill" style="width:${buyPct}%;background:${buyPressureColor};"></div>
+      </div>
+      <span style="font-size:12px;font-weight:700;color:var(--accent-red);">${100 - buyPct}% Sells</span>
+    </div>
+
+    <table class="smart-trades-table" style="margin-top:14px;">
+      <thead><tr><th>Period</th><th>🟢 Buys</th><th>🔴 Sells</th><th>B/S Ratio</th><th>Volume</th></tr></thead>
+      <tbody>${periods.map(p => {
+    const total = p.buys + p.sells;
+    const ratio = total > 0 ? (p.buys / Math.max(1, p.sells)).toFixed(2) : '—';
+    const ratioColor = parseFloat(ratio) > 1 ? 'num-green' : parseFloat(ratio) < 1 ? 'num-red' : '';
     return `<tr>
-          <td><div class="wallet-name"><div class="wallet-avatar">${t.avatar}</div>${t.name}</div></td>
-          <td><div class="wallet-balance">${fmt.vol(t.bought)}</div><div class="balance-bar"><div class="balance-bar-fill green" style="width:${pct}%"></div></div></td>
-          <td>${t.sold ? fmt.vol(t.sold) : '\u2014'}</td>
-          <td class="${t.roi ? (parseFloat(t.roi) > 0 ? 'roi-positive roi-value' : 'roi-negative roi-value') : ''}">${t.roi ? t.roi + '%' : '\u2014'}</td>
-          <td><a href="${explorerUrl}" target="_blank" class="explorer-wallet-link" title="View on-chain">\ud83d\udd0d</a></td>
+          <td><strong>${p.label}</strong></td>
+          <td class="num-green">${p.buys.toLocaleString()}</td>
+          <td class="num-red">${p.sells.toLocaleString()}</td>
+          <td class="${ratioColor}">${ratio}x</td>
+          <td class="num-cyan">${fmt.vol(p.vol)}</td>
         </tr>`;
   }).join('')}</tbody>
-    </table>`;
+    </table>
+
+    <div style="margin-top:16px;display:flex;flex-wrap:wrap;gap:6px;">
+      ${terminals.axiom ? `<a class="terminal-link axiom" href="${terminals.axiom}" target="_blank">Trade on Axiom</a>` : ''}
+      ${terminals.gmgn ? `<a class="terminal-link gmgn" href="${terminals.gmgn}" target="_blank">gmgn.ai</a>` : ''}
+      ${terminals.padre ? `<a class="terminal-link padre" href="${terminals.padre}" target="_blank">Padre</a>` : ''}
+      ${terminals.bubbleMaps ? `<a class="terminal-link bubble" href="${terminals.bubbleMaps}" target="_blank">🛸 BubbleMaps</a>` : ''}
+      <a class="terminal-link explorer" href="${terminals.explorer}" target="_blank">🔎 Explorer</a>
+    </div>`;
+
   switchDrawerTab('history');
 }
 

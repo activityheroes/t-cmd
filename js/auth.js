@@ -460,9 +460,26 @@ async function renderAdminPanel() {
 
         <div class="admin-section" style="margin-top:20px;">
             <div class="admin-section-title">🐋 Wallet Tracker</div>
-            <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-                Track smart money wallets across chains. When a tracked wallet holds a scanned memecoin, you'll see an alert in Smart Trades.
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
+                Track smart money wallets across chains. Wallets saved here are <strong style="color:var(--accent-cyan)">shared with all users</strong> via Supabase.
             </div>
+            ${SUPABASE_READY ? `
+            <details style="margin-bottom:12px;">
+              <summary style="font-size:11px;color:var(--accent-amber);cursor:pointer;list-style:none;">
+                ⚠️ If users can't see wallets — run this SQL in Supabase
+              </summary>
+              <pre style="margin-top:8px;background:var(--bg-deep);border:1px solid var(--border-subtle);border-radius:6px;padding:10px;font-size:10.5px;color:var(--accent-cyan);overflow-x:auto;white-space:pre-wrap;">CREATE TABLE IF NOT EXISTS watched_wallets (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  chain text NOT NULL,
+  address text NOT NULL,
+  label text,
+  created_at timestamptz DEFAULT now()
+);
+ALTER TABLE watched_wallets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public read"   ON watched_wallets FOR SELECT USING (true);
+CREATE POLICY "public insert" ON watched_wallets FOR INSERT WITH CHECK (true);
+CREATE POLICY "public delete" ON watched_wallets FOR DELETE USING (true);</pre>
+            </details>` : ''}
             <div class="wallet-tracker-chains">
                 <button class="wt-chain-tab active" data-chain="SOL" onclick="switchWtChain('SOL',this)">◎ SOL</button>
                 <button class="wt-chain-tab" data-chain="ETH" onclick="switchWtChain('ETH',this)">Ξ ETH</button>

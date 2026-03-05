@@ -459,6 +459,37 @@ async function renderAdminPanel() {
         </div>
 
         <div class="admin-section" style="margin-top:20px;">
+            <div class="admin-section-title">🔑 API Keys — Rug Checker</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+                Keys are stored locally in your browser only. Required for the 12-signal rug checker and cluster detector.
+                Get keys: <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
+                &nbsp;·&nbsp;
+                <a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <!-- Birdeye key -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦅 Birdeye</label>
+                    <input id="admin-birdeye-key" type="password" placeholder="Paste Birdeye API key…"
+                        value="${localStorage.getItem('tcmd_birdeye_key')||''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('birdeye')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('birdeye')" id="birdeye-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                </div>
+                <!-- Helius key -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🔆 Helius</label>
+                    <input id="admin-helius-key" type="password" placeholder="Paste Helius API key (Solana)…"
+                        value="${localStorage.getItem('tcmd_helius_key')||''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('helius')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('helius')" id="helius-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                </div>
+                <div id="admin-key-status" style="font-size:11px;color:var(--text-muted);min-height:16px;"></div>
+            </div>
+        </div>
+
+        <div class="admin-section" style="margin-top:20px;">
             <div class="admin-section-title">🐋 Wallet Tracker</div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
                 Track smart money wallets across chains. Wallets saved here are <strong style="color:var(--accent-cyan)">shared with all users</strong> via Supabase.
@@ -688,6 +719,42 @@ window.fetchWtActivity = async function (id, address, chain) {
         ${tx.sig ? `<a href="${tx.url}" target="_blank" class="wt-tx-link" title="${tx.sig}">tx ↗</a>` : ''}
       </div>`).join('')}
   </div>`;
+};
+
+// ── API Key management (Rug Checker) ─────────────────────────
+window.adminSaveKey = function (name) {
+  const input = document.getElementById(`admin-${name}-key`);
+  if (!input) return;
+  const val = input.value.trim();
+  if (typeof ChainAPIs !== 'undefined') {
+    ChainAPIs.setKey(name, val);
+  } else {
+    localStorage.setItem(`tcmd_${name}_key`, val);
+  }
+  const status = document.getElementById('admin-key-status');
+  if (status) { status.textContent = `✓ ${name} key saved`; status.style.color = 'var(--accent-green)'; }
+  setTimeout(() => { const s = document.getElementById('admin-key-status'); if (s) s.textContent = ''; }, 3000);
+};
+
+window.adminTestKey = async function (name) {
+  const btn    = document.getElementById(`${name}-test-btn`);
+  const status = document.getElementById('admin-key-status');
+  if (!btn || typeof ChainAPIs === 'undefined') return;
+  const key = document.getElementById(`admin-${name}-key`)?.value?.trim();
+  if (!key) { if (status) { status.textContent = `No ${name} key entered`; status.style.color = '#f59e0b'; } return; }
+  btn.textContent = 'Testing…'; btn.disabled = true;
+  try {
+    const ok = name === 'birdeye'
+      ? await ChainAPIs.testBirdeyeKey(key)
+      : await ChainAPIs.testHeliusKey(key);
+    if (status) {
+      status.textContent = ok ? `✓ ${name} key is valid!` : `✗ ${name} key invalid or quota exceeded`;
+      status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+    }
+  } catch (e) {
+    if (status) { status.textContent = `Error testing ${name} key`; status.style.color = '#ef4444'; }
+  }
+  btn.textContent = 'Test'; btn.disabled = false;
 };
 
 window.importWalletsJson = async function (chain) {

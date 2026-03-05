@@ -218,6 +218,13 @@
           and identifies breakout momentum.
         </div>
 
+        <!-- Rug Risk Quick-Check Bar -->
+        <div class="rug-quickcheck-bar">
+          <span class="rug-qc-label">🛡️ Deep Rug Check</span>
+          <input id="rug-quick-input" type="text" placeholder="Paste any token address (SOL / ETH / BSC / Base)…" spellcheck="false" autocomplete="off">
+          <button id="rug-quick-btn" class="rug-qc-btn">Analyze</button>
+        </div>
+
         <!-- Grid -->
         <div class="signals-grid" id="scanner-grid">
           <div class="empty-state" style="grid-column:1/-1;">
@@ -331,6 +338,40 @@
     </div>
   </div>
 
+  <!-- ── Rug Risk Panel ────────────────────────────────── -->
+  <div id="rug-panel" class="rp-overlay rp-hidden">
+    <div class="rp-drawer">
+
+      <!-- Header -->
+      <div class="rp-header">
+        <div class="rp-header-left">
+          <span class="rp-shield">🛡️</span>
+          <div>
+            <div class="rp-token-name">Token Analysis</div>
+            <div class="rp-token-addr"></div>
+          </div>
+        </div>
+        <button id="rp-close-btn" class="rp-close" title="Close">✕</button>
+      </div>
+
+      <!-- API key warning -->
+      <div id="rp-key-warn" class="rp-key-warn" style="display:none;">
+        ⚠️ No API keys configured — results will be limited.
+        <a href="#" onclick="event.preventDefault();document.getElementById('admin-toggle')?.click()">Add keys in Admin panel →</a>
+      </div>
+
+      <!-- Loading spinner -->
+      <div id="rp-loading" class="rp-loading" style="display:none;">
+        <div class="rp-spinner"></div>
+        <span>Running 12-signal analysis + cluster detection…</span>
+      </div>
+
+      <!-- Results container -->
+      <div id="rp-results" class="rp-results-scroll"></div>
+
+    </div>
+  </div>
+
   <!-- ── Admin Panel Overlay ────────────────────────────── -->
   <div class="admin-overlay" id="admin-overlay">
     <div class="admin-panel">
@@ -381,6 +422,11 @@
   <script src="js/app.js"></script>
   <script src="js/app2.js"></script>
   <script src="js/whales.js"></script>
+  <!-- Rug Checker + Cluster Detector -->
+  <script src="js/chain-apis.js"></script>
+  <script src="js/rug-checker.js"></script>
+  <script src="js/cluster-detector.js"></script>
+  <script src="js/rug-ui.js"></script>
 
 </body>
 

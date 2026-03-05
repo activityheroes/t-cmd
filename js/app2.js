@@ -187,6 +187,7 @@ function renderScannerCard(token) {
         <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${token.address}',this)" title="Copy Contract Address: ${token.address}">
           📋 ${token.address ? token.address.slice(0, 4) + '…' + token.address.slice(-4) : 'CA'}
         </button>
+        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${token.address}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep Rug Check">🛡️ Rug Check</button>
         <a class="card-action-icon" href="${token.dexUrl}" target="_blank" title="DexScreener" onclick="event.stopPropagation()">📊</a>
         ${token.socials[0]?.url ? `<a class="card-action-icon" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()">🐦</a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()">🌐</a>` : ''}

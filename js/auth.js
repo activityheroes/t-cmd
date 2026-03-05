@@ -74,7 +74,7 @@ const AuthManager = (() => {
 
     // ── Admin helpers (async) ──────────────────────────────
     async getAllUsers() { return SupabaseDB.getAllUsers(); },
-    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true } }); },
+    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false } }); },
     async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
     async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
 
@@ -406,10 +406,10 @@ async function renderAdminPanel() {
                     <td><span class="status-badge status-${u.status}">${u.status}</span></td>
                     <td>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
-                            ${['coinSignals', 'memeScanner', 'tradingLog'].map(f => `
+                            ${['coinSignals', 'memeScanner', 'tradingLog', 'whalesWallets'].map(f => `
                             <label class="feat-toggle" title="${f}">
                                 <input type="checkbox" ${u.features?.[f] ? 'checked' : ''} onchange="toggleFeature('${u.id}','${f}',this.checked)" ${u.id === currentUser?.userId ? 'disabled' : ''}>
-                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : '📋'}</span>
+                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : f === 'tradingLog' ? '📋' : '🐋'}</span>
                             </label>`).join('')}
                         </div>
                     </td>
@@ -588,6 +588,16 @@ async function renderWtPanel() {
 
   panel.innerHTML = `
     ${keySection}
+    <div class="wt-import-section">
+      <div class="wt-import-title">📤 Bulk Import JSON</div>
+      <div class="wt-import-row">
+        <textarea id="wt-json-input" class="wt-json-textarea"
+          placeholder='[{"address":"4V91ZL...","name":"rookixbt","emoji":"🧑"},...]'></textarea>
+        <button class="btn btn-ghost" style="font-size:11px;white-space:nowrap;align-self:flex-end;"
+          onclick="importWalletsJson('${chain}')">Import</button>
+      </div>
+      <div id="wt-import-result" class="wt-import-result"></div>
+    </div>
     <div class="wt-add-row">
       <input id="wt-addr-input" class="auth-input" type="text" placeholder="${cfg?.label} wallet address…" style="flex:1;">
       <input id="wt-label-input" class="auth-input" type="text" placeholder="Label (e.g. Whale123)" style="width:130px;">
@@ -661,6 +671,40 @@ window.fetchWtActivity = async function (id, address, chain) {
         ${tx.sig ? `<a href="${tx.url}" target="_blank" class="wt-tx-link" title="${tx.sig}">tx ↗</a>` : ''}
       </div>`).join('')}
   </div>`;
+};
+
+window.importWalletsJson = async function (chain) {
+  const textarea = document.getElementById('wt-json-input');
+  const resultEl = document.getElementById('wt-import-result');
+  const raw = (textarea?.value || '').trim();
+  if (!raw) return;
+
+  let entries;
+  try {
+    entries = JSON.parse(raw);
+    if (!Array.isArray(entries)) throw new Error('Expected a JSON array');
+  } catch (e) {
+    resultEl.textContent = '❌ Invalid JSON: ' + e.message;
+    resultEl.style.color = 'var(--accent-red)';
+    return;
+  }
+
+  let added = 0, skipped = 0;
+  for (const item of entries) {
+    const addr = (item.address || '').trim();
+    if (!addr) { skipped++; continue; }
+    const label = [item.emoji, item.name].filter(Boolean).join(' ') || addr.slice(0, 8) + '…';
+    try {
+      await WalletTracker.addWallet(chain, addr, label);
+      added++;
+    } catch { skipped++; }
+  }
+
+  resultEl.textContent = `✅ Imported ${added} wallet${added !== 1 ? 's' : ''}${skipped ? ` · ${skipped} skipped` : ''}`;
+  resultEl.style.color = 'var(--accent-green)';
+  textarea.value = '';
+  setTimeout(() => renderWtPanel(), 400);
+  showToast('📤', 'Wallets Imported', `${added} wallets added to ${chain}`, 'success');
 };
 
 // Re-render wallet panel after admin panel loads

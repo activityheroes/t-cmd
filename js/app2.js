@@ -582,6 +582,7 @@ const App = {
   init() {
     AuthManager.init();
     if (!AuthManager.isLoggedIn()) { showAuthPage(); return; }
+    if (typeof showAppPage === 'function') showAppPage();
 
     // Clear any existing refresh interval from a previous init call
     if (AppState.liveRefreshInterval) {
@@ -619,6 +620,7 @@ const App = {
         if (t === 'scanner' && !AppState.scannerTokens.length) loadScanner();
         if (t === 'scanner') renderScannerCards();
         if (t === 'log') renderTradingLog();
+        if (t === 'whales') { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
       });
     });
 
@@ -726,6 +728,7 @@ const App = {
       const tab = t.dataset.tab;
       if (tab === 'scanner' && !user.features?.memeScanner) t.style.opacity = '0.4';
       if (tab === 'log' && !user.features?.tradingLog) t.style.opacity = '0.4';
+      if (tab === 'whales' && !user.features?.whalesWallets) t.style.opacity = '0.4';
     });
   }
 };

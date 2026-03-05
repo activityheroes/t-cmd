@@ -32,6 +32,7 @@
         <button class="nav-tab active" data-tab="signals">📡 Coin Signals</button>
         <button class="nav-tab" data-tab="scanner">🔍 Memecoin Scanner</button>
         <button class="nav-tab" data-tab="log">📒 Trading Log</button>
+        <button class="nav-tab" data-tab="whales" id="nav-tab-whales">🐋 Whales & Wallets</button>
       </div>
 
       <div class="nav-actions">
@@ -83,9 +84,18 @@
             <!-- Coin filters -->
             <div class="filter-row">
               <button class="coin-filter-btn active" data-coin="ALL" title="All">🌐</button>
-              <button class="coin-filter-btn" data-coin="BTC" title="Bitcoin">₿</button>
-              <button class="coin-filter-btn" data-coin="ETH" title="Ethereum">Ξ</button>
-              <button class="coin-filter-btn" data-coin="SOL" title="Solana">◎</button>
+              <button class="coin-filter-btn" data-coin="BTC" title="Bitcoin">
+                <img class="cfb-logo" src="https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/btc.svg" alt="BTC" onerror="this.style.display='none'">
+                <span class="cfb-sym">BTC</span>
+              </button>
+              <button class="coin-filter-btn" data-coin="ETH" title="Ethereum">
+                <img class="cfb-logo" src="https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/eth.svg" alt="ETH" onerror="this.style.display='none'">
+                <span class="cfb-sym">ETH</span>
+              </button>
+              <button class="coin-filter-btn" data-coin="SOL" title="Solana">
+                <img class="cfb-logo" src="https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/sol.svg" alt="SOL" onerror="this.style.display='none'">
+                <span class="cfb-sym">SOL</span>
+              </button>
               <button class="coin-filter-btn altcoins-tab-btn" data-coin="ALTS" title="Your Altcoins"
                 id="alts-tab-btn">🪙 Altcoins</button>
               <div class="divider" style="width:1px;height:20px;margin:0 4px;background:var(--border-subtle);"></div>
@@ -256,6 +266,15 @@
         <div id="trading-log-container" class="trading-log-wrapper"></div>
       </div>
 
+      <!-- ══════════════════════════════════════════════
+         WHALES & WALLETS TAB
+      ═══════════════════════════════════════════════ -->
+      <div id="panel-whales" class="tab-panel">
+        <div id="whales-panel-root">
+          <!-- Populated by WhalesPanel.render() in whales.js -->
+        </div>
+      </div>
+
     </div><!-- /main-content -->
   </div><!-- /app -->
 
@@ -359,6 +378,7 @@
   <script src="js/trading-log.js"></script>
   <script src="js/app.js"></script>
   <script src="js/app2.js"></script>
+  <script src="js/whales.js"></script>
 
 </body>
 

@@ -403,13 +403,32 @@ function renderSignalCard(s) {
   const pctMove = (((s.takeProfit - s.entry) / s.entry) * 100).toFixed(1);
   const confColor = s.confidence >= 75 ? '#26de81' : s.confidence >= 55 ? '#f7b731' : '#fc5c65';
 
-  return `<div class="signal-card ${isLong ? 'long-card' : 'short-card'} animate-fadeInUp" onclick="openSignalDetail('${s.id}')">
+  // God-tier: confidence >= 85 + Breakout phase
+  const isGodTier = s.confidence >= 85 && s.phase === 'Breakout';
+  // Signal age in hours
+  const ageHours = s.generatedAt ? (Date.now() - s.generatedAt) / 3600000 : 0;
+
+  // Urgency banner
+  let urgencyHtml = '';
+  if (isGodTier) {
+    urgencyHtml = `<div class="urgency-banner urgency-fire">⚡ GOD SIGNAL — Breakout imminent, elite confidence. Don't sleep on this!</div>`;
+  } else if (s.phase === 'Breakout' && ageHours < 2) {
+    urgencyHtml = `<div class="urgency-banner urgency-fire">🚀 ACT NOW — Breakout in progress! Entry window is open.</div>`;
+  } else if (s.phase === 'Breakout' && ageHours >= 2) {
+    urgencyHtml = `<div class="urgency-banner urgency-warning">⏰ BREAKOUT AGING — Momentum may be fading. Manage risk tightly.</div>`;
+  } else if (s.phase === 'Accumulating') {
+    urgencyHtml = `<div class="urgency-banner urgency-info">📦 ACCUMULATING — Ideal pre-breakout entry. Watch for confirmation.</div>`;
+  }
+
+  return `<div class="signal-card ${isLong ? 'long-card' : 'short-card'}${isGodTier ? ' god-tier-card' : ''} animate-fadeInUp" onclick="openSignalDetail('${s.id}')">
     <div class="card-top-row">
       <span class="card-type-badge ${s.signalAge || 'fresh'}"><span>✦</span> ${s.signalAge === 'revived' ? '↺ Revived' : '✦ Fresh'} Signal</span>
+      ${isGodTier ? `<span class="god-tier-badge">⚡ God Tier</span>` : ''}
       ${s.generatedAt ? `<span class="signal-age-clock" data-signal-ts="${s.generatedAt}">${typeof fmtAge === 'function' ? fmtAge(s.generatedAt) : '< 1m'}</span>` : ''}
       <div class="direction-badge ${isLong ? 'long' : 'short'}">${isLong ? '▲' : '▼'} ${s.direction}</div>
     </div>
     <div class="card-phase"><span class="phase-dot ${phaseClass}"></span>${s.phase} Phase</div>
+    ${urgencyHtml}
     <div class="card-coin-row">
       <div class="card-coin-info">
         <div style="position:relative;flex-shrink:0;display:flex;align-items:center;">${coinLogoHtml(s.symbol, s.icon)}</div>

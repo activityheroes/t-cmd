@@ -469,17 +469,40 @@ function renderTechSocialTab(sig) {
 
 function renderSmartTradesTab(sig) {
   const panel = document.getElementById('drawer-smarttrades-panel');
-  const traders = [
-    { name: 'Whale Alpha', avatar: 'W', bought: 125000, sold: 0, roi: null, age: 2 },
-    { name: 'Sigma Wolf', avatar: 'S', bought: 48000, sold: 22000, roi: '+38.2', age: 6 },
-    { name: 'Degen King', avatar: 'D', bought: 200000, sold: 0, roi: null, age: 14 },
-    { name: 'SOL Sniper', avatar: 'S', bought: 31000, sold: 31000, roi: '+12.8', age: 18 }
-  ];
+
+  // Seed randomness from coin symbol so each coin gets consistent-but-different data
+  const seed = sig.symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  const rng = (min, max, offset = 0) => {
+    const s = Math.sin(seed + offset) * 10000;
+    return Math.floor((s - Math.floor(s)) * (max - min) + min);
+  };
+
+  const names = ['Whale Alpha', 'Sigma Wolf', 'Degen King', 'SOL Sniper',
+    'Moon Chaser', 'Alpha Bear', 'Gem Hunter', 'Trench Wizard'];
+  const count = 3 + (seed % 3); // 3-5 wallets, varies by coin
+  const scale = sig.price > 10000 ? 100000 : sig.price > 100 ? 10000 : 2000;
+
+  const traders = Array.from({ length: count }, (_, i) => {
+    const bought = rng(scale * 0.3, scale * 3, i * 7);
+    const hasSold = rng(0, 10, i * 13) > 6;
+    const sold = hasSold ? rng(Math.floor(bought * 0.2), Math.floor(bought * 0.8), i * 11) : 0;
+    const roi = hasSold ? (rng(-30, 80, i * 17) / 10).toFixed(1) : null;
+    const age = rng(1, 96, i * 19);
+    const name = names[(seed + i * 3) % names.length];
+    return { name, avatar: name[0], bought, sold, roi: roi ? (parseFloat(roi) >= 0 ? '+' + roi : roi) : null, age };
+  });
+
   const maxBought = Math.max(...traders.map(t => t.bought));
+  const totalBought = traders.reduce((a, t) => a + t.bought, 0);
+
   panel.innerHTML = `
+    <div class="simulated-badge">
+      ⚠️ Simulated data — illustrative only.
+      Real whale tracking requires paid APIs (Nansen, Arkham).
+    </div>
     <div class="smart-trades-summary">
-      <span>${traders.length} wallets bought</span>
-      <strong>${fmt.vol(traders.reduce((a, t) => a + t.bought, 0))} total</strong>
+      <span>${traders.length} wallets tracked</span>
+      <strong>${fmt.vol(totalBought)} total</strong>
     </div>
     <table class="smart-trades-table">
       <thead><tr><th>Wallet</th><th>Bought</th><th>Sold</th><th>ROI</th><th>Age</th></tr></thead>

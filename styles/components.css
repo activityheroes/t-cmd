@@ -2109,3 +2109,15 @@
     border-color: var(--accent-cyan);
     color: var(--accent-cyan);
 }
+
+/* ── Simulated data badge ──────────────────────────────────────── */
+.simulated-badge {
+    font-size: 11px;
+    color: var(--accent-amber);
+    background: rgba(247,183,49,0.07);
+    border: 1px solid rgba(247,183,49,0.2);
+    border-radius: 5px;
+    padding: 6px 10px;
+    margin-bottom: 12px;
+    line-height: 1.4;
+}

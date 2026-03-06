@@ -131,7 +131,14 @@ function sparklineChart(token) {
     const d = new Date(Date.now() - offsetMs);
     return d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: true });
   };
-  return `<div class="card-sparkline">
+  // Put signal data on the wrapper div — hovering anywhere on the chart triggers the popup.
+  // This is 100% reliable: no SVG pointer-event quirks, no overflow:hidden clipping issues.
+  return `<div class="card-sparkline sparkline-has-sig"
+    data-sig-date="${sigDateStr}"
+    data-sig-price="${sigPrice > 0 ? sigPrice.toPrecision(6) : '0'}"
+    data-sig-mc="${Math.max(0, Math.round(sigMC))}"
+    data-sig-change="${sigWindowPct.toFixed(2)}"
+    data-sig-symbol="${(token.symbol||'').replace(/"/g,'')}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:64px;display:block;">
       <defs>
         <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
@@ -144,17 +151,6 @@ function sparklineChart(token) {
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9" fill="${lc}" opacity="0.15"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="4.5" fill="${lc}"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2" fill="white" opacity="0.95"/>
-      <!-- Hit area — pointer-events="all" required because fill:transparent
-           would otherwise be invisible to mouse events (SVG default is visiblePainted) -->
-      <circle class="sparkline-sig-hit"
-        cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="16"
-        fill="transparent" pointer-events="all" style="cursor:pointer;"
-        data-sig-date="${sigDateStr}"
-        data-sig-price="${sigPrice > 0 ? sigPrice.toPrecision(6) : '0'}"
-        data-sig-mc="${Math.max(0, Math.round(sigMC))}"
-        data-sig-change="${sigWindowPct.toFixed(2)}"
-        data-sig-symbol="${(token.symbol||'').replace(/"/g,'')}"
-      />
     </svg>
     <div class="sparkline-labels">
       <span>${_t(86400000)}</span>
@@ -471,6 +467,52 @@ function renderScannerCards() {
   grid.innerHTML = tokens.map(renderScannerCard).join('');
 }
 
+// ── FOMO alert banner — shown for exceptional signals ─────────────
+function fomoAlert(token, momResult) {
+  const isGem      = momResult?.isGem;
+  const isBreakout = token.isBreakout;
+  const score      = token.pumpScore;
+  const isFresh    = token.signalType === 'fresh';
+
+  // Priority: highest first
+  // 1. GEM + confirmed breakout — rarest combo
+  if (isGem && isBreakout && score >= 75) {
+    return `<div class="fomo-alert level-max">
+      <span class="fomo-icon">🚨</span>
+      <div><strong>MAXIMUM SIGNAL</strong> — GEM breakout confirmed. This is the one. <strong>Get in NOW.</strong></div>
+    </div>`;
+  }
+  // 2. Confirmed breakout (high score)
+  if (isBreakout && score >= 78) {
+    return `<div class="fomo-alert level-breakout">
+      <span class="fomo-icon">🚀</span>
+      <div><strong>BREAKOUT CONFIRMED</strong> — It's moving right now. <strong>Don't miss this entry.</strong></div>
+    </div>`;
+  }
+  // 3. Rare GEM (momentum-based)
+  if (isGem) {
+    return `<div class="fomo-alert level-gem">
+      <span class="fomo-icon">💎</span>
+      <div><strong>RARE GEM DETECTED</strong> — Monster move incoming. <strong>Load up.</strong></div>
+    </div>`;
+  }
+  // 4. Hot accumulation (smart money stacking)
+  if (!isBreakout && score >= 85) {
+    return `<div class="fomo-alert level-hot">
+      <span class="fomo-icon">🔥</span>
+      <div><strong>LOADING UP</strong> — Smart money accumulating hard. <strong>Breakout imminent.</strong></div>
+    </div>`;
+  }
+  // 5. Fresh high-score launch
+  if (isFresh && score >= 80) {
+    return `<div class="fomo-alert level-fresh">
+      <span class="fomo-icon">⚡</span>
+      <div><strong>FIRST MOVERS ONLY</strong> — Fresh launch, crowd hasn't found it yet. <strong>Get in early.</strong></div>
+    </div>`;
+  }
+  return '';
+}
+
 function renderScannerCard(token) {
   const scoreClass = token.pumpScore >= 70 ? 'high' : token.pumpScore >= 45 ? 'medium' : 'low';
   const ch24 = token.priceChange.h24;
@@ -555,6 +597,8 @@ function renderScannerCard(token) {
       </div>
       <button class="fav-btn ${isFav ? 'active' : ''}" data-addr="${addr}" onclick="event.stopPropagation();window.toggleFavorite('${addr}')" title="${isFav ? 'Remove from favorites' : 'Save to favorites'}">⭐</button>
     </div>
+
+    ${fomoAlert(token, momResult)}
 
     <div class="card-coin-row">
       <div class="card-coin-info">
@@ -1440,9 +1484,11 @@ window.toggleMcMode = function (addr) {
 
   let _hideTimer = null;
 
-  // Use hasAttribute('data-sig-date') instead of closest() — more reliable on SVG elements
+  // Walk up from any element inside .sparkline-has-sig (the wrapper div itself,
+  // the SVG, any SVG child, or the labels row) until we hit the div carrying
+  // data-sig-date. Works on HTML and SVG nodes without any pointer-event tricks.
   function findSigHit(node) {
-    for (let i = 0; i < 4 && node && node !== document; i++) {
+    for (let i = 0; i < 8 && node && node !== document.body; i++) {
       if (node.hasAttribute && node.hasAttribute('data-sig-date')) return node;
       node = node.parentNode;
     }
@@ -1455,7 +1501,7 @@ window.toggleMcMode = function (addr) {
   });
   document.addEventListener('mouseout', e => {
     const hit = findSigHit(e.target);
-    if (hit) { _hideTimer = setTimeout(() => pop.classList.remove('visible'), 120); }
+    if (hit) { _hideTimer = setTimeout(() => pop.classList.remove('visible'), 150); }
   });
   document.addEventListener('scroll', () => pop.classList.remove('visible'), true);
   document.addEventListener('click',  () => pop.classList.remove('visible'), true);

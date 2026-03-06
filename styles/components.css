@@ -3492,6 +3492,62 @@ body.rug-panel-open { overflow: hidden; }
    Sparkline chart, CSS tooltips, card stats, MC toggle
    ══════════════════════════════════════════════════════════ */
 
+/* ── FOMO alert banner ───────────────────────────────────── */
+.fomo-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 13px;
+  border-radius: 8px;
+  border-left: 3px solid;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.fomo-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  animation: fomoIconPop 1.6s ease-in-out infinite;
+}
+/* Level colours */
+.fomo-alert.level-max {
+  background: linear-gradient(90deg, rgba(239,68,68,0.18) 0%, rgba(245,158,11,0.08) 100%);
+  border-left-color: #ef4444;
+  color: #fca5a5;
+  animation: fomoGlow 1.1s ease-in-out infinite alternate;
+}
+.fomo-alert.level-breakout {
+  background: rgba(34,197,94,0.1);
+  border-left-color: #22c55e;
+  color: #86efac;
+  animation: fomoGlow 1.4s ease-in-out infinite alternate;
+}
+.fomo-alert.level-gem {
+  background: rgba(245,158,11,0.1);
+  border-left-color: #f59e0b;
+  color: #fcd34d;
+  animation: fomoGlow 1.7s ease-in-out infinite alternate;
+}
+.fomo-alert.level-hot {
+  background: rgba(249,115,22,0.1);
+  border-left-color: #f97316;
+  color: #fdba74;
+}
+.fomo-alert.level-fresh {
+  background: rgba(6,182,212,0.1);
+  border-left-color: #06b6d4;
+  color: #67e8f9;
+}
+.fomo-alert strong { font-weight: 800; opacity: 1; }
+/* Glow pulse for max/breakout/gem levels */
+@keyframes fomoGlow {
+  from { box-shadow: none; }
+  to   { box-shadow: inset 0 0 14px rgba(255,255,255,0.04), 0 0 10px rgba(255,255,255,0.04); }
+}
+@keyframes fomoIconPop {
+  0%, 100% { transform: scale(1);    }
+  50%      { transform: scale(1.22); }
+}
+
 /* ── Sparkline mini price chart ─────────────────────────── */
 .card-sparkline {
   margin: 6px 0 4px;
@@ -3500,8 +3556,14 @@ body.rug-panel-open { overflow: hidden; }
   background: rgba(255,255,255,0.018);
   border: 1px solid rgba(255,255,255,0.06);
   position: relative;
+  cursor: crosshair; /* signals the chart is interactive */
+  transition: border-color 0.15s;
 }
-.card-sparkline svg  { display: block; }
+/* Subtle glow when hovering the chart (signals popup is coming) */
+.card-sparkline.sparkline-has-sig:hover {
+  border-color: rgba(255,255,255,0.15);
+}
+.card-sparkline svg  { display: block; pointer-events: none; }
 .sparkline-labels {
   display: flex;
   justify-content: space-between;

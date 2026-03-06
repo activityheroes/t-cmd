@@ -3546,39 +3546,37 @@ body.rug-panel-open { overflow: hidden; }
 .mc-toggle-btn svg { opacity: 0.65; transition: opacity 0.15s; }
 .mc-toggle-btn:hover svg { opacity: 1; }
 
-/* ── CSS hover tooltips [data-tooltip] ──────────────────── */
-[data-tooltip] { position: relative; }
-[data-tooltip]::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(13, 14, 20, 0.97);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-size: 10.5px;
+/* ── JS tooltip singleton (#tcmd-tip) ───────────────────────
+   Injected into <body> by app2.js so it is never clipped
+   by a parent's overflow:hidden. Uses position:fixed.
+   ─────────────────────────────────────────────────────────── */
+#tcmd-tip {
+  position: fixed;
+  z-index: 99999;
+  background: rgba(10, 11, 17, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #c4c8d4;
+  font-size: 11px;
   font-weight: 500;
-  line-height: 1.5;
-  padding: 5px 10px;
-  border-radius: 7px;
-  width: max-content;
-  max-width: 210px;
+  line-height: 1.55;
+  padding: 6px 12px;
+  border-radius: 8px;
+  max-width: 230px;
   text-align: center;
   white-space: normal;
+  word-break: break-word;
   pointer-events: none;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.65);
   opacity: 0;
-  transition: opacity 0.16s ease;
-  z-index: 500;
-  box-shadow: 0 6px 24px rgba(0,0,0,0.55);
+  transform: translateY(4px);
+  transition: opacity 0.13s ease, transform 0.13s ease;
+  visibility: hidden;
 }
-[data-tooltip]:hover::after { opacity: 1; }
-/* Flip tooltip downward for bottom-row items */
-.card-bottom-row [data-tooltip]::after,
-.entry-timer-block [data-tooltip]::after { bottom: auto; top: calc(100% + 8px); }
-/* Right-align for edge elements */
-.pump-score[data-tooltip]::after,
-.fav-btn[data-tooltip]::after { left: auto; right: 0; transform: none; }
+#tcmd-tip.visible {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
 
 /* ── button.terminal-icon-link (copy+go variant) ────────── */
 button.terminal-icon-link {

@@ -1217,3 +1217,66 @@ window.toggleMcMode = function (addr) {
   if (btnPrice) btnPrice.style.display = newIsMc ? 'none'   : 'inline';
   if (btnMc)    btnMc.style.display    = newIsMc ? 'inline' : 'none';
 };
+
+// ══════════════════════════════════════════════════════════════
+// TOOLTIP SYSTEM — uses position:fixed + body-level div so it
+// is never clipped by card overflow:hidden
+// ══════════════════════════════════════════════════════════════
+(function initTooltip() {
+  // Create singleton tooltip element
+  const tip = document.createElement('div');
+  tip.id = 'tcmd-tip';
+  document.body.appendChild(tip);
+
+  let _hideTimer = null;
+
+  function show(target) {
+    const text = target.dataset.tooltip;
+    if (!text) return;
+    clearTimeout(_hideTimer);
+    tip.textContent = text;
+    tip.classList.add('visible');
+    reposition(target);
+  }
+
+  function reposition(target) {
+    const r   = target.getBoundingClientRect();
+    const tw  = tip.offsetWidth;
+    const th  = tip.offsetHeight;
+    const vw  = window.innerWidth;
+    const vh  = window.innerHeight;
+    const GAP = 9;
+
+    // Default: above the element, horizontally centred
+    let top  = r.top  - th - GAP;
+    let left = r.left + (r.width - tw) / 2;
+
+    // Flip below if it would go off the top
+    if (top < 6) top = r.bottom + GAP;
+    // Flip above if it goes off the bottom
+    if (top + th > vh - 6) top = r.top - th - GAP;
+
+    // Clamp horizontally
+    left = Math.max(8, Math.min(left, vw - tw - 8));
+
+    tip.style.top  = top  + 'px';
+    tip.style.left = left + 'px';
+  }
+
+  function hide() {
+    _hideTimer = setTimeout(() => tip.classList.remove('visible'), 80);
+  }
+
+  // Event delegation — works on dynamically created cards
+  document.addEventListener('mouseover', e => {
+    const el = e.target.closest('[data-tooltip]');
+    if (el) show(el);
+  });
+  document.addEventListener('mouseout', e => {
+    const el = e.target.closest('[data-tooltip]');
+    if (el) hide();
+  });
+  // Hide on scroll or any click
+  document.addEventListener('scroll', () => tip.classList.remove('visible'), true);
+  document.addEventListener('click',  () => tip.classList.remove('visible'), true);
+})();

@@ -170,6 +170,17 @@ const MomentumDetector = (() => {
     return sig(false, 10, 'Low volume acceleration');
   }
 
+  // ── Wash trading risk checker (DexScreener-only, no API needed) ─
+  function washTradingRisk(token) {
+    const vol = token.volume?.h24 || 0;
+    const liq = token.liquidity   || 0;
+    const vl  = liq > 0 ? vol / liq : 0;
+    if (vl > 20) return { risk: 'extreme', vl };
+    if (vl > 10) return { risk: 'high',    vl };
+    if (vl > 5)  return { risk: 'moderate',vl };
+    return { risk: 'low', vl };
+  }
+
   // ── BASE SIGNAL 6 — Strong buy pressure ────────────────────
   function computeBuyPressure(token, trades) {
     let buyRatio = 0;
@@ -320,7 +331,7 @@ const MomentumDetector = (() => {
   }
 
   // ── Score computation ──────────────────────────────────────
-  function computeScore(base, advanced) {
+  function computeScore(base, advanced, token, birdeyeAvailable) {
     // Base score (0-100)
     let baseScore = 0;
     let baseDivisor = 0;
@@ -340,7 +351,27 @@ const MomentumDetector = (() => {
       advBonus += (w / 100) * (s.score / 100) * 25; // max +25 from all advanced
     }
 
-    return Math.min(Math.round(normalizedBase + advBonus), 100);
+    let total = Math.min(Math.round(normalizedBase + advBonus), 100);
+
+    // ── Wash-trading penalty (V/L ratio) ───────────────────
+    if (token) {
+      const { risk, vl } = washTradingRisk(token);
+      if (risk === 'extreme') {
+        total = Math.min(total, 35); // V/L >20× — near-certain manipulation
+      } else if (risk === 'high') {
+        total = Math.min(total, 55); // V/L >10× — highly suspicious
+      } else if (risk === 'moderate') {
+        total = Math.max(0, total - 8); // V/L >5× — deduct points
+      }
+    }
+
+    // ── Data-quality GEM cap when no Birdeye key ───────────
+    // Without Birdeye we can't trust advanced signals — cap just below GEM threshold
+    if (!birdeyeAvailable && total >= GEM_SCORE) {
+      total = GEM_SCORE - 1; // shows HIGH POTENTIAL (≥60) not GEM
+    }
+
+    return total;
   }
 
   // ── Main analysis ──────────────────────────────────────────
@@ -372,6 +403,9 @@ const MomentumDetector = (() => {
       const secData     = secRes?.data              || null;
       const overviewData = overviewRes?.data        || null;
 
+      // True if we got at least one piece of Birdeye data back
+      const birdeyeAvailable = !!(trades.length || holdersData.length || secData || overviewData);
+
       // ── Base signals ───────────────────────────────────────
       const signals = {
         holderGrowth:   computeHolderGrowth(token, overviewData, trades),
@@ -392,7 +426,7 @@ const MomentumDetector = (() => {
         buyWallFormation:   computeBuyWall(token, trades)
       };
 
-      const momentumScore = computeScore(signals, advanced);
+      const momentumScore = computeScore(signals, advanced, token, birdeyeAvailable);
       const isGem         = momentumScore >= GEM_SCORE;
       const label         = momentumScore >= HIGH_SCORE   ? 'HIGH POTENTIAL' :
                             momentumScore >= MEDIUM_SCORE ? 'MEDIUM'         : 'LOW MOMENTUM';

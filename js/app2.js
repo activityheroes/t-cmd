@@ -157,6 +157,35 @@ function startSignalTimers() {
 // SCANNER TAB
 // ══════════════════════════════════════════════════════
 
+// ── Re-merge custom tokens saved by the user after a fresh scan ─
+async function restoreCustomTokens() {
+  let customs;
+  try { customs = JSON.parse(localStorage.getItem('tcmd_custom_tokens') || '[]'); } catch { customs = []; }
+  if (!customs.length) return;
+
+  const existing = new Set((AppState.scannerTokens || []).map(t => t.address));
+  const missing  = customs.filter(addr => !existing.has(addr)).slice(0, 20); // cap at 20
+  if (!missing.length) return;
+
+  const settled = await Promise.allSettled(
+    missing.map(async addr => {
+      try {
+        const pairs = await API.DexScreener.getTokenPairs('solana', addr);
+        const best  = (pairs || [])
+          .sort((a, b) => parseFloat(b.liquidity?.usd || 0) - parseFloat(a.liquidity?.usd || 0))[0];
+        if (!best || parseFloat(best.priceUsd || 0) <= 0) return null;
+        return Scanner.formatToken(best, 0);
+      } catch { return null; }
+    })
+  );
+
+  const fetched = settled.map(r => r.status === 'fulfilled' ? r.value : null).filter(Boolean);
+  if (!fetched.length) return;
+
+  // Prepend restored custom tokens so they appear at the top
+  AppState.scannerTokens = [...fetched, ...(AppState.scannerTokens || [])];
+}
+
 async function loadScanner() {
   const grid = document.getElementById('scanner-grid');
   grid.innerHTML = `<div style="grid-column:1/-1;padding:40px;text-align:center;color:var(--text-secondary);">
@@ -168,12 +197,14 @@ async function loadScanner() {
     AppState.scannerTokens = tokens;
     if (!AppState.rugResults) AppState.rugResults = {};
     if (!AppState.momentumResults) AppState.momentumResults = {};
+    // Re-merge any custom tokens the user manually added (they aren't in the trending feed)
+    await restoreCustomTokens();
     renderScannerCards();
     updateScannerStats();
     startSignalTimers();
-    showToast('🔍', 'Scan Complete', `Found ${tokens.length} tokens`, 'success');
+    showToast('🔍', 'Scan Complete', `Found ${AppState.scannerTokens.length} tokens`, 'success');
     // Background auto-analysis (non-blocking)
-    autoAnalyzeTokens(tokens);
+    autoAnalyzeTokens(AppState.scannerTokens);
   } catch (e) {
     grid.innerHTML = `<div style="grid-column:1/-1;" class="empty-state">
       <div class="empty-state-icon">⚠️</div>
@@ -378,6 +409,15 @@ function filterScannerTokens(tokens) {
   // Text search
   const q = AppState.scannerQuery || '';
   if (q) t = t.filter(x => x.name.toLowerCase().includes(q) || x.symbol.toLowerCase().includes(q) || x.address.toLowerCase().includes(q));
+
+  // Always float favorites to top (unless already filtering for favorites only)
+  if (AppState.scannerFilter !== 'favorites') {
+    const favSet = new Set(getFavorites());
+    if (favSet.size > 0) {
+      t = [...t.filter(x => favSet.has(x.address)), ...t.filter(x => !favSet.has(x.address))];
+    }
+  }
+
   return t;
 }
 

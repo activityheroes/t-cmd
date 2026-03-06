@@ -5,6 +5,68 @@
 
 const Scanner = (() => {
 
+    // ── Manipulation risk helper (DexScreener-only signals) ────
+    function calcManipulationRisk(pair) {
+        const vol24h   = parseFloat(pair.volume?.h24 || 0);
+        const vol1h    = parseFloat(pair.volume?.h1  || 0);
+        const liq      = parseFloat(pair.liquidity?.usd || 0);
+        const ch24h    = parseFloat(pair.priceChange?.h24 || 0);
+        const ch1h     = parseFloat(pair.priceChange?.h1  || 0);
+        const buys24h  = pair.txns?.h24?.buys  || 0;
+        const sells24h = pair.txns?.h24?.sells || 0;
+        const buys1h   = pair.txns?.h1?.buys   || 0;
+        const sells1h  = pair.txns?.h1?.sells  || 0;
+        const created  = pair.pairCreatedAt || 0;
+        const ageMin   = (Date.now() - created) / 60000;
+        const isPump   = (pair.pairAddress || '').toLowerCase().includes('pump') ||
+                         (pair.baseToken?.address || '').toLowerCase().endsWith('pump');
+
+        let penalty = 0;
+        const flags = [];
+
+        // ① Volume/Liquidity ratio — king manipulation signal
+        const vlRatio = liq > 0 ? vol24h / liq : 0;
+        if (vlRatio > 20) {
+            penalty += 30;
+            flags.push({ label: `Wash Trading — Vol/Liq ${vlRatio.toFixed(0)}×`, icon: '🚨', severity: 'critical' });
+        } else if (vlRatio > 10) {
+            penalty += 18;
+            flags.push({ label: `High Vol/Liq ${vlRatio.toFixed(0)}× — likely wash`, icon: '⚠️', severity: 'high' });
+        } else if (vlRatio > 5) {
+            penalty += 6;
+            flags.push({ label: `Elevated Vol/Liq ${vlRatio.toFixed(1)}×`, icon: '⚡', severity: 'medium' });
+        }
+
+        // ② Extreme spike on a very new token (< 3h) — classic pump & dump setup
+        const isVeryNew = ageMin < 180;
+        if (isVeryNew && (ch24h > 200 || ch1h > 100)) {
+            penalty += 20;
+            flags.push({ label: `New token extreme spike +${Math.round(Math.max(ch24h, ch1h))}%`, icon: '🎭', severity: 'high' });
+        } else if (isVeryNew && (ch24h > 100 || ch1h > 50)) {
+            penalty += 10;
+            flags.push({ label: `Early pump signal +${Math.round(Math.max(ch24h, ch1h))}%`, icon: '🎭', severity: 'medium' });
+        }
+
+        // ③ PumpFun token with extreme buy ratio (bot-inflated) — real buys look like 60-70%, not 80%+
+        const totalH1 = buys1h + sells1h;
+        const buyRatioH1 = totalH1 > 20 ? buys1h / totalH1 : 0;
+        if (isPump && buyRatioH1 > 0.82) {
+            penalty += 12;
+            flags.push({ label: `Bot buy ratio ${(buyRatioH1 * 100).toFixed(0)}% on PumpFun`, icon: '🤖', severity: 'high' });
+        } else if (isPump && buyRatioH1 > 0.75 && isVeryNew) {
+            penalty += 6;
+            flags.push({ label: `Suspicious buy pressure ${(buyRatioH1 * 100).toFixed(0)}%`, icon: '🤖', severity: 'medium' });
+        }
+
+        // ④ Extremely low liquidity + high volume = guaranteed dump vector
+        if (liq < 8_000 && vol24h > 50_000) {
+            penalty += 15;
+            flags.push({ label: `Thin pool — ${(vol24h / Math.max(liq, 1)).toFixed(0)}× vol vs liq`, icon: '🕳️', severity: 'critical' });
+        }
+
+        return { penalty: Math.min(penalty, 50), flags }; // cap penalty at 50pts
+    }
+
     // ── Pump Scorer ────────────────────────────────────────
     function calcPumpScore(pair) {
         let score = 0;
@@ -22,15 +84,27 @@ const Scanner = (() => {
         const boostAmt = pair.boostAmount || 0;
 
         // Volume spike (5m vs 1h per minute average) — max 20pts
+        // GUARD: if V/L ratio is suspicious, don't reward fake volume
+        const liq = liquidity;
+        const vlRatio = liq > 0 ? volume24h / liq : 0;
+        const fakeVolSuspected = vlRatio > 10;
         const h1PerMin = volume1h / 60;
-        if (h1PerMin > 0 && volume5m / 5 > h1PerMin * 3) score += 20;
-        else if (h1PerMin > 0 && volume5m / 5 > h1PerMin * 1.5) score += 10;
+        if (!fakeVolSuspected) {
+            if (h1PerMin > 0 && volume5m / 5 > h1PerMin * 3) score += 20;
+            else if (h1PerMin > 0 && volume5m / 5 > h1PerMin * 1.5) score += 10;
+        } else {
+            // Reduced reward for suspected wash volume
+            if (h1PerMin > 0 && volume5m / 5 > h1PerMin * 3) score += 8;
+        }
 
-        // Buy pressure — max 20pts
+        // Buy pressure — max 20pts (halved when bot buy ratio suspected)
         const totalTxns = buys24h + sells24h;
         if (totalTxns > 0) {
             const buyRatio = buys24h / totalTxns;
-            score += Math.round(buyRatio * 20);
+            const isPump = (pair.pairAddress || '').toLowerCase().includes('pump') ||
+                           (pair.baseToken?.address || '').toLowerCase().endsWith('pump');
+            const botSuspected = isPump && buyRatio > 0.82;
+            score += Math.round(buyRatio * (botSuspected ? 8 : 20));
         }
 
         // Market cap sweet spot ($500K–$50M) — max 15pts
@@ -38,11 +112,18 @@ const Scanner = (() => {
         else if (mktCap >= 50_000 && mktCap < 500_000) score += 7;
         else if (mktCap > 50_000_000 && mktCap < 200_000_000) score += 5;
 
-        // Price momentum — max 15pts
-        if (priceChange5m > 5) score += 15;
-        else if (priceChange5m > 2) score += 10;
-        else if (priceChange1h > 10) score += 8;
-        else if (priceChange24h > 20) score += 5;
+        // Price momentum — max 15pts (capped for new-token extreme spikes)
+        const ageMin = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 60000 : 9999;
+        const extremeSpike = ageMin < 180 && (priceChange24h > 150 || priceChange1h > 80);
+        if (!extremeSpike) {
+            if (priceChange5m > 5) score += 15;
+            else if (priceChange5m > 2) score += 10;
+            else if (priceChange1h > 10) score += 8;
+            else if (priceChange24h > 20) score += 5;
+        } else {
+            // Suspicious pump — only partial credit
+            score += 3;
+        }
 
         // Liquidity health — max 15pts
         if (liquidity >= 50_000 && liquidity < 500_000) score += 15;
@@ -54,9 +135,12 @@ const Scanner = (() => {
         if (boostAmt > 1000) score += 15;
         else if (boostAmt > 500) score += 10;
         else if (boostAmt > 100) score += 6;
-        // Check if token has socials
         const socials = pair.info?.socials || [];
         score += Math.min(10, socials.length * 3);
+
+        // ── Deduct manipulation penalty ──────────────────────
+        const { penalty } = calcManipulationRisk(pair);
+        score -= penalty;
 
         return Math.min(100, Math.max(0, Math.round(score)));
     }
@@ -64,23 +148,29 @@ const Scanner = (() => {
     // ── Rug / Honeypot Detection ───────────────────────────
     function detectRugFlags(pair) {
         const flags = [];
-        const socials = pair.info?.socials || [];
+        const socials  = pair.info?.socials || [];
         const liquidity = parseFloat(pair.liquidity?.usd || 0);
-        const fdv = parseFloat(pair.fdv || 0);
-        const mktCap = parseFloat(pair.marketCap || 0);
-        const buys24h = pair.txns?.h24?.buys || 0;
-        const sells24h = pair.txns?.h24?.sells || 0;
-        const created = pair.pairCreatedAt || 0;
-        const ageHours = (Date.now() - created) / 3600000;
+        const fdv       = parseFloat(pair.fdv || 0);
+        const mktCap    = parseFloat(pair.marketCap || 0);
+        const buys24h   = pair.txns?.h24?.buys  || 0;
+        const sells24h  = pair.txns?.h24?.sells || 0;
+        const created   = pair.pairCreatedAt || 0;
+        const ageHours  = (Date.now() - created) / 3600000;
 
         if (socials.length === 0) flags.push({ label: 'No Socials', icon: '🔕' });
         if (liquidity < 5_000) flags.push({ label: 'Tiny Liquidity', icon: '💧' });
         if (fdv > 0 && mktCap > 0 && fdv / mktCap > 20) flags.push({ label: 'FDV/MC Mismatch', icon: '⚠️' });
         if (buys24h + sells24h > 10 && sells24h / (buys24h + 1) > 2) flags.push({ label: 'Sell Heavy', icon: '🔻' });
         if (ageHours < 1) flags.push({ label: 'Very New (<1h)', icon: '🆕' });
-        if (pair.pairAddress?.toLowerCase().includes('pump') || pair.baseToken?.address?.length < 40) {
+        if ((pair.pairAddress || '').toLowerCase().includes('pump') ||
+            (pair.baseToken?.address || '').toLowerCase().endsWith('pump')) {
             flags.push({ label: 'PumpFun Token', icon: '⚡' });
         }
+
+        // Merge DexScreener-only manipulation flags
+        const { flags: manipFlags } = calcManipulationRisk(pair);
+        manipFlags.forEach(f => flags.push(f));
+
         return flags;
     }
 
@@ -124,6 +214,10 @@ const Scanner = (() => {
         if (!pair || score < 60) return null;
         const price = parseFloat(pair.priceUSD || 0);
         if (!price || price <= 0) return null;
+
+        // Suppress signals when manipulation penalty is high
+        const { penalty } = calcManipulationRisk(pair);
+        if (penalty >= 20) return null; // wash trading or extreme pump — no signal
 
         const ch5m = pair.priceChange?.m5 || 0;
         const ch1h = pair.priceChange?.h1 || 0;

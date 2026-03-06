@@ -45,10 +45,12 @@ const ChainAPIs = (() => {
   ].map(a => a.toLowerCase()));
 
   // ── Key management ───────────────────────────────────────────
+  // Priority: localStorage (admin panel) > js/keys.js (local config) > empty
   function getKeys() {
+    const K = window.TCMD_KEYS || {};
     return {
-      birdeye: localStorage.getItem('tcmd_birdeye_key') || '',
-      helius:  localStorage.getItem('tcmd_helius_key')  || ''
+      birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
+      helius:  localStorage.getItem('tcmd_helius_key')  || K.helius  || ''
     };
   }
   function setKey(name, value) {

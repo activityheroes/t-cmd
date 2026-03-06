@@ -48,6 +48,18 @@ function fmtAge(ts) {
   return rem > 0 ? `${hrs}h ${rem}m` : `${hrs}h`;
 }
 
+// ── Entry window countdown timer ───────────────────────────────
+function fmtTimer(remainMs) {
+  if (remainMs <= 0) return 'EXPIRED';
+  const totalSec = Math.floor(remainMs / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s.toString().padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
 let _timerInterval = null;
 function startSignalTimers() {
   if (_timerInterval) clearInterval(_timerInterval);
@@ -55,7 +67,14 @@ function startSignalTimers() {
     document.querySelectorAll('[data-signal-ts]').forEach(el => {
       el.textContent = fmtAge(parseInt(el.dataset.signalTs));
     });
-  }, 30000);
+    document.querySelectorAll('[data-entry-end]').forEach(el => {
+      const end = parseInt(el.dataset.entryEnd);
+      const remaining = end - Date.now();
+      el.textContent = fmtTimer(remaining);
+      el.classList.toggle('timer-expired', remaining <= 0);
+      el.classList.toggle('timer-urgent', remaining > 0 && remaining < 600000);
+    });
+  }, 1000);
 }
 
 // ══════════════════════════════════════════════════════
@@ -71,10 +90,14 @@ async function loadScanner() {
   try {
     const tokens = await Scanner.fetchAndScore();
     AppState.scannerTokens = tokens;
+    if (!AppState.rugResults) AppState.rugResults = {};
+    if (!AppState.momentumResults) AppState.momentumResults = {};
     renderScannerCards();
     updateScannerStats();
     startSignalTimers();
     showToast('🔍', 'Scan Complete', `Found ${tokens.length} tokens`, 'success');
+    // Background auto-analysis (non-blocking)
+    autoAnalyzeTokens(tokens);
   } catch (e) {
     grid.innerHTML = `<div style="grid-column:1/-1;" class="empty-state">
       <div class="empty-state-icon">⚠️</div>
@@ -82,6 +105,174 @@ async function loadScanner() {
       <button class="btn btn-outline" onclick="loadScanner()">↺ Retry</button>
     </div>`;
   }
+}
+
+// ── Background auto-analysis ──────────────────────────────────
+const _autoQueue = [];
+let _autoRunning = false;
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function autoAnalyzeTokens(tokens) {
+  if (!AppState.momentumResults) AppState.momentumResults = {};
+  _autoQueue.length = 0;
+  tokens.slice(0, 25).forEach(t => _autoQueue.push(t));
+  if (!_autoRunning) _processAutoQueue();
+}
+
+async function _processAutoQueue() {
+  _autoRunning = true;
+  while (_autoQueue.length > 0) {
+    const batch = _autoQueue.splice(0, 2);
+    await Promise.all(batch.map(autoAnalyzeOne));
+    if (_autoQueue.length > 0) await _sleep(1500);
+  }
+  _autoRunning = false;
+}
+
+async function autoAnalyzeOne(token) {
+  try {
+    if (typeof MomentumDetector === 'undefined') return;
+    const mom = await MomentumDetector.analyze(token);
+    if (mom && mom.momentumScore >= 0) {
+      AppState.momentumResults[token.address] = mom;
+      updateCardMomentum(token.address, mom);
+    }
+  } catch (e) {
+    // silent — background task
+  }
+}
+
+function updateCardMomentum(address, result) {
+  const badge = document.querySelector(`.mom-auto-badge[data-addr="${address}"]`);
+  if (!badge) return;
+  const score = result.momentumScore || 0;
+  if (result.isGem) {
+    badge.innerHTML = `💎 GEM`;
+    badge.className = 'mom-auto-badge gem';
+    badge.title = `Momentum Score: ${score} — GEM DETECTED`;
+  } else if (score >= 60) {
+    badge.innerHTML = `🚀 ${score}`;
+    badge.className = 'mom-auto-badge high';
+    badge.title = `Momentum: HIGH POTENTIAL (${score}/100)`;
+  } else if (score >= 35) {
+    badge.innerHTML = `📈 ${score}`;
+    badge.className = 'mom-auto-badge medium';
+    badge.title = `Momentum: MEDIUM (${score}/100)`;
+  } else {
+    badge.innerHTML = `📊 ${score}`;
+    badge.className = 'mom-auto-badge low';
+    badge.title = `Momentum: LOW (${score}/100)`;
+  }
+}
+
+// ── Favorites helpers ─────────────────────────────────────────
+function getFavorites() {
+  try { return JSON.parse(localStorage.getItem('tcmd_favorites') || '[]'); } catch { return []; }
+}
+function isFavorite(addr) { return getFavorites().includes(addr); }
+window.toggleFavorite = function (addr) {
+  const favs = getFavorites();
+  const idx = favs.indexOf(addr);
+  if (idx >= 0) favs.splice(idx, 1); else favs.push(addr);
+  localStorage.setItem('tcmd_favorites', JSON.stringify(favs));
+  const isNowFav = idx < 0;
+  document.querySelectorAll(`.fav-btn[data-addr="${addr}"]`).forEach(btn => {
+    btn.classList.toggle('active', isNowFav);
+    btn.title = isNowFav ? 'Remove from favorites' : 'Add to favorites';
+  });
+  // Update gems/favorites filter counts
+  updateScannerStats();
+};
+
+// ── DexScreener token search ──────────────────────────────────
+async function searchAndAddToken(query) {
+  query = (query || '').trim();
+  if (!query) return;
+  const findBtn = document.getElementById('scanner-find-btn');
+  if (findBtn) { findBtn.textContent = '…'; findBtn.disabled = true; }
+  try {
+    // Try address lookup first (32+ char strings = likely token address)
+    let pair = null;
+    if (query.length >= 32) {
+      const data = await ChainAPIs.dsToken(query).catch(() => null);
+      const pairs = data?.pairs || [];
+      pair = pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
+    }
+    // Fallback: text search
+    if (!pair) {
+      const data = await ChainAPIs.dsSearch(query).catch(() => null);
+      const pairs = data?.pairs || [];
+      pair = pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
+    }
+    if (!pair) {
+      showToast('❌', 'Not Found', `No token found for "${query}"`, 'error');
+      return;
+    }
+    const baseAddr = pair.baseToken?.address || '';
+    if (!baseAddr) { showToast('❌', 'Error', 'Invalid token data', 'error'); return; }
+    // Build token from pair data using Scanner if available
+    let newToken = null;
+    if (typeof Scanner !== 'undefined' && typeof Scanner.pairToToken === 'function') {
+      newToken = Scanner.pairToToken(pair);
+    } else {
+      newToken = _buildTokenFromPair(pair);
+    }
+    if (!newToken) { showToast('❌', 'Error', 'Could not parse token data', 'error'); return; }
+    // Insert at top if not already present
+    const exists = AppState.scannerTokens.find(t => t.address === baseAddr);
+    if (!exists) {
+      AppState.scannerTokens.unshift(newToken);
+      // Persist custom tokens
+      const customs = JSON.parse(localStorage.getItem('tcmd_custom_tokens') || '[]');
+      if (!customs.includes(baseAddr)) { customs.unshift(baseAddr); localStorage.setItem('tcmd_custom_tokens', JSON.stringify(customs.slice(0, 50))); }
+    }
+    // Clear search input and re-render
+    const sq = document.getElementById('scanner-search');
+    if (sq) sq.value = '';
+    AppState.scannerQuery = '';
+    renderScannerCards();
+    showToast('✅', 'Token Added', `${pair.baseToken?.name || baseAddr.slice(0, 8)} added to scanner`, 'success');
+    autoAnalyzeOne(newToken);
+  } catch (e) {
+    showToast('❌', 'Search Error', e.message || 'Unknown error', 'error');
+  } finally {
+    if (findBtn) { findBtn.textContent = 'Find'; findBtn.disabled = false; }
+  }
+}
+
+function _buildTokenFromPair(pair) {
+  // Minimal token object from DexScreener pair data
+  if (!pair?.baseToken) return null;
+  const p = pair;
+  const b = p.baseToken;
+  const chainRaw = (p.chainId || 'solana').toLowerCase();
+  return {
+    address:     b.address  || '',
+    name:        b.name     || 'Unknown',
+    symbol:      b.symbol   || '???',
+    chainId:     p.chainId  || 'solana',
+    priceUSD:    parseFloat(p.priceUsd || 0),
+    priceChange: { m5: p.priceChange?.m5 || 0, h1: p.priceChange?.h1 || 0, h6: p.priceChange?.h6 || 0, h24: p.priceChange?.h24 || 0 },
+    volume:      { m5: p.volume?.m5 || 0, h1: p.volume?.h1 || 0, h6: p.volume?.h6 || 0, h24: p.volume?.h24 || 0 },
+    liquidity:   p.liquidity?.usd || 0,
+    mktCap:      p.marketCap || 0,
+    fdv:         p.fdv || 0,
+    txns:        p.txns || {},
+    pairAddress: p.pairAddress || '',
+    dexUrl:      p.url || `https://dexscreener.com/${chainRaw}/${p.pairAddress}`,
+    socials:     [],
+    websites:    [],
+    imageUrl:    b.info?.imageUrl || null,
+    boostAmount: 0,
+    pumpScore:   Math.min(100, Math.round(((p.volume?.h1 || 0) / Math.max(p.liquidity?.usd || 1, 1)) * 20)),
+    rugFlags:    [],
+    isBreakout:  false,
+    signalType:  'fresh',
+    multiplier:  { label: '—', tier: 'low' },
+    memeSignal:  null,
+    scannedAt:   Date.now(),
+    isCustom:    true
+  };
 }
 
 function filterScannerTokens(tokens) {
@@ -93,6 +284,13 @@ function filterScannerTokens(tokens) {
   if (AppState.scannerFilter === 'risk') t = t.filter(x => x.rugFlags.length >= 2);
   if (AppState.scannerFilter === 'fresh') t = t.filter(x => x.signalType === 'fresh');
   if (AppState.scannerFilter === 'revived') t = t.filter(x => x.signalType === 'revived');
+  if (AppState.scannerFilter === 'favorites') {
+    const favs = getFavorites();
+    t = t.filter(x => favs.includes(x.address));
+  }
+  if (AppState.scannerFilter === 'gems') {
+    t = t.filter(x => AppState.momentumResults?.[x.address]?.isGem);
+  }
   // Chain filter
   if (AppState.scannerChain && AppState.scannerChain !== 'all') {
     t = t.filter(x => (x.chainId || '').toLowerCase().includes(AppState.scannerChain));
@@ -124,7 +322,38 @@ function renderScannerCards() {
 function renderScannerCard(token) {
   const scoreClass = token.pumpScore >= 70 ? 'high' : token.pumpScore >= 45 ? 'medium' : 'low';
   const ch24 = token.priceChange.h24;
-  const sig = token.memeSignal; // may be undefined for low-score tokens
+  const sig = token.memeSignal;
+  const isFav = isFavorite(token.address);
+  const momResult = AppState.momentumResults?.[token.address] || null;
+  const addr = token.address;
+
+  // Momentum badge
+  let momBadgeHtml = '';
+  if (momResult) {
+    const sc = momResult.momentumScore || 0;
+    if (momResult.isGem) {
+      momBadgeHtml = `<span class="mom-auto-badge gem" data-addr="${addr}" title="Momentum Score: ${sc} — GEM DETECTED!">💎 GEM</span>`;
+    } else if (sc >= 60) {
+      momBadgeHtml = `<span class="mom-auto-badge high" data-addr="${addr}" title="HIGH POTENTIAL (${sc}/100)">🚀 ${sc}</span>`;
+    } else if (sc >= 35) {
+      momBadgeHtml = `<span class="mom-auto-badge medium" data-addr="${addr}" title="MEDIUM MOMENTUM (${sc}/100)">📈 ${sc}</span>`;
+    } else {
+      momBadgeHtml = `<span class="mom-auto-badge low" data-addr="${addr}" title="LOW MOMENTUM (${sc}/100)">📊 ${sc}</span>`;
+    }
+  } else {
+    momBadgeHtml = `<span class="mom-auto-badge pending" data-addr="${addr}" title="Analysing momentum...">⟳</span>`;
+  }
+
+  // Entry window countdown timer
+  const windowMs = token.isBreakout ? 2 * 3600000 : 8 * 3600000; // 2h breakout, 8h accum
+  const scannedAt = token.scannedAt || Date.now();
+  const entryEnd = scannedAt + windowMs;
+  const remainMs = entryEnd - Date.now();
+  const timerClass = remainMs <= 0 ? 'timer-expired' : remainMs < 600000 ? 'timer-urgent' : '';
+  const entryTimerHtml = `<div class="entry-timer-block">
+    <span class="entry-timer-label">${token.isBreakout ? '🚀 Breakout' : '📦 Accumulation'} window</span>
+    <span class="entry-timer-value ${timerClass}" data-entry-end="${entryEnd}">${fmtTimer(remainMs)}</span>
+  </div>`;
 
   const logoHtml = token.imageUrl
     ? `<img src="${token.imageUrl}" class="token-logo" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
@@ -132,17 +361,29 @@ function renderScannerCard(token) {
     : `<div class="coin-icon" style="font-weight:700;font-size:11px;">${token.symbol.slice(0, 3)}</div>`;
 
   const chainBadge = `<span class="chain-badge chain-${(token.chainId || 'sol').toLowerCase().slice(0, 3)}">${token.chainId}</span>`;
-
   const terminals = getTerminalLinks(token);
 
-  return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${token.address}')">
+  // Terminal icon links with real logos
+  const dsFavicon = 'https://dexscreener.com/favicon.ico';
+  const axiomFavicon = 'https://axiom.trade/favicon.ico';
+  const gmgnFavicon = 'https://gmgn.ai/favicon.ico';
+  const padreFavicon = 'https://trade.padre.gg/favicon.ico';
+
+  const terminalIconLink = (href, faviconUrl, label, cls) =>
+    `<a class="terminal-icon-link ${cls}" href="${href}" target="_blank" onclick="event.stopPropagation()" title="${label}">
+      <img src="${faviconUrl}" width="14" height="14" onerror="this.style.display='none'" style="border-radius:3px;vertical-align:middle;margin-right:3px;">${label}
+    </a>`;
+
+  return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${addr}')">
     <div class="card-top-row">
       <span class="card-type-badge ${token.signalType}">${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
-      <span class="signal-age-clock" data-signal-ts="${token.scannedAt || Date.now()}">${fmtAge(token.scannedAt || Date.now())}</span>
+      <span class="signal-age-clock" data-signal-ts="${scannedAt}">${fmtAge(scannedAt)}</span>
+      ${momBadgeHtml}
       <div class="pump-score ${scoreClass}">
         <div class="pump-score-value">${token.pumpScore}</div>
         <div class="pump-score-label">Score</div>
       </div>
+      <button class="fav-btn ${isFav ? 'active' : ''}" data-addr="${addr}" onclick="event.stopPropagation();window.toggleFavorite('${addr}')" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">⭐</button>
     </div>
     <div class="card-coin-row">
       <div class="card-coin-info">
@@ -165,7 +406,6 @@ function renderScannerCard(token) {
     ${sig ? (() => {
       const supply = token.mktCap > 0 && token.priceUSD > 0 ? token.mktCap / token.priceUSD : 0;
       const toMc = p => supply > 0 ? fmt.vol(p * supply) : fmt.price(p);
-      const addr = token.address;
       return `<div class="meme-signal-block" id="msb-${addr}">
       <div class="meme-signal-header">
         <div class="meme-signal-label">📊 ${sig.phase} Signal</div>
@@ -181,19 +421,20 @@ function renderScannerCard(token) {
       </div>
     </div>`;
     })() : ''}
+    ${entryTimerHtml}
     ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag">${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
     <div class="card-bottom-row">
       <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
-        <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${token.address}',this)" title="Copy Contract Address: ${token.address}">
-          📋 ${token.address ? token.address.slice(0, 4) + '…' + token.address.slice(-4) : 'CA'}
+        <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${addr}',this)" title="Copy CA: ${addr}">
+          📋 ${addr ? addr.slice(0, 4) + '…' + addr.slice(-4) : 'CA'}
         </button>
-        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${token.address}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep Rug Check">🛡️ Rug Check</button>
-        <a class="card-action-icon" href="${token.dexUrl}" target="_blank" title="DexScreener" onclick="event.stopPropagation()">📊</a>
-        ${token.socials[0]?.url ? `<a class="card-action-icon" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()">🐦</a>` : ''}
-        ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()">🌐</a>` : ''}
-        ${terminals.axiom ? `<a class="terminal-link axiom" href="${terminals.axiom}" target="_blank" onclick="event.stopPropagation()">Axiom</a>` : ''}
-        ${terminals.gmgn ? `<a class="terminal-link gmgn" href="${terminals.gmgn}" target="_blank" onclick="event.stopPropagation()">gmgn</a>` : ''}
-        ${terminals.padre ? `<a class="terminal-link padre" href="${terminals.padre}" target="_blank" onclick="event.stopPropagation()">Padre</a>` : ''}
+        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep Rug Check">🛡️ Rug</button>
+        ${terminalIconLink(token.dexUrl, dsFavicon, 'DEX', 'dex')}
+        ${token.socials[0]?.url ? `<a class="card-action-icon" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="Social">🐦</a>` : ''}
+        ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()" title="Website">🌐</a>` : ''}
+        ${terminals.axiom ? terminalIconLink(terminals.axiom, axiomFavicon, 'Axiom', 'axiom') : ''}
+        ${terminals.gmgn ? terminalIconLink(terminals.gmgn, gmgnFavicon, 'GMGN', 'gmgn') : ''}
+        ${terminals.padre ? terminalIconLink(terminals.padre, padreFavicon, 'Padre', 'padre') : ''}
       </div>
       <span class="multiplier-badge mult-${token.multiplier.tier}">${token.multiplier.label}</span>
     </div>
@@ -208,7 +449,9 @@ function updateScannerStats() {
   const breakouts = tokens.filter(t => t.isBreakout).length;
   const accum = tokens.filter(t => !t.isBreakout && t.pumpScore >= 50).length;
   const risk = tokens.filter(t => t.rugFlags.length >= 2).length;
-  el.innerHTML = `<span>${tokens.length} scanned</span> · <span class="num-amber">🔥 ${hot} hot</span> · <span class="num-green">🚀 ${breakouts} breakout</span> · <span class="num-cyan">📦 ${accum} accum</span> · <span class="num-red">⚠️ ${risk} risk</span>`;
+  const gems = tokens.filter(t => AppState.momentumResults?.[t.address]?.isGem).length;
+  const favs = getFavorites().length;
+  el.innerHTML = `<span>${tokens.length} scanned</span> · <span class="num-amber">🔥 ${hot} hot</span> · <span class="num-green">🚀 ${breakouts} breakout</span> · <span class="num-cyan">📦 ${accum} accum</span> · <span class="num-red">⚠️ ${risk} risk</span>${gems ? ` · <span style="color:#a855f7;">💎 ${gems} gem${gems !== 1 ? 's' : ''}</span>` : ''}${favs ? ` · <span class="num-amber">⭐ ${favs} fav${favs !== 1 ? 's' : ''}</span>` : ''}`;
 }
 
 // Scanner detail drawer
@@ -256,8 +499,37 @@ function populateScannerDrawer(token) {
     terminals.kolscan && `<a class="terminal-link kolscan" href="${terminals.kolscan}" target="_blank">KolScan</a>`,
   ].filter(Boolean).join('');
 
-  // History tab: price stats + memecoin signal + metrics table
+  // History tab: price stats + momentum + memecoin signal + metrics table
   const sig = token.memeSignal;
+  const momRes = AppState.momentumResults?.[token.address] || null;
+  const momHtml = momRes ? (() => {
+    const sigs = { ...momRes.signals, ...momRes.advanced };
+    const meta = typeof MomentumDetector !== 'undefined' ? MomentumDetector.SIGNAL_META : [];
+    const gemClass = momRes.isGem ? 'gem-score-ring' : '';
+    const scoreColor = momRes.momentumScore >= 75 ? '#a855f7' : momRes.momentumScore >= 60 ? 'var(--accent-green)' : momRes.momentumScore >= 35 ? 'var(--accent-amber)' : 'var(--text-muted)';
+    return `<div class="drawer-momentum-block">
+      <div class="dmb-header">
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${momRes.isGem ? '<span style="font-size:18px;">💎</span>' : ''}
+          <span style="font-size:13px;font-weight:700;color:${scoreColor};">${momRes.label}</span>
+        </div>
+        <div class="dmb-score" style="color:${scoreColor};">${momRes.momentumScore}<span style="font-size:11px;font-weight:400;color:var(--text-muted);">/100</span></div>
+      </div>
+      <div class="dmb-signals">
+        ${meta.map(m => {
+          const s = sigs[m.key];
+          if (!s) return '';
+          const color = s.active ? 'var(--accent-green)' : s.score > 30 ? 'var(--accent-amber)' : 'var(--text-muted)';
+          return `<div class="dmb-signal-row">
+            <span style="font-size:12px;">${m.icon}</span>
+            <span style="font-size:11px;flex:1;color:var(--text-secondary);">${m.label}</span>
+            <span style="font-size:10px;color:${color};font-weight:600;">${s.active ? '✅' : '—'} ${s.score}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  })() : '';
+
   document.getElementById('drawer-history-panel').innerHTML = `
     <div class="signal-history-stats">
       <div class="sh-stat"><div class="sh-stat-label">Pump Score</div><div class="sh-stat-value ${token.pumpScore >= 70 ? 'num-green' : 'num-amber'}">${token.pumpScore}/100</div></div>
@@ -265,6 +537,7 @@ function populateScannerDrawer(token) {
       <div class="sh-stat"><div class="sh-stat-label">1h</div><div class="sh-stat-value ${token.priceChange.h1 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(token.priceChange.h1)}</div></div>
       <div class="sh-stat"><div class="sh-stat-label">24h</div><div class="sh-stat-value ${ch24 >= 0 ? 'num-green' : 'num-red'}">${fmt.pct(ch24)}</div></div>
     </div>
+    ${momHtml}
     ${sig ? `<div class="drawer-meme-signal">
       <div class="dms-header">\ud83d\udcca ${sig.phase} Signal <span class="dms-rr">R:R ${sig.rr}:1</span></div>
       <div class="dms-levels">
@@ -655,7 +928,22 @@ const App = {
 
     // Scanner search
     const sq = document.getElementById('scanner-search');
-    if (sq) sq.addEventListener('input', () => { AppState.scannerQuery = sq.value.trim().toLowerCase(); renderScannerCards(); });
+    if (sq) {
+      sq.addEventListener('input', () => { AppState.scannerQuery = sq.value.trim().toLowerCase(); renderScannerCards(); });
+      sq.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const q = sq.value.trim();
+          if (q.length >= 32 || (q.length > 2 && !AppState.scannerTokens.find(t => t.name.toLowerCase().includes(q.toLowerCase()) || t.symbol.toLowerCase().includes(q.toLowerCase())))) {
+            searchAndAddToken(q);
+          }
+        }
+      });
+    }
+    const findBtn = document.getElementById('scanner-find-btn');
+    if (findBtn) findBtn.addEventListener('click', () => {
+      const q = (document.getElementById('scanner-search')?.value || '').trim();
+      if (q) searchAndAddToken(q);
+    });
 
     // Live/History toggle
     document.querySelectorAll('.live-btn, .history-btn').forEach(btn => {

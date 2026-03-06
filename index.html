@@ -167,10 +167,12 @@
               <span class="filter-pill" data-group="scanner" data-value="hot">🔥 Hot</span>
               <span class="filter-pill" data-group="scanner" data-value="breakout">🚀 Breakout</span>
               <span class="filter-pill" data-group="scanner" data-value="accumulating">📦 Accumulating</span>
+              <span class="filter-pill" data-group="scanner" data-value="gems">💎 Gems</span>
               <span class="filter-pill" data-group="scanner" data-value="risk">⚠️ Risk</span>
               <div class="divider" style="width:1px;height:20px;margin:0 4px;background:var(--border-subtle);"></div>
               <span class="filter-pill" data-group="scanner" data-value="fresh">✦ Fresh</span>
               <span class="filter-pill" data-group="scanner" data-value="revived">↺ Revived</span>
+              <span class="filter-pill" data-group="scanner" data-value="favorites">⭐ Favorites</span>
             </div>
             <!-- Row 2: Chain + Score filters -->
             <div class="filter-row" style="margin-top:4px;">
@@ -192,11 +194,12 @@
           </div>
 
           <div class="page-header-right" style="flex-direction:row;align-items:center;gap:10px;">
-            <!-- Search -->
-            <div class="search-box" style="min-width:200px;">
+            <!-- Search + add any token -->
+            <div class="search-box" style="min-width:220px;">
               <span class="search-icon">🔍</span>
-              <input type="text" id="scanner-search" placeholder="Search token or paste address…">
+              <input type="text" id="scanner-search" placeholder="Search or paste any token address…" autocomplete="off">
             </div>
+            <button class="scan-now-btn" id="scanner-find-btn" style="padding:0 12px;font-size:12px;" title="Find token by address or name">Find</button>
 
             <!-- Auto scan toggle -->
             <div class="auto-scan-toggle">
@@ -411,6 +414,7 @@
   </script>
 
   <!-- ── Scripts ─────────────────────────────────────────── -->
+  <script src="js/keys.js"></script><!-- local API keys — gitignored -->
   <script src="js/config.js"></script>
   <script src="js/supabase.js"></script>
   <script src="js/api.js"></script>
@@ -422,11 +426,12 @@
   <script src="js/app.js"></script>
   <script src="js/app2.js"></script>
   <script src="js/whales.js"></script>
-  <!-- Rug Checker + Cluster Detector -->
+  <!-- Rug Checker + Cluster Detector + Momentum -->
   <script src="js/chain-apis.js"></script>
   <script src="js/rug-checker.js"></script>
   <script src="js/cluster-detector.js"></script>
   <script src="js/rug-ui.js"></script>
+  <script src="js/momentum-detector.js"></script>
 
 </body>
 

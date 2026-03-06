@@ -189,8 +189,11 @@
               <span class="filter-pill" data-group="score" data-value="70">70+</span>
               <span class="filter-pill" data-group="score" data-value="80">80+</span>
             </div>
-            <!-- Stats -->
-            <div id="scanner-stats" style="font-size:12px;color:var(--text-secondary);margin-top:2px;"></div>
+            <!-- Stats + badge legend button -->
+            <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+              <div id="scanner-stats" style="font-size:12px;color:var(--text-secondary);flex:1;"></div>
+              <button class="badge-info-btn" onclick="window.toggleBadgeInfo()" title="What do the badges mean?">? Legend</button>
+            </div>
           </div>
 
           <div class="page-header-right" style="flex-direction:row;align-items:center;gap:10px;">
@@ -432,6 +435,69 @@
   <script src="js/cluster-detector.js"></script>
   <script src="js/rug-ui.js"></script>
   <script src="js/momentum-detector.js"></script>
+
+  <!-- ── Badge Info Popover ───────────────────────────────────── -->
+  <div id="badge-info-overlay" class="bi-overlay bi-hidden" onclick="if(event.target===this)window.toggleBadgeInfo()">
+    <div class="bi-panel">
+      <div class="bi-header">
+        <span>📘 Badge & Icon Legend</span>
+        <button class="bi-close" onclick="window.toggleBadgeInfo()">✕</button>
+      </div>
+
+      <div class="bi-section-title">Momentum Badges</div>
+      <div class="bi-grid">
+        <div class="bi-item"><span class="bi-badge gem">💎 GEM</span><span>Momentum Score ≥75 — high probability runner. Rare signal.</span></div>
+        <div class="bi-item"><span class="bi-badge high">🚀 80</span><span>HIGH POTENTIAL — strong momentum, multiple signals firing</span></div>
+        <div class="bi-item"><span class="bi-badge medium">📈 52</span><span>MEDIUM momentum — decent signals, watch closely</span></div>
+        <div class="bi-item"><span class="bi-badge low">📊 28</span><span>LOW momentum — weak signals, proceed with caution</span></div>
+        <div class="bi-item"><span class="bi-badge pending">⟳</span><span>Analysing — momentum scan running in background</span></div>
+      </div>
+
+      <div class="bi-section-title">Signal Score (top-right of card)</div>
+      <div class="bi-grid">
+        <div class="bi-item"><span class="bi-badge score-high">90</span><span>Score ≥70 — HOT 🔥, high pump probability</span></div>
+        <div class="bi-item"><span class="bi-badge score-med">55</span><span>Score 45–69 — ACCUMULATING 📦, building phase</span></div>
+        <div class="bi-item"><span class="bi-badge score-low">30</span><span>Score &lt;45 — low signal strength, filter risk</span></div>
+      </div>
+
+      <div class="bi-section-title">Filter Pills</div>
+      <div class="bi-grid">
+        <div class="bi-item"><span class="bi-tag">🔥 Hot</span><span>Score ≥70 — highest confidence tokens</span></div>
+        <div class="bi-item"><span class="bi-tag">🚀 Breakout</span><span>Price + volume surging in the last 5–60 min</span></div>
+        <div class="bi-item"><span class="bi-tag">📦 Accumulating</span><span>Score 50+ but no breakout yet — entry window open</span></div>
+        <div class="bi-item"><span class="bi-tag">💎 Gems</span><span>Tokens with Momentum Score ≥75</span></div>
+        <div class="bi-item"><span class="bi-tag">⭐ Favorites</span><span>Your saved tokens (press ⭐ on any card)</span></div>
+        <div class="bi-item"><span class="bi-tag">⚠️ Risk</span><span>Has 2+ rug flags — check before trading</span></div>
+        <div class="bi-item"><span class="bi-tag">✦ Fresh</span><span>Token launched &lt;6 hours ago</span></div>
+        <div class="bi-item"><span class="bi-tag">↺ Revived</span><span>Older token showing new activity</span></div>
+      </div>
+
+      <div class="bi-section-title">Card Buttons</div>
+      <div class="bi-grid">
+        <div class="bi-item"><span class="bi-tag">⭐</span><span>Star button — save/unsave token to Favorites</span></div>
+        <div class="bi-item"><span class="bi-tag">📋 CA</span><span>Copy contract address to clipboard</span></div>
+        <div class="bi-item"><span class="bi-tag">🛡️ Rug</span><span>Deep rug check — 12 signals + wallet cluster analysis</span></div>
+        <div class="bi-item"><span class="bi-tag">DEX</span><span>Open token on DexScreener charts</span></div>
+        <div class="bi-item"><span class="bi-tag">Axiom</span><span>Trade directly on Axiom terminal</span></div>
+        <div class="bi-item"><span class="bi-tag">GMGN</span><span>Trade directly on GMGN terminal</span></div>
+        <div class="bi-item"><span class="bi-tag">Padre</span><span>Trade directly on Padre (Terminal) — deep-linked to this token</span></div>
+        <div class="bi-item"><span class="bi-tag">𝕏</span><span>Social link — token's X / Twitter page</span></div>
+        <div class="bi-item"><span class="bi-tag">🌐</span><span>Token website</span></div>
+      </div>
+
+      <div class="bi-section-title">Entry Window Timer</div>
+      <div class="bi-grid">
+        <div class="bi-item"><span class="bi-tag timer-cyan">🚀 2h 14m</span><span>Breakout window — 2h from signal detection. Trade before it expires.</span></div>
+        <div class="bi-item"><span class="bi-tag timer-amber">📦 9m 32s</span><span>Window almost closed — amber means &lt;10 min left. Act fast or skip.</span></div>
+        <div class="bi-item"><span class="bi-tag timer-expired">EXPIRED</span><span>Entry window closed — momentum may have passed</span></div>
+      </div>
+
+      <div class="bi-section-title">Search & Add Tokens</div>
+      <div class="bi-grid bi-grid-1">
+        <div class="bi-item"><span class="bi-tag">🔍 Search</span><span>Type any token name, symbol, or paste a contract address → press <strong>Enter</strong> or click <strong>Find</strong> to search DexScreener and add it to your scanner</span></div>
+      </div>
+    </div>
+  </div>
 
 </body>
 

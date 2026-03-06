@@ -210,10 +210,10 @@ async function searchAndAddToken(query) {
     }
     const baseAddr = pair.baseToken?.address || '';
     if (!baseAddr) { showToast('❌', 'Error', 'Invalid token data', 'error'); return; }
-    // Build token from pair data using Scanner if available
+    // Build token from pair data using Scanner.formatToken (preferred) or fallback
     let newToken = null;
-    if (typeof Scanner !== 'undefined' && typeof Scanner.pairToToken === 'function') {
-      newToken = Scanner.pairToToken(pair);
+    if (typeof Scanner !== 'undefined' && typeof Scanner.formatToken === 'function') {
+      newToken = Scanner.formatToken(pair, pair.boostAmount || 0);
     } else {
       newToken = _buildTokenFromPair(pair);
     }
@@ -307,12 +307,19 @@ function filterScannerTokens(tokens) {
 
 function renderScannerCards() {
   const grid = document.getElementById('scanner-grid');
-  const tokens = filterScannerTokens(AppState.scannerTokens);
+  if (!grid) return;
+  const tokens = filterScannerTokens(AppState.scannerTokens || []);
   if (!tokens.length) {
+    const q = AppState.scannerQuery || '';
+    const canSearch = q.length > 1;
+    const qSafe = q.replace(/'/g, '&#39;');
     grid.innerHTML = `<div style="grid-column:1/-1;" class="empty-state">
-      <div class="empty-state-icon">🔍</div>
-      <h3>No tokens found</h3><p>Adjust filters or run a fresh scan.</p>
-      <button class="btn btn-outline" onclick="loadScanner()">🔍 Scan Now</button>
+      <div class="empty-state-icon">${canSearch ? '🔍' : '📡'}</div>
+      <h3>${canSearch ? `No local results for "${q}"` : 'No Tokens Match'}</h3>
+      <p>${canSearch ? 'Not in scanner yet — try searching DexScreener to add it.' : 'Adjust filters or run a fresh scan.'}</p>
+      ${canSearch
+        ? `<button class="btn btn-outline" style="margin-top:10px;" onclick="searchAndAddToken('${qSafe}')">🌐 Search DexScreener for "${qSafe}"</button>`
+        : `<button class="btn btn-outline" onclick="loadScanner()">🔍 Scan Now</button>`}
     </div>`;
     return;
   }
@@ -363,15 +370,15 @@ function renderScannerCard(token) {
   const chainBadge = `<span class="chain-badge chain-${(token.chainId || 'sol').toLowerCase().slice(0, 3)}">${token.chainId}</span>`;
   const terminals = getTerminalLinks(token);
 
-  // Terminal icon links with real logos
-  const dsFavicon = 'https://dexscreener.com/favicon.ico';
-  const axiomFavicon = 'https://axiom.trade/favicon.ico';
-  const gmgnFavicon = 'https://gmgn.ai/favicon.ico';
-  const padreFavicon = 'https://trade.padre.gg/favicon.ico';
+  // Terminal icon links with real logos (local SVGs for GMGN + Padre)
+  const dsFavicon     = 'https://dexscreener.com/favicon.ico';
+  const axiomFavicon  = 'https://axiom.trade/favicon.ico';
+  const gmgnSvg       = 'assets/logos/gmgn.svg';
+  const padreSvg      = 'assets/logos/padre.svg';
 
-  const terminalIconLink = (href, faviconUrl, label, cls) =>
-    `<a class="terminal-icon-link ${cls}" href="${href}" target="_blank" onclick="event.stopPropagation()" title="${label}">
-      <img src="${faviconUrl}" width="14" height="14" onerror="this.style.display='none'" style="border-radius:3px;vertical-align:middle;margin-right:3px;">${label}
+  const terminalIconLink = (href, iconSrc, label, cls, isSvg = false) =>
+    `<a class="terminal-icon-link ${cls}" href="${href}" target="_blank" onclick="event.stopPropagation()" title="Trade on ${label}">
+      <img src="${iconSrc}" width="${isSvg && cls === 'gmgn' ? 28 : cls === 'padre' ? 14 : 14}" height="14" onerror="this.style.display='none'" style="${isSvg ? 'object-fit:contain;' : 'border-radius:3px;'}vertical-align:middle;margin-right:3px;">${label}
     </a>`;
 
   return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${addr}')">
@@ -430,11 +437,11 @@ function renderScannerCard(token) {
         </button>
         <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep Rug Check">🛡️ Rug</button>
         ${terminalIconLink(token.dexUrl, dsFavicon, 'DEX', 'dex')}
-        ${token.socials[0]?.url ? `<a class="card-action-icon" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="Social">🐦</a>` : ''}
+        ${token.socials[0]?.url ? `<a class="card-action-icon x-social-link" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="X / Twitter"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.748l7.73-8.835L1.254 2.25H8.08l4.259 5.63L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z"/></svg></a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()" title="Website">🌐</a>` : ''}
         ${terminals.axiom ? terminalIconLink(terminals.axiom, axiomFavicon, 'Axiom', 'axiom') : ''}
-        ${terminals.gmgn ? terminalIconLink(terminals.gmgn, gmgnFavicon, 'GMGN', 'gmgn') : ''}
-        ${terminals.padre ? terminalIconLink(terminals.padre, padreFavicon, 'Padre', 'padre') : ''}
+        ${terminals.gmgn ? terminalIconLink(terminals.gmgn, gmgnSvg, 'GMGN', 'gmgn', true) : ''}
+        ${terminals.padre ? terminalIconLink(terminals.padre, padreSvg, 'Padre', 'padre', true) : ''}
       </div>
       <span class="multiplier-badge mult-${token.multiplier.tier}">${token.multiplier.label}</span>
     </div>
@@ -1024,6 +1031,25 @@ const App = {
 
 // ── Kick off ───────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => App.init());
+
+// ── Badge info popover toggle ─────────────────────────────
+window.toggleBadgeInfo = function () {
+  const el = document.getElementById('badge-info-overlay');
+  if (!el) return;
+  el.classList.toggle('bi-hidden');
+  document.body.style.overflow = el.classList.contains('bi-hidden') ? '' : 'hidden';
+};
+
+// Close popover on Escape key
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const el = document.getElementById('badge-info-overlay');
+    if (el && !el.classList.contains('bi-hidden')) {
+      el.classList.add('bi-hidden');
+      document.body.style.overflow = '';
+    }
+  }
+});
 
 // ── Copy contract address ────────────────────────────────
 window.copyCa = function (address, btn) {

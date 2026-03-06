@@ -22,3 +22,13 @@ const SUPABASE_READY = (
     TCMD_CONFIG.SUPABASE_URL !== 'PASTE_YOUR_SUPABASE_URL_HERE' &&
     TCMD_CONFIG.SUPABASE_ANON_KEY !== 'PASTE_YOUR_SUPABASE_ANON_KEY_HERE'
 );
+
+// Default API keys — used when js/keys.js (gitignored) is absent,
+// e.g. on GitHub Pages. These are free-tier keys.
+// If keys.js loaded first it already set window.TCMD_KEYS, so we skip.
+if (!window.TCMD_KEYS || !window.TCMD_KEYS.birdeye) {
+    window.TCMD_KEYS = Object.assign({
+        helius:  '742cfd02-85ba-48c9-b6b8-3fe3e3aa70b3',
+        birdeye: '6ad6eba8bf594e1681764f5fb0b17ed8'
+    }, window.TCMD_KEYS || {});
+}

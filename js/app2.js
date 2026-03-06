@@ -144,10 +144,11 @@ function sparklineChart(token) {
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9" fill="${lc}" opacity="0.15"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="4.5" fill="${lc}"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2" fill="white" opacity="0.95"/>
-      <!-- Transparent hit area for hover popup — must be last (on top) -->
+      <!-- Hit area — pointer-events="all" required because fill:transparent
+           would otherwise be invisible to mouse events (SVG default is visiblePainted) -->
       <circle class="sparkline-sig-hit"
-        cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="14"
-        fill="transparent" style="cursor:pointer;"
+        cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="16"
+        fill="transparent" pointer-events="all" style="cursor:pointer;"
         data-sig-date="${sigDateStr}"
         data-sig-price="${sigPrice > 0 ? sigPrice.toPrecision(6) : '0'}"
         data-sig-mc="${Math.max(0, Math.round(sigMC))}"
@@ -1439,15 +1440,21 @@ window.toggleMcMode = function (addr) {
 
   let _hideTimer = null;
 
+  // Use hasAttribute('data-sig-date') instead of closest() — more reliable on SVG elements
+  function findSigHit(node) {
+    for (let i = 0; i < 4 && node && node !== document; i++) {
+      if (node.hasAttribute && node.hasAttribute('data-sig-date')) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
   document.addEventListener('mouseover', e => {
-    const el = e.target.closest ? e.target.closest('.sparkline-sig-hit') : null;
-    // SVG elements: e.target itself may be the circle
-    const hit = el || (e.target.classList?.contains('sparkline-sig-hit') ? e.target : null);
+    const hit = findSigHit(e.target);
     if (hit) { clearTimeout(_hideTimer); show(hit); }
   });
   document.addEventListener('mouseout', e => {
-    const el = e.target.closest ? e.target.closest('.sparkline-sig-hit') : null;
-    const hit = el || (e.target.classList?.contains('sparkline-sig-hit') ? e.target : null);
+    const hit = findSigHit(e.target);
     if (hit) { _hideTimer = setTimeout(() => pop.classList.remove('visible'), 120); }
   });
   document.addEventListener('scroll', () => pop.classList.remove('visible'), true);

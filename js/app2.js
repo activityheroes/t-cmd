@@ -60,6 +60,82 @@ function fmtTimer(remainMs) {
   return `${s}s`;
 }
 
+// ── Sparkline mini-chart from price change data ─────────────────
+function sparklineChart(token) {
+  const ch24 = parseFloat(token.priceChange?.h24 || 0);
+  const ch6  = parseFloat(token.priceChange?.h6  || 0);
+  const ch1  = parseFloat(token.priceChange?.h1  || 0);
+  // Reconstruct historical prices relative to current (= 1.0)
+  const p_now = 1.0;
+  const p_1h  = p_now  / (1 + ch1  / 100 || 1);
+  const p_6h  = p_now  / (1 + ch6  / 100 || 1);
+  const p_24h = p_now  / (1 + ch24 / 100 || 1);
+  // Interpolate to 7 points for a smoother curve
+  const pts = [
+    p_24h,
+    p_24h * 0.6 + p_6h * 0.4,
+    p_24h * 0.2 + p_6h * 0.8,
+    p_6h,
+    p_6h  * 0.4 + p_1h * 0.6,
+    p_1h,
+    p_now
+  ];
+  const minP = Math.min(...pts), maxP = Math.max(...pts);
+  const range = (maxP - minP) || 0.001;
+  const norm  = pts.map(p => (p - minP) / range);
+  const W = 300, H = 58, px = 4, py = 6;
+  const svgPts = norm.map((v, i) => [
+    px + (i / (norm.length - 1)) * (W - px * 2),
+    H - py - v * (H - py * 2)
+  ]);
+  // Smooth bezier path
+  let d = `M ${svgPts[0][0].toFixed(1)} ${svgPts[0][1].toFixed(1)}`;
+  for (let i = 1; i < svgPts.length; i++) {
+    const [ax, ay] = svgPts[i - 1], [bx, by] = svgPts[i];
+    const cpx = ax + (bx - ax) * 0.5;
+    d += ` C ${cpx.toFixed(1)} ${ay.toFixed(1)} ${cpx.toFixed(1)} ${by.toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}`;
+  }
+  const [lastX, lastY] = svgPts[svgPts.length - 1];
+  const fillD = `${d} L ${lastX.toFixed(1)} ${H} L ${px} ${H} Z`;
+  const isUp  = ch24 >= 0;
+  const lc    = isUp ? '#22c55e' : '#ef4444';
+  const gradId = `cg${token.address.slice(-6)}`;
+  // Signal marker: position based on when signal was scanned
+  const ageMs    = Math.max(0, Date.now() - (token.scannedAt || Date.now()));
+  const ageFrac  = Math.min(1, ageMs / 86400000); // fraction through 24h window
+  const sigIdxF  = (1 - ageFrac) * (svgPts.length - 1);
+  const si0      = Math.min(Math.floor(sigIdxF), svgPts.length - 2);
+  const sf       = sigIdxF - si0;
+  const sigX     = svgPts[si0][0] + (svgPts[si0 + 1][0] - svgPts[si0][0]) * sf;
+  const sigY     = svgPts[si0][1] + (svgPts[si0 + 1][1] - svgPts[si0][1]) * sf;
+  // Time labels
+  const _t = (offsetMs) => {
+    const d = new Date(Date.now() - offsetMs);
+    return d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: true });
+  };
+  return `<div class="card-sparkline">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:64px;display:block;">
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${lc}" stop-opacity="0.22"/>
+          <stop offset="100%" stop-color="${lc}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${fillD}" fill="url(#${gradId})"/>
+      <path d="${d}" fill="none" stroke="${lc}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9" fill="${lc}" opacity="0.15"/>
+      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="4.5" fill="${lc}"/>
+      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2" fill="white" opacity="0.95"/>
+    </svg>
+    <div class="sparkline-labels">
+      <span>${_t(86400000)}</span>
+      <span>${_t(21600000)}</span>
+      <span>${_t(3600000)}</span>
+      <span>Now</span>
+    </div>
+  </div>`;
+}
+
 let _timerInterval = null;
 function startSignalTimers() {
   if (_timerInterval) clearInterval(_timerInterval);
@@ -370,28 +446,47 @@ function renderScannerCard(token) {
   const chainBadge = `<span class="chain-badge chain-${(token.chainId || 'sol').toLowerCase().slice(0, 3)}">${token.chainId}</span>`;
   const terminals = getTerminalLinks(token);
 
-  // Terminal icon links with real logos (local SVGs for GMGN + Padre)
-  const dsFavicon     = 'https://dexscreener.com/favicon.ico';
-  const axiomFavicon  = 'https://axiom.trade/favicon.ico';
-  const gmgnSvg       = 'assets/logos/gmgn.svg';
-  const padreSvg      = 'assets/logos/padre.svg';
+  // Terminal icon links — DEX = nav only; Axiom/GMGN/Padre = copy CA + open
+  const dsFavicon    = 'https://dexscreener.com/favicon.ico';
+  const axiomFavicon = 'https://axiom.trade/favicon.ico';
+  const gmgnSvg      = 'assets/logos/gmgn.svg';
+  const padreSvg     = 'assets/logos/padre.svg';
 
-  const terminalIconLink = (href, iconSrc, label, cls, isSvg = false) =>
-    `<a class="terminal-icon-link ${cls}" href="${href}" target="_blank" onclick="event.stopPropagation()" title="Trade on ${label}">
-      <img src="${iconSrc}" width="${isSvg && cls === 'gmgn' ? 28 : cls === 'padre' ? 14 : 14}" height="14" onerror="this.style.display='none'" style="${isSvg ? 'object-fit:contain;' : 'border-radius:3px;'}vertical-align:middle;margin-right:3px;">${label}
+  // Plain nav link (for DEX)
+  const navLink = (href, iconSrc, label, cls, imgW = 14, isSvg = false) =>
+    `<a class="terminal-icon-link ${cls}" href="${href}" target="_blank" onclick="event.stopPropagation()" title="${label}">
+      <img src="${iconSrc}" width="${imgW}" height="14" onerror="this.style.display='none'" style="${isSvg ? 'object-fit:contain;' : 'border-radius:3px;'}vertical-align:middle;margin-right:3px;">${label}
     </a>`;
+  // Copy-CA + open link (for Axiom, GMGN, Padre)
+  const tradeLink = (href, iconSrc, label, cls, tokenAddr, imgW = 14, isSvg = false) =>
+    `<button class="terminal-icon-link ${cls}" onclick="event.stopPropagation();window.copyAndGo('${tokenAddr}','${href}','${label}')" title="Trade on ${label} · CA auto-copied to clipboard">
+      <img src="${iconSrc}" width="${imgW}" height="14" onerror="this.style.display='none'" style="${isSvg ? 'object-fit:contain;' : 'border-radius:3px;'}vertical-align:middle;margin-right:3px;">${label}
+    </button>`;
+
+  // Tooltip helper for badge hover
+  const tip = (text) => `data-tooltip="${text.replace(/"/g, '&quot;')}"`;
 
   return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${addr}')">
     <div class="card-top-row">
-      <span class="card-type-badge ${token.signalType}">${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
-      <span class="signal-age-clock" data-signal-ts="${scannedAt}">${fmtAge(scannedAt)}</span>
-      ${momBadgeHtml}
-      <div class="pump-score ${scoreClass}">
+      <span class="card-type-badge ${token.signalType}" ${tip(token.signalType === 'fresh' ? 'Fresh token — launched < 6 hours ago' : 'Revived — older token with new momentum')}>${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
+      <span class="signal-age-clock" data-signal-ts="${scannedAt}" ${tip('Signal detected ' + fmtAge(scannedAt) + ' ago')}>${fmtAge(scannedAt)}</span>
+      ${momResult
+        ? momResult.isGem
+          ? `<span class="mom-auto-badge gem" data-addr="${addr}" ${tip('💎 GEM — Momentum ≥75. High probability runner. Rare signal.')}>💎 GEM</span>`
+          : momResult.momentumScore >= 60
+            ? `<span class="mom-auto-badge high" data-addr="${addr}" ${tip('HIGH POTENTIAL — strong momentum, multiple signals firing')}>🚀 ${momResult.momentumScore}</span>`
+            : momResult.momentumScore >= 35
+              ? `<span class="mom-auto-badge medium" data-addr="${addr}" ${tip('MEDIUM momentum — building phase, watch closely')}>📈 ${momResult.momentumScore}</span>`
+              : `<span class="mom-auto-badge low" data-addr="${addr}" ${tip('LOW momentum — weak signals')}>📊 ${momResult.momentumScore}</span>`
+        : `<span class="mom-auto-badge pending" data-addr="${addr}" ${tip('Scanning momentum in background…')}>⟳</span>`
+      }
+      <div class="pump-score ${scoreClass}" ${tip('Pump Score: composite signal strength 0–100. 70+ = Hot 🔥')}>
         <div class="pump-score-value">${token.pumpScore}</div>
         <div class="pump-score-label">Score</div>
       </div>
-      <button class="fav-btn ${isFav ? 'active' : ''}" data-addr="${addr}" onclick="event.stopPropagation();window.toggleFavorite('${addr}')" title="${isFav ? 'Remove from favorites' : 'Add to favorites'}">⭐</button>
+      <button class="fav-btn ${isFav ? 'active' : ''}" data-addr="${addr}" onclick="event.stopPropagation();window.toggleFavorite('${addr}')" title="${isFav ? 'Remove from favorites' : 'Save to favorites'}">⭐</button>
     </div>
+
     <div class="card-coin-row">
       <div class="card-coin-info">
         <div style="position:relative;flex-shrink:0;">${logoHtml}</div>
@@ -405,45 +500,61 @@ function renderScannerCard(token) {
         <div class="${ch24 >= 0 ? 'num-green' : 'num-red'}" style="font-size:11.5px;font-weight:600;">${fmt.pct(ch24)}</div>
       </div>
     </div>
-    <div style="display:flex;gap:12px;font-size:11.5px;flex-wrap:wrap;">
-      <span style="color:var(--text-muted)">Vol 24h: <span class="num-cyan">${fmt.vol(token.volume.h24)}</span></span>
-      <span style="color:var(--text-muted)">Liq: <span class="${token.liquidity < 10000 ? 'num-red' : 'num-green'}">${fmt.vol(token.liquidity)}</span></span>
-      <span style="color:var(--text-muted)">MC: ${fmt.vol(token.mktCap)}</span>
+
+    <div class="card-stats-row">
+      <span>Vol 24h: <span class="num-cyan">${fmt.vol(token.volume.h24)}</span></span>
+      <span>Liq: <span class="${token.liquidity < 10000 ? 'num-red' : 'num-green'}">${fmt.vol(token.liquidity)}</span></span>
+      <span>MC: <span class="num-amber">${fmt.vol(token.mktCap)}</span></span>
     </div>
+
+    ${sparklineChart(token)}
+
     ${sig ? (() => {
       const supply = token.mktCap > 0 && token.priceUSD > 0 ? token.mktCap / token.priceUSD : 0;
-      const toMc = p => supply > 0 ? fmt.vol(p * supply) : fmt.price(p);
-      return `<div class="meme-signal-block" id="msb-${addr}">
+      const toMc = p => supply > 0 ? fmt.vol(p * supply) : '—';
+      return `<div class="meme-signal-block" id="msb-${addr}" data-mc-mode="1">
       <div class="meme-signal-header">
         <div class="meme-signal-label">📊 ${sig.phase} Signal</div>
-        <button class="mc-toggle-btn" onclick="event.stopPropagation();toggleMcMode('${addr}')" title="Switch Price / Market Cap">
-          <span class="mc-toggle-price">💲 Price</span>
-          <span class="mc-toggle-mc" style="display:none;">📈 Mkt Cap</span>
+        <button class="mc-toggle-btn" onclick="event.stopPropagation();window.toggleMcMode('${addr}')" title="Switch between Market Cap and Price view">
+          <svg width="14" height="10" viewBox="0 0 14 10" fill="none" style="vertical-align:middle;margin-right:4px;"><path d="M1 5h12M9 1l4 4-4 4M5 1L1 5l4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="mc-toggle-price" style="display:none;">💲 Price</span>
+          <span class="mc-toggle-mc">📈 MC</span>
         </button>
       </div>
       <div class="meme-signal-levels" id="msb-levels-${addr}">
-        <span class="num-cyan">Entry <strong class="msb-entry-p">${fmt.price(sig.entry)}</strong><span class="msb-entry-mc" style="display:none"> <em>${toMc(sig.entry)}</em></span></span>
-        <span class="num-red">SL <strong class="msb-sl-p">${fmt.price(sig.stopLoss)}</strong><span class="msb-sl-mc" style="display:none"> <em>${toMc(sig.stopLoss)}</em></span></span>
-        <span class="num-green">TP <strong class="msb-tp-p">${fmt.price(sig.takeProfit)}</strong><span class="msb-tp-mc" style="display:none"> <em>${toMc(sig.takeProfit)}</em></span></span>
+        <span class="num-cyan" ${tip('Suggested entry price / market cap')}>Entry
+          <strong class="msb-entry-p" style="display:none">${fmt.price(sig.entry)}</strong>
+          <strong class="msb-entry-mc"><em>${toMc(sig.entry)}</em></strong>
+        </span>
+        <span class="num-red" ${tip('Stop loss — exit if price drops here')}>SL
+          <strong class="msb-sl-p" style="display:none">${fmt.price(sig.stopLoss)}</strong>
+          <strong class="msb-sl-mc"><em>${toMc(sig.stopLoss)}</em></strong>
+        </span>
+        <span class="num-green" ${tip('Take profit target')}>TP
+          <strong class="msb-tp-p" style="display:none">${fmt.price(sig.takeProfit)}</strong>
+          <strong class="msb-tp-mc"><em>${toMc(sig.takeProfit)}</em></strong>
+        </span>
       </div>
     </div>`;
     })() : ''}
+
     ${entryTimerHtml}
-    ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag">${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
+    ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag" ${tip(f.label)}>${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
+
     <div class="card-bottom-row">
       <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
-        <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${addr}',this)" title="Copy CA: ${addr}">
+        <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${addr}',this)" title="Copy contract address">
           📋 ${addr ? addr.slice(0, 4) + '…' + addr.slice(-4) : 'CA'}
         </button>
-        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep Rug Check">🛡️ Rug</button>
-        ${terminalIconLink(token.dexUrl, dsFavicon, 'DEX', 'dex')}
+        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep rug analysis — 12 signals + wallet clusters">🛡️ Rug</button>
+        ${navLink(token.dexUrl, dsFavicon, 'View on DexScreener', 'dex')}
         ${token.socials[0]?.url ? `<a class="card-action-icon x-social-link" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="X / Twitter"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.748l7.73-8.835L1.254 2.25H8.08l4.259 5.63L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z"/></svg></a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()" title="Website">🌐</a>` : ''}
-        ${terminals.axiom ? terminalIconLink(terminals.axiom, axiomFavicon, 'Axiom', 'axiom') : ''}
-        ${terminals.gmgn ? terminalIconLink(terminals.gmgn, gmgnSvg, 'GMGN', 'gmgn', true) : ''}
-        ${terminals.padre ? terminalIconLink(terminals.padre, padreSvg, 'Padre', 'padre', true) : ''}
+        ${terminals.axiom ? tradeLink(terminals.axiom, axiomFavicon, 'Axiom', 'axiom', addr) : ''}
+        ${terminals.gmgn  ? tradeLink(terminals.gmgn,  gmgnSvg,      'GMGN',  'gmgn',  addr, 28, true) : ''}
+        ${terminals.padre ? tradeLink(terminals.padre,  padreSvg,     'Padre', 'padre', addr, 14, true) : ''}
       </div>
-      <span class="multiplier-badge mult-${token.multiplier.tier}">${token.multiplier.label}</span>
+      <span class="multiplier-badge mult-${token.multiplier.tier}" ${tip('Potential multiplier based on current market cap vs sector')}>${token.multiplier.label}</span>
     </div>
   </div>`;
 }
@@ -1032,6 +1143,20 @@ const App = {
 // ── Kick off ───────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => App.init());
 
+// ── Copy CA + open trading terminal ──────────────────────────────
+window.copyAndGo = function (addr, href, label) {
+  const doOpen = () => window.open(href, '_blank', 'noopener');
+  if (!addr) { doOpen(); return; }
+  navigator.clipboard.writeText(addr).then(() => {
+    showToast('📋', `CA Copied — Opening ${label || 'terminal'}`, addr.slice(0, 6) + '…' + addr.slice(-4), 'success');
+    setTimeout(doOpen, 250);
+  }).catch(() => {
+    // Clipboard blocked — still open the link
+    doOpen();
+    showToast('📋', 'Tip', 'Enable clipboard access to auto-copy CA', 'info');
+  });
+};
+
 // ── Badge info popover toggle ─────────────────────────────
 window.toggleBadgeInfo = function () {
   const el = document.getElementById('badge-info-overlay');
@@ -1071,18 +1196,24 @@ window.copyCa = function (address, btn) {
   });
 };
 
-// ── Price ↔ Market Cap toggle ─────────────────────────────────
+// ── Price ↔ Market Cap toggle (MC is default — data-mc-mode="1") ──
 window.toggleMcMode = function (addr) {
   const block = document.getElementById('msb-' + addr);
   if (!block) return;
-  const isMc = block.dataset.mcMode === '1';
+  // mcMode='1' = showing MC (default); mcMode='0' = showing Price
+  const isMc = block.dataset.mcMode !== '0';
   block.dataset.mcMode = isMc ? '0' : '1';
-  const priceEls = block.querySelectorAll('[class*="-p"]');
-  const mcEls = block.querySelectorAll('[class*="-mc"]');
+  const newIsMc = !isMc;
+  // Price elements: msb-entry-p, msb-sl-p, msb-tp-p
+  block.querySelectorAll('.msb-entry-p,.msb-sl-p,.msb-tp-p').forEach(el => {
+    el.style.display = newIsMc ? 'none' : '';
+  });
+  // MC elements: msb-entry-mc, msb-sl-mc, msb-tp-mc
+  block.querySelectorAll('.msb-entry-mc,.msb-sl-mc,.msb-tp-mc').forEach(el => {
+    el.style.display = newIsMc ? 'inline' : 'none';
+  });
   const btnPrice = block.querySelector('.mc-toggle-price');
-  const btnMc = block.querySelector('.mc-toggle-mc');
-  priceEls.forEach(el => el.style.display = isMc ? '' : 'none');
-  mcEls.forEach(el => el.style.display = isMc ? 'none' : 'inline');
-  if (btnPrice) btnPrice.style.display = isMc ? 'inline' : 'none';
-  if (btnMc) btnMc.style.display = isMc ? 'none' : 'inline';
+  const btnMc    = block.querySelector('.mc-toggle-mc');
+  if (btnPrice) btnPrice.style.display = newIsMc ? 'none'   : 'inline';
+  if (btnMc)    btnMc.style.display    = newIsMc ? 'inline' : 'none';
 };

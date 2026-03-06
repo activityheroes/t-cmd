@@ -65,6 +65,7 @@ function sparklineChart(token) {
   const ch24 = parseFloat(token.priceChange?.h24 || 0);
   const ch6  = parseFloat(token.priceChange?.h6  || 0);
   const ch1  = parseFloat(token.priceChange?.h1  || 0);
+  const ch_m5= parseFloat(token.priceChange?.m5  || 0);
   // Reconstruct historical prices relative to current (= 1.0)
   const p_now = 1.0;
   const p_1h  = p_now  / (1 + ch1  / 100 || 1);
@@ -101,13 +102,30 @@ function sparklineChart(token) {
   const lc    = isUp ? '#22c55e' : '#ef4444';
   const gradId = `cg${token.address.slice(-6)}`;
   // Signal marker: position based on when signal was scanned
-  const ageMs    = Math.max(0, Date.now() - (token.scannedAt || Date.now()));
+  const sigTs    = token.scannedAt || Date.now();
+  const ageMs    = Math.max(0, Date.now() - sigTs);
   const ageFrac  = Math.min(1, ageMs / 86400000); // fraction through 24h window
   const sigIdxF  = (1 - ageFrac) * (svgPts.length - 1);
   const si0      = Math.min(Math.floor(sigIdxF), svgPts.length - 2);
   const sf       = sigIdxF - si0;
   const sigX     = svgPts[si0][0] + (svgPts[si0 + 1][0] - svgPts[si0][0]) * sf;
   const sigY     = svgPts[si0][1] + (svgPts[si0 + 1][1] - svgPts[si0][1]) * sf;
+
+  // ── Signal popup metadata ─────────────────────────────────────
+  // Pick the price-change window that best covers the signal age
+  const sigWindowPct = ageMs < 300000   ? ch_m5
+                     : ageMs < 3600000  ? ch1
+                     : ageMs < 21600000 ? ch6
+                     : ch24;
+  const divsr    = 1 + sigWindowPct / 100;
+  const safeDivsr = Math.abs(divsr) > 0.05 ? divsr : 0.05;
+  const sigPrice = token.priceUSD > 0 ? token.priceUSD / safeDivsr : 0;
+  const sigMC    = (token.mktCap  || 0) / safeDivsr;
+  // Format signal datetime: "2/28, 04:35:46"
+  const _sd      = new Date(sigTs);
+  const sigDateStr = `${_sd.getMonth()+1}/${_sd.getDate()}, ` +
+    _sd.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12: false });
+
   // Time labels
   const _t = (offsetMs) => {
     const d = new Date(Date.now() - offsetMs);
@@ -126,6 +144,16 @@ function sparklineChart(token) {
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9" fill="${lc}" opacity="0.15"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="4.5" fill="${lc}"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2" fill="white" opacity="0.95"/>
+      <!-- Transparent hit area for hover popup — must be last (on top) -->
+      <circle class="sparkline-sig-hit"
+        cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="14"
+        fill="transparent" style="cursor:pointer;"
+        data-sig-date="${sigDateStr}"
+        data-sig-price="${sigPrice > 0 ? sigPrice.toPrecision(6) : '0'}"
+        data-sig-mc="${Math.max(0, Math.round(sigMC))}"
+        data-sig-change="${sigWindowPct.toFixed(2)}"
+        data-sig-symbol="${(token.symbol||'').replace(/"/g,'')}"
+      />
     </svg>
     <div class="sparkline-labels">
       <span>${_t(86400000)}</span>
@@ -1319,4 +1347,109 @@ window.toggleMcMode = function (addr) {
   // Hide on scroll or any click
   document.addEventListener('scroll', () => tip.classList.remove('visible'), true);
   document.addEventListener('click',  () => tip.classList.remove('visible'), true);
+})();
+
+// ══════════════════════════════════════════════════════════════
+// SIGNAL DOT POPUP — rich card shown on hover over sparkline signal marker
+// ══════════════════════════════════════════════════════════════
+(function initSigPopup() {
+  const pop = document.createElement('div');
+  pop.id = 'tcmd-sig-popup';
+  pop.innerHTML = `
+    <div class="sigpop-header">
+      <span class="sigpop-icon">📡</span>
+      <span class="sigpop-title">Signal Alert</span>
+      <span class="sigpop-date" id="sigpop-date"></span>
+    </div>
+    <div class="sigpop-grid">
+      <div class="sigpop-item">
+        <div class="sigpop-label">MC at Signal</div>
+        <div class="sigpop-value" id="sigpop-mc"></div>
+      </div>
+      <div class="sigpop-item">
+        <div class="sigpop-label">Price at Signal</div>
+        <div class="sigpop-value" id="sigpop-price"></div>
+      </div>
+      <div class="sigpop-item">
+        <div class="sigpop-label">Max Gain</div>
+        <div class="sigpop-value" id="sigpop-change"></div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(pop);
+
+  // Smart price formatter for micro-cap meme coins
+  function _fmtP(n) {
+    n = parseFloat(n);
+    if (!n || isNaN(n) || n <= 0) return '$—';
+    if (n >= 100)   return `$${n.toFixed(2)}`;
+    if (n >= 1)     return `$${n.toFixed(4)}`;
+    if (n >= 0.01)  return `$${n.toFixed(6)}`;
+    // Very small: find first significant decimals
+    const dec = Math.min(Math.max(2 - Math.floor(Math.log10(n)), 4), 12);
+    return `$${n.toFixed(dec)}`;
+  }
+  function _fmtMC(n) {
+    n = parseFloat(n);
+    if (!n || isNaN(n)) return '$—';
+    if (n >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
+    if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+    if (n >= 1e3) return `$${(n/1e3).toFixed(1)}K`;
+    return `$${n.toFixed(0)}`;
+  }
+
+  function show(el) {
+    const date   = el.getAttribute('data-sig-date')   || '';
+    const price  = el.getAttribute('data-sig-price')  || '0';
+    const mc     = el.getAttribute('data-sig-mc')     || '0';
+    const change = parseFloat(el.getAttribute('data-sig-change') || '0');
+
+    document.getElementById('sigpop-date').textContent  = date;
+    document.getElementById('sigpop-mc').textContent    = _fmtMC(mc);
+    document.getElementById('sigpop-price').textContent = _fmtP(price);
+
+    const chEl = document.getElementById('sigpop-change');
+    chEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+    chEl.className   = 'sigpop-value ' + (change >= 0 ? 'sigpop-pos' : 'sigpop-neg');
+
+    pop.classList.add('visible');
+    reposition(el);
+  }
+
+  function reposition(el) {
+    // For SVG elements, getBoundingClientRect() returns screen coords
+    const r  = el.getBoundingClientRect ? el.getBoundingClientRect()
+              : { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+    const pw = pop.offsetWidth  || 260;
+    const ph = pop.offsetHeight || 90;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const GAP = 14;
+
+    let top  = r.top - ph - GAP;
+    let left = r.left + (r.width - pw) / 2;
+
+    if (top < 6)           top = r.bottom + GAP;  // flip below
+    if (top + ph > vh - 6) top = r.top - ph - GAP; // flip above
+    left = Math.max(8, Math.min(left, vw - pw - 8));
+
+    pop.style.top  = top  + 'px';
+    pop.style.left = left + 'px';
+  }
+
+  let _hideTimer = null;
+
+  document.addEventListener('mouseover', e => {
+    const el = e.target.closest ? e.target.closest('.sparkline-sig-hit') : null;
+    // SVG elements: e.target itself may be the circle
+    const hit = el || (e.target.classList?.contains('sparkline-sig-hit') ? e.target : null);
+    if (hit) { clearTimeout(_hideTimer); show(hit); }
+  });
+  document.addEventListener('mouseout', e => {
+    const el = e.target.closest ? e.target.closest('.sparkline-sig-hit') : null;
+    const hit = el || (e.target.classList?.contains('sparkline-sig-hit') ? e.target : null);
+    if (hit) { _hideTimer = setTimeout(() => pop.classList.remove('visible'), 120); }
+  });
+  document.addEventListener('scroll', () => pop.classList.remove('visible'), true);
+  document.addEventListener('click',  () => pop.classList.remove('visible'), true);
 })();

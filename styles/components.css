@@ -3578,6 +3578,89 @@ body.rug-panel-open { overflow: hidden; }
   visibility: visible;
 }
 
+/* ── Signal-dot hover popup (#tcmd-sig-popup) ───────────────
+   Rich card shown when hovering the green signal marker dot
+   on the sparkline chart. Uses position:fixed to escape
+   parent overflow:hidden.
+   ─────────────────────────────────────────────────────────── */
+#tcmd-sig-popup {
+  position: fixed;
+  z-index: 99998;
+  min-width: 250px;
+  background: rgba(10, 11, 18, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 12px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  visibility: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255,255,255,0.04);
+}
+#tcmd-sig-popup.visible {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+.sigpop-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+}
+.sigpop-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.sigpop-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #e2e6f0;
+  letter-spacing: 0.01em;
+  flex: 1;
+}
+.sigpop-date {
+  font-size: 11px;
+  color: #6b7280;
+  font-feature-settings: "tnum";
+  white-space: nowrap;
+}
+.sigpop-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  padding: 12px 14px 13px;
+  gap: 0 6px;
+}
+.sigpop-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sigpop-label {
+  font-size: 9.5px;
+  color: #52576b;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.sigpop-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: #d4d8e8;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.01em;
+}
+.sigpop-pos { color: #22c55e; }
+.sigpop-neg { color: #ef4444; }
+
+/* ── Sparkline signal dot hit area ──────────────────────── */
+.sparkline-sig-hit {
+  cursor: pointer;
+}
+
 /* ── button.terminal-icon-link (copy+go variant) ────────── */
 button.terminal-icon-link {
   cursor: pointer;

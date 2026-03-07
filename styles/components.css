@@ -4016,3 +4016,132 @@ button.terminal-icon-link {
   font-family: inherit;
   appearance: none;
 }
+
+/* ── Bundle Detection — rug panel section ───────────────── */
+.rp-bundle-block {
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 10px;
+  padding: 10px 12px 12px;
+  margin-bottom: 14px;
+}
+.rp-bundle-meta {
+  font-size: 10.5px;
+  color: rgba(255,255,255,0.38);
+  margin-bottom: 8px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(255,255,255,0.055);
+  line-height: 1.5;
+}
+.rp-bundle-meta em { font-style: normal; color: rgba(255,158,0,0.7); }
+.rp-bundle-patterns {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.rp-bpat {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.rp-bpat-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.rp-bpat-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #e2e6f0;
+}
+.rp-bpat-conf {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.rp-bpat-detail {
+  font-size: 10.5px;
+  color: rgba(255,255,255,0.48);
+  line-height: 1.4;
+  margin-bottom: 5px;
+}
+.rp-bundle-supply {
+  font-size: 11px;
+  color: rgba(255,255,255,0.55);
+  margin: 8px 0 4px;
+  padding: 6px 8px;
+  background: rgba(245,158,11,0.07);
+  border: 1px solid rgba(245,158,11,0.15);
+  border-radius: 6px;
+}
+/* Badge inside rp-section-title */
+.rp-bundle-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 20px;
+  border: 1px solid;
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0.01em;
+}
+/* Verdict row in score hero */
+.rp-bundle-verdict {
+  font-size: 10.5px;
+  font-weight: 700;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  display: inline-block;
+}
+.rp-bundle-verdict.bd-crit { background: rgba(239,68,68,0.12);  color: #ef4444; }
+.rp-bundle-verdict.bd-high { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.rp-bundle-verdict.bd-med  { background: rgba(59,130,246,0.12); color: #3b82f6; }
+.rp-bundle-verdict.bd-low  { background: rgba(34,197,94,0.12);  color: #22c55e; }
+
+/* ── Bundle pattern confidence colors (reuse conf-* from cluster) ─ */
+.conf-red    { background: rgba(239,68,68,0.12);  color: #ef4444; }
+.conf-yellow { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.conf-green  { background: rgba(34,197,94,0.12);  color: #22c55e; }
+
+/* ── Bundle risk tiers (tier cls classes) ────────────────── */
+/* Used by both rug panel and scanner card badge             */
+.bd-crit { --bd-clr: #ef4444; }
+.bd-high { --bd-clr: #f59e0b; }
+.bd-med  { --bd-clr: #3b82f6; }
+.bd-low  { --bd-clr: #22c55e; }
+
+/* ── Bundle score badge — compact card indicator ─────────── */
+.bundle-score-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(255,255,255,0.1);
+  cursor: default;
+  vertical-align: middle;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.bundle-score-badge.bd-crit {
+  background: rgba(239,68,68,0.1);
+  border-color: rgba(239,68,68,0.3);
+  color: #ef4444;
+}
+.bundle-score-badge.bd-high {
+  background: rgba(245,158,11,0.1);
+  border-color: rgba(245,158,11,0.3);
+  color: #f59e0b;
+}
+.bundle-score-badge.bd-med {
+  background: rgba(59,130,246,0.1);
+  border-color: rgba(59,130,246,0.3);
+  color: #3b82f6;
+}

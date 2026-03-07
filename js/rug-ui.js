@@ -12,7 +12,7 @@
  */
 const RugUI = (() => {
 
-  let _last = null; // { rugResult, clusterResult }
+  let _last = null; // { rugResult, clusterResult, bundleResult }
 
   // ── Signal metadata ──────────────────────────────────────────
   const SIGNALS = [
@@ -82,12 +82,29 @@ const RugUI = (() => {
     setLoading(panel, true);
     clearResults(panel);
     try {
-      const [rugResult, clusterResult] = await Promise.all([
+      const [rugResult, clusterResult, bundleResult] = await Promise.all([
         RugChecker.analyzeToken(tokenAddress, chain),
-        ClusterDetector.analyze(tokenAddress, chain || 'solana')
+        ClusterDetector.analyze(tokenAddress, chain || 'solana'),
+        (typeof BundleDetector !== 'undefined')
+          ? BundleDetector.analyze(tokenAddress, chain || 'solana')
+          : Promise.resolve(null)
       ]);
-      _last = { rugResult, clusterResult };
-      renderResults(panel, rugResult, clusterResult);
+      _last = { rugResult, clusterResult, bundleResult };
+      // Store bundle result for compact card badges
+      if (bundleResult?.success && typeof AppState !== 'undefined') {
+        if (!AppState.bundleResults) AppState.bundleResults = {};
+        AppState.bundleResults[tokenAddress] = bundleResult;
+        // Trigger a lightweight card re-render for the bundle badge only
+        const cardEl = document.querySelector(`.scanner-card[data-addr="${tokenAddress}"] .card-bundle-badge`);
+        if (cardEl && bundleResult.bundle_risk_score >= 40) {
+          const t = bundleResult.tier;
+          cardEl.innerHTML = `🔗 ${t.label} ${bundleResult.bundle_risk_score}`;
+          cardEl.className = `card-bundle-badge bundle-score-badge ${t.cls}`;
+          cardEl.title = bundleResult.summary;
+          cardEl.style.display = 'inline-flex';
+        }
+      }
+      renderResults(panel, rugResult, clusterResult, bundleResult);
     } catch (err) {
       console.error('[RugUI]', err);
       showError(panel, err.message);
@@ -113,7 +130,7 @@ const RugUI = (() => {
   }
 
   // ── Render full results ──────────────────────────────────────
-  function renderResults(panel, rugResult, clusterResult) {
+  function renderResults(panel, rugResult, clusterResult, bundleResult) {
     const el = panel.querySelector('#rp-results');
     if (!el) return;
 
@@ -149,6 +166,11 @@ const RugUI = (() => {
           ${clusterResult?.clusters?.length
             ? `<div class="rp-cluster-warn">⚠️ ${clusterResult.clusters.length} cluster${clusterResult.clusters.length > 1 ? 's' : ''} detected — cluster risk ${clusterResult.clusterRiskScore}%</div>`
             : '<div class="rp-cluster-ok">✅ No wallet clusters detected</div>'}
+          ${bundleResult?.bundle_risk_score >= 40
+            ? `<div class="rp-bundle-verdict ${bundleResult.tier.cls}">${bundleResult.tier.emoji} Bundle: ${bundleResult.tier.label} (${bundleResult.bundle_risk_score}/100)</div>`
+            : bundleResult?.success
+              ? `<div class="rp-cluster-ok">✅ No bundle patterns detected</div>`
+              : ''}
         </div>
       </div>
 
@@ -157,6 +179,9 @@ const RugUI = (() => {
       <div class="rp-signals-grid">
         ${SIGNALS.map(m => signalCard(m, rugResult.signals[m.key])).join('')}
       </div>
+
+      <!-- ── Bundle detection ──────────────────────────────────── -->
+      ${bundleSection(bundleResult)}
 
       <!-- ── Cluster analysis ──────────────────────────────────── -->
       ${clusterSection(clusterResult)}
@@ -195,6 +220,70 @@ const RugUI = (() => {
           ? `<div class="rp-sev-bar"><div class="rp-sev-fill ${sevCls}" style="width:${severity}%"></div></div>`
           : ''}
       </div>`;
+  }
+
+  // ── Bundle section ────────────────────────────────────────────
+  function bundlePatternLabel(pattern) {
+    const MAP = {
+      fixedBuySize:     '💰 Fixed-Size Buys',
+      sameBlock:        '🧱 Same-Block Bundle',
+      burstTiming:      '⚡ Burst Timing',
+      coordinatedSells: '📉 Coordinated Sells',
+      regularTiming:    '⏱️ Regular Timing',
+      sameFunder:       '🏦 Same Funder',
+      relatedFunding:   '🔗 Related Funding'
+    };
+    return MAP[pattern] || pattern;
+  }
+
+  function bundleSection(br) {
+    if (!br) return '';
+
+    const score    = br.bundle_risk_score || 0;
+    const t        = br.tier || (typeof BundleDetector !== 'undefined' ? BundleDetector.bundleTier(score) : { label: '—', cls: 'bd-low', color: '#22c55e', emoji: '✅' });
+    const patterns = br.detected_patterns || [];
+    const hasData  = br.success && patterns.length > 0;
+    const stageStr = br.stage === 2
+      ? `🔬 Deep analysis (Stage 2 · Helius) · ${br.early_buyers_analyzed || 0} early buyers`
+      : br.stage === 1
+        ? `⚡ Fast screen (Stage 1) · ${br.early_buyers_analyzed || 0} early buyers analyzed${!ChainAPIs.getKeys().helius ? ' · <em>Add Helius key for deeper analysis</em>' : ''}`
+        : '';
+
+    return `
+      <div class="rp-section-title">🔗 Bundle Detection
+        <span class="rp-bundle-badge ${t.cls}" style="background:${t.color}1a;border-color:${t.color}44;color:${t.color}">
+          ${t.emoji} ${t.label} — ${score}/100
+        </span>
+      </div>
+      <div class="rp-bundle-block">
+        ${stageStr ? `<div class="rp-bundle-meta">${stageStr}</div>` : ''}
+        ${hasData
+          ? `
+          <div class="rp-bundle-patterns">
+            ${patterns.map(p => `
+              <div class="rp-bpat">
+                <div class="rp-bpat-head">
+                  <span class="rp-bpat-name">${bundlePatternLabel(p.pattern)}</span>
+                  <span class="rp-bpat-conf ${p.confidence >= 75 ? 'conf-red' : p.confidence >= 40 ? 'conf-yellow' : 'conf-green'}">${p.confidence}% confidence</span>
+                </div>
+                <div class="rp-bpat-detail">${p.details}</div>
+                <div class="rp-sev-bar"><div class="rp-sev-fill ${p.confidence >= 75 ? 'sev-crit' : p.confidence >= 40 ? 'sev-high' : 'sev-med'}" style="width:${p.confidence}%"></div></div>
+              </div>`).join('')}
+          </div>
+          ${br.estimated_cluster_supply_pct > 0
+            ? `<div class="rp-bundle-supply">📊 Estimated cluster supply: <strong style="color:#f59e0b">~${br.estimated_cluster_supply_pct}%</strong> held by ${br.clusters?.[0]?.wallets?.length || 0} flagged wallets</div>`
+            : ''}
+          ${(br.clusters?.[0]?.wallets?.length || 0) > 0
+            ? `<details class="rp-wallet-detail">
+                <summary>View ${br.clusters[0].wallets.length} flagged wallet${br.clusters[0].wallets.length !== 1 ? 's' : ''}</summary>
+                <div class="rp-wallet-list">
+                  ${br.clusters[0].wallets.map(w => `<code class="rp-wallet-addr">${w}</code>`).join('')}
+                </div>
+              </details>`
+            : ''}`
+          : `<div class="rp-no-clusters">${br.reason || br.summary || 'No bundle patterns detected in early trading window.'}</div>`}
+      </div>
+    `;
   }
 
   // ── Cluster section ──────────────────────────────────────────
@@ -281,7 +370,7 @@ const RugUI = (() => {
   // ── Copy report ──────────────────────────────────────────────
   function copyReport() {
     if (!_last) return;
-    const { rugResult, clusterResult } = _last;
+    const { rugResult, clusterResult, bundleResult } = _last;
     const lv = level(rugResult.rugRiskScore);
 
     let txt = `🔍 T-CMD Rug Risk Report\n`;
@@ -295,6 +384,22 @@ const RugUI = (() => {
       const st = s.skipped ? '⬜ SKIP' : s.flagged ? '🔴 FAIL' : '✅ PASS';
       txt += `${st} [${s.severity || 0}/100] ${m.label}\n   ${s.reason}\n`;
     });
+
+    if (bundleResult?.success) {
+      txt += `\n── Bundle Detection ────────────────\n`;
+      txt += `Bundle Risk Score: ${bundleResult.bundle_risk_score}/100 — ${bundleResult.tier?.label}\n`;
+      txt += `Stage: ${bundleResult.stage === 2 ? 'Deep (Helius)' : 'Fast screen'} · ${bundleResult.early_buyers_analyzed || 0} early buyers\n`;
+      if (bundleResult.detected_patterns?.length) {
+        bundleResult.detected_patterns.forEach(p => {
+          txt += `⚡ [${p.confidence}%] ${p.details}\n`;
+        });
+        if (bundleResult.estimated_cluster_supply_pct > 0) {
+          txt += `Cluster supply: ~${bundleResult.estimated_cluster_supply_pct}%\n`;
+        }
+      } else {
+        txt += `No bundle patterns detected\n`;
+      }
+    }
 
     if (clusterResult?.clusters?.length) {
       txt += `\n── Cluster Analysis ────────────────\n`;

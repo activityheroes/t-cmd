@@ -965,7 +965,13 @@ function renderScannerCard(token) {
   // Tooltip helper for badge hover
   const tip = (text) => `data-tooltip="${text.replace(/"/g, '&quot;')}"`;
 
-  return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp" onclick="openScannerDetail('${addr}')">
+  // Bundle badge (shown immediately if rug check was already run for this token)
+  const bundleRes = AppState.bundleResults?.[addr];
+  const bundleBadgeHtml = bundleRes && bundleRes.bundle_risk_score >= 40
+    ? `<span class="card-bundle-badge bundle-score-badge ${bundleRes.tier.cls}" title="${bundleRes.summary}" style="display:inline-flex">🔗 ${bundleRes.tier.label} ${bundleRes.bundle_risk_score}</span>`
+    : `<span class="card-bundle-badge bundle-score-badge" style="display:none"></span>`;
+
+  return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp scanner-card" data-addr="${addr}" onclick="openScannerDetail('${addr}')">
     <div class="card-top-row">
       <span class="card-type-badge ${token.signalType}" ${tip(token.signalType === 'fresh' ? 'Fresh token — launched < 6 hours ago' : 'Revived — older token with new momentum')}>${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
       <span class="signal-age-clock" data-signal-ts="${scannedAt}" ${tip('Signal detected ' + fmtAge(scannedAt) + ' ago')}>${fmtAge(scannedAt)}</span>
@@ -1093,7 +1099,12 @@ function renderScannerCard(token) {
     })() : ''}
 
     ${entryTimerHtml}
-    ${token.rugFlags.length > 0 ? `<div class="rug-flags">${token.rugFlags.map(f => `<div class="rug-flag" ${tip(f.label)}>${f.icon} ${f.label}</div>`).join('')}</div>` : ''}
+    ${(token.rugFlags.length > 0 || (bundleRes && bundleRes.bundle_risk_score >= 40))
+      ? `<div class="rug-flags">
+          ${token.rugFlags.map(f => `<div class="rug-flag" ${tip(f.label)}>${f.icon} ${f.label}</div>`).join('')}
+          ${bundleBadgeHtml}
+        </div>`
+      : `<div class="rug-flags">${bundleBadgeHtml}</div>`}
 
     <div class="card-bottom-row">
       <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">

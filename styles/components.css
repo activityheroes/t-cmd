@@ -3721,6 +3721,120 @@ body.rug-panel-open { overflow: hidden; }
   border-color: rgba(34,197,94,0.35);
 }
 
+/* ── Signal marker animation (sonar / ripple) ────────────── */
+@keyframes sigRipple {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  75%  { transform: scale(3.8); opacity: 0;    }
+  100% { transform: scale(3.8); opacity: 0;    }
+}
+.sig-ring { transform-origin: center; }
+.sig-r1   { animation: sigRipple 2.4s cubic-bezier(0.4,0,0.6,1) infinite; }
+.sig-r2   { animation: sigRipple 2.4s cubic-bezier(0.4,0,0.6,1) infinite 0.9s; }
+
+/* ── Signal count badge (Nth · age) ─────────────────────── */
+.sig-count-badge {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.2;
+  background: rgba(6,182,212,0.1);
+  border: 1px solid rgba(6,182,212,0.22);
+  border-radius: 20px;
+  padding: 2px 8px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #22d3ee;
+  cursor: pointer;
+  vertical-align: middle;
+  margin-left: 5px;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sig-count-badge:hover {
+  background: rgba(6,182,212,0.2);
+  border-color: rgba(6,182,212,0.45);
+}
+.sig-count-badge .scb-age {
+  font-size: 8px;
+  font-weight: 400;
+  color: rgba(255,255,255,0.45);
+  display: block;
+}
+
+/* ── Signal history popup ────────────────────────────────── */
+#tcmd-sig-pop {
+  position: fixed;
+  z-index: 10000;
+  background: #141824;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  padding: 10px 12px 8px;
+  min-width: 258px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  display: none;
+  opacity: 0;
+  transition: opacity 0.14s;
+  font-size: 11px;
+  pointer-events: auto;
+}
+.sig-pop-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.sig-pop-header strong { color: #fff; font-size: 11.5px; }
+.sig-pop-header span   { color: rgba(255,255,255,0.35); font-size: 9.5px; font-family: var(--font-mono); }
+.sig-pop-table { width: 100%; border-collapse: collapse; }
+.sig-pop-table th {
+  color: rgba(255,255,255,0.3);
+  font-size: 9px;
+  font-weight: 500;
+  text-align: right;
+  padding: 1px 5px 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.sig-pop-table th:first-child,
+.sig-pop-table td:first-child { text-align: left; }
+.sig-pop-table td {
+  padding: 3px 5px;
+  text-align: right;
+  color: rgba(255,255,255,0.65);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.sig-pop-table tbody tr:hover td { color: rgba(255,255,255,0.9); }
+.sig-pop-current td { color: #f59e0b !important; font-weight: 600; }
+.sig-pop-table tfoot tr { border-top: 1px solid rgba(255,255,255,0.07); }
+
+/* ── Time-filter buttons on mini chart ───────────────────── */
+.spark-timefilter {
+  display: flex;
+  gap: 3px;
+  justify-content: flex-end;
+  padding: 2px 5px 4px;
+}
+.stf-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px;
+  color: rgba(255,255,255,0.3);
+  font-size: 8.5px;
+  padding: 1px 5px;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.5;
+}
+.stf-btn:hover { color: rgba(255,255,255,0.7); border-color: rgba(255,255,255,0.2); }
+.stf-btn.active {
+  background: rgba(34,197,94,0.12);
+  border-color: rgba(34,197,94,0.5);
+  color: #22c55e;
+  font-weight: 600;
+}
+
 /* ── Sparkline mini price chart ─────────────────────────── */
 .card-sparkline {
   margin: 6px 0 4px;

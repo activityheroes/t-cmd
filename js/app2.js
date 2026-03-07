@@ -60,116 +60,188 @@ function fmtTimer(remainMs) {
   return `${s}s`;
 }
 
-// ── Sparkline mini-chart from price change data ─────────────────
-// ── Signal timestamp history (enables 2-marker sparklines) ───────
+// ── Signal history — stores {ts, price, mc} per detection ────────
 function _sigHistKey(addr) { return `tcmd_sh_${addr}`; }
-function recordSigTs(addr, ts) {
+
+function recordSigData(addr, ts, price, mc) {
   if (!addr || !ts) return;
   const key = _sigHistKey(addr);
   let hist = [];
   try { hist = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
-  // Skip if already recorded within 5 min of the most recent entry
-  if (hist.length && Math.abs(hist[0] - ts) < 300000) return;
-  hist.unshift(ts);
-  try { localStorage.setItem(key, JSON.stringify(hist.slice(0, 4))); } catch {}
-}
-function getSigHistory(addr) {
-  if (!addr) return [];
-  try { return JSON.parse(localStorage.getItem(_sigHistKey(addr)) || '[]'); } catch { return []; }
+  // Normalise legacy plain-timestamp entries
+  hist = hist.map(e => (typeof e === 'number' ? { ts: e, price: 0, mc: 0 } : e));
+  if (hist.length && Math.abs(hist[0].ts - ts) < 300000) return; // dedup within 5 min
+  hist.unshift({ ts, price: price || 0, mc: mc || 0 });
+  try { localStorage.setItem(key, JSON.stringify(hist.slice(0, 10))); } catch {}
 }
 
-function sparklineChart(token) {
-  const ch24 = parseFloat(token.priceChange?.h24 || 0);
-  const ch6  = parseFloat(token.priceChange?.h6  || 0);
-  const ch1  = parseFloat(token.priceChange?.h1  || 0);
-  const ch_m5= parseFloat(token.priceChange?.m5  || 0);
-  // Reconstruct historical prices relative to current (= 1.0)
+// Returns [{ts, price, mc}] newest-first; normalises legacy format automatically
+function getSigHistory(addr) {
+  if (!addr) return [];
+  try {
+    const raw = JSON.parse(localStorage.getItem(_sigHistKey(addr)) || '[]');
+    return raw.map(e => (typeof e === 'number' ? { ts: e, price: 0, mc: 0 } : e));
+  } catch { return []; }
+}
+
+// Ordinal suffix helper — "1st", "2nd", "3rd", "4th"…
+function ordSuffix(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function sparklineChart(token, frame) {
+  frame = frame || '24h';
+  const addr  = token.address || '';
+  const history = getSigHistory(addr); // [{ts, price, mc}]
+
+  // ── Price change data ──────────────────────────────────────────
+  const ch24  = parseFloat(token.priceChange?.h24 || 0);
+  const ch6   = parseFloat(token.priceChange?.h6  || 0);
+  const ch1   = parseFloat(token.priceChange?.h1  || 0);
+  const ch5m  = parseFloat(token.priceChange?.m5  || 0);
+  const safe  = x => (Math.abs(1 + x / 100) > 0.01 ? 1 + x / 100 : 1);
   const p_now = 1.0;
-  const p_1h  = p_now  / (1 + ch1  / 100 || 1);
-  const p_6h  = p_now  / (1 + ch6  / 100 || 1);
-  const p_24h = p_now  / (1 + ch24 / 100 || 1);
-  // Interpolate to 7 points for a smoother curve
-  const pts = [
-    p_24h,
-    p_24h * 0.6 + p_6h * 0.4,
-    p_24h * 0.2 + p_6h * 0.8,
-    p_6h,
-    p_6h  * 0.4 + p_1h * 0.6,
-    p_1h,
-    p_now
-  ];
+  const p_5m  = p_now / safe(ch5m);
+  const p_1h  = p_now / safe(ch1);
+  const p_6h  = p_now / safe(ch6);
+  const p_24h = p_now / safe(ch24);
+
+  // ── Build points + labels for chosen frame ─────────────────────
+  let pts, windowMs, timeLabels;
+  const _tfmt = ms => new Date(Date.now() - ms).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: true });
+  const _dfmt = ts  => { const d = new Date(ts); return `${d.getMonth()+1}/${d.getDate()}`; };
+
+  if (frame === '1h') {
+    pts       = [p_1h, p_1h * 0.5 + p_5m * 0.5, p_5m, p_now];
+    windowMs  = 3600000;
+    timeLabels = [_tfmt(3600000), _tfmt(1800000), _tfmt(600000), 'Now'];
+
+  } else if (frame === '4h') {
+    const p_3h = p_6h * 0.5 + p_1h * 0.5;
+    pts       = [p_6h, p_3h, p_1h, p_5m, p_now];
+    windowMs  = 4 * 3600000;
+    timeLabels = [_tfmt(4*3600000), _tfmt(3*3600000), _tfmt(2*3600000), _tfmt(3600000), 'Now'];
+
+  } else if ((frame === '7d' || frame === 'all') && history.length >= 1) {
+    // Build chart from stored signal history prices
+    const curPrice = token.priceUSD || 1;
+    const cutoff   = frame === '7d' ? Date.now() - 7 * 86400000 : 0;
+    const filtered = history.filter(e => e.ts >= cutoff).slice().reverse(); // oldest→newest
+    if (filtered.length >= 1) {
+      const sigPts = filtered.map(e => ({ ts: e.ts, p: e.price > 0 ? e.price / curPrice : 1 }));
+      sigPts.push({ ts: Date.now(), p: 1.0 });
+      pts      = sigPts.map(e => e.p);
+      windowMs = Date.now() - sigPts[0].ts;
+      const span = windowMs;
+      timeLabels = [
+        _dfmt(sigPts[0].ts),
+        _dfmt(sigPts[0].ts + span * 0.33),
+        _dfmt(sigPts[0].ts + span * 0.66),
+        'Now'
+      ];
+    } else { frame = '24h'; } // fall through below if empty
+
+  }
+
+  if (!pts) { // default 24h
+    pts        = [p_24h, p_24h*0.6+p_6h*0.4, p_24h*0.2+p_6h*0.8, p_6h, p_6h*0.4+p_1h*0.6, p_1h, p_now];
+    windowMs   = 86400000;
+    timeLabels = [_tfmt(86400000), _tfmt(21600000), _tfmt(3600000), 'Now'];
+  }
+
+  // ── Build SVG geometry ─────────────────────────────────────────
   const minP = Math.min(...pts), maxP = Math.max(...pts);
-  const range = (maxP - minP) || 0.001;
-  const norm  = pts.map(p => (p - minP) / range);
+  const rng  = (maxP - minP) || 0.001;
+  const norm = pts.map(p => (p - minP) / rng);
   const W = 300, H = 58, px = 4, py = 6;
   const svgPts = norm.map((v, i) => [
     px + (i / (norm.length - 1)) * (W - px * 2),
     H - py - v * (H - py * 2)
   ]);
-  // Smooth bezier path
   let d = `M ${svgPts[0][0].toFixed(1)} ${svgPts[0][1].toFixed(1)}`;
   for (let i = 1; i < svgPts.length; i++) {
-    const [ax, ay] = svgPts[i - 1], [bx, by] = svgPts[i];
+    const [ax, ay] = svgPts[i-1], [bx, by] = svgPts[i];
     const cpx = ax + (bx - ax) * 0.5;
     d += ` C ${cpx.toFixed(1)} ${ay.toFixed(1)} ${cpx.toFixed(1)} ${by.toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}`;
   }
-  const [lastX, lastY] = svgPts[svgPts.length - 1];
-  const fillD = `${d} L ${lastX.toFixed(1)} ${H} L ${px} ${H} Z`;
-  const isUp  = ch24 >= 0;
-  const lc    = isUp ? '#22c55e' : '#ef4444';
-  const gradId = `cg${token.address.slice(-6)}`;
-  // Signal markers — up to 2 (current + previous from localStorage history)
-  const sigTs    = token.scannedAt || Date.now();
-  const ageMs    = Math.max(0, Date.now() - sigTs); // used below for sigWindowPct
+  const [lastX] = svgPts[svgPts.length - 1];
+  const fillD  = `${d} L ${lastX.toFixed(1)} ${H} L ${px} ${H} Z`;
+  const isUp   = ch24 >= 0;
+  const lc     = isUp ? '#22c55e' : '#ef4444';
+  const gradId = `cg${addr.slice(-6)}`;
 
-  // Helper: convert a timestamp → SVG [x, y] on the chart
-  function _mPos(ts) {
-    const am  = Math.max(0, Date.now() - ts);
-    const af  = Math.min(1, am / 86400000);
-    const idxF = (1 - af) * (svgPts.length - 1);
-    const i0  = Math.min(Math.floor(idxF), svgPts.length - 2);
-    const f   = idxF - i0;
-    return [
-      svgPts[i0][0] + (svgPts[i0 + 1][0] - svgPts[i0][0]) * f,
-      svgPts[i0][1] + (svgPts[i0 + 1][1] - svgPts[i0][1]) * f
-    ];
+  // ── Signal markers ─────────────────────────────────────────────
+  const sigTs      = token.scannedAt || Date.now();
+  const [sigX, sigY] = svgPts[svgPts.length - 1]; // primary always at "Now"
+
+  // Historical markers (prev signals)
+  let histMarkersHtml = '';
+  if ((frame === '7d' || frame === 'all') && history.length >= 1) {
+    // Each history entry maps to svgPts[i] in the multi-signal chart
+    const curPrice = token.priceUSD || 1;
+    const cutoff   = frame === '7d' ? Date.now() - 7 * 86400000 : 0;
+    const filtered = history.filter(e => e.ts >= cutoff).slice().reverse();
+    histMarkersHtml = filtered.map((e, i) => {
+      const [hx, hy] = svgPts[i] || [];
+      if (hx == null || Math.abs(hx - sigX) < 22) return '';
+      return `<g transform="translate(${hx.toFixed(1)},${hy.toFixed(1)})">
+        <circle r="4" fill="${lc}" opacity="0.12"/>
+        <circle r="3.5" fill="${lc}" opacity="0.5"/>
+        <circle r="1.5" fill="white" opacity="0.6"/>
+        <text y="-10" font-size="7" fill="${lc}" opacity="0.55" text-anchor="middle">${i+1}</text>
+      </g>`;
+    }).join('');
+  } else {
+    // 1h / 4h / 24h: show one "prev" marker if within the window and not overlapping
+    const prevEntry = history.find(e => Math.abs(e.ts - sigTs) > 300000 && Date.now() - e.ts < windowMs);
+    if (prevEntry) {
+      const am   = Math.max(0, Date.now() - prevEntry.ts);
+      const af   = Math.min(1, am / windowMs);
+      const idxF = (1 - af) * (svgPts.length - 1);
+      const i0   = Math.min(Math.floor(idxF), svgPts.length - 2);
+      const f    = idxF - i0;
+      const px2  = svgPts[i0][0] + (svgPts[i0+1][0] - svgPts[i0][0]) * f;
+      const py2  = svgPts[i0][1] + (svgPts[i0+1][1] - svgPts[i0][1]) * f;
+      if (Math.abs(px2 - sigX) > 28) {
+        histMarkersHtml = `<g transform="translate(${px2.toFixed(1)},${py2.toFixed(1)})">
+          <circle r="5" fill="${lc}" opacity="0.1"/>
+          <circle r="3.5" fill="${lc}" opacity="0.55"/>
+          <circle r="1.5" fill="white" opacity="0.6"/>
+          <text y="-10" font-size="7" fill="${lc}" opacity="0.55" text-anchor="middle">prev</text>
+        </g>`;
+      }
+    }
   }
 
-  // Primary marker — always anchored to the rightmost chart point (current price / "Now").
-  // Time-based positioning would place it at the edge anyway (signal is recent), so
-  // anchoring it explicitly makes the design intentional and consistent across all cards.
-  const [sigX, sigY] = svgPts[svgPts.length - 1];
+  // Primary animated marker (ripple / sonar effect)
+  const primaryMarker = `<g transform="translate(${sigX.toFixed(1)},${sigY.toFixed(1)})">
+    <circle r="4.5" fill="${lc}" class="sig-ring sig-r1"/>
+    <circle r="4.5" fill="${lc}" class="sig-ring sig-r2"/>
+    <circle r="4.5" fill="${lc}"/>
+    <circle r="2"   fill="white" opacity="0.95"/>
+  </g>`;
 
-  // Secondary marker: most recent previous signal (must be >5 min older, within 24h)
-  const history  = getSigHistory(token.address);
-  const prevTs   = history.find(ts => Math.abs(ts - sigTs) > 300000 && Date.now() - ts < 86400000);
-  const [sig2X, sig2Y] = prevTs ? _mPos(prevTs) : [null, null];
-  // Only show second marker if it's far enough away from primary (≥28 px) to avoid overlap
-  const showSecondMarker = sig2X !== null && Math.abs(sig2X - sigX) > 28;
+  // ── Signal popup metadata ──────────────────────────────────────
+  const ageMs       = Math.max(0, Date.now() - sigTs);
+  const sigWindowPct = ageMs < 300000 ? ch5m : ageMs < 3600000 ? ch1 : ageMs < 21600000 ? ch6 : ch24;
+  const divsr       = 1 + sigWindowPct / 100;
+  const safeDivsr   = Math.abs(divsr) > 0.05 ? divsr : 0.05;
+  const sigPrice    = token.priceUSD > 0 ? token.priceUSD / safeDivsr : 0;
+  const sigMC       = (token.mktCap || 0) / safeDivsr;
+  const _sd         = new Date(sigTs);
+  const sigDateStr  = `${_sd.getMonth()+1}/${_sd.getDate()}, ` +
+    _sd.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
 
-  // ── Signal popup metadata ─────────────────────────────────────
-  // Pick the price-change window that best covers the signal age
-  const sigWindowPct = ageMs < 300000   ? ch_m5
-                     : ageMs < 3600000  ? ch1
-                     : ageMs < 21600000 ? ch6
-                     : ch24;
-  const divsr    = 1 + sigWindowPct / 100;
-  const safeDivsr = Math.abs(divsr) > 0.05 ? divsr : 0.05;
-  const sigPrice = token.priceUSD > 0 ? token.priceUSD / safeDivsr : 0;
-  const sigMC    = (token.mktCap  || 0) / safeDivsr;
-  // Format signal datetime: "2/28, 04:35:46"
-  const _sd      = new Date(sigTs);
-  const sigDateStr = `${_sd.getMonth()+1}/${_sd.getDate()}, ` +
-    _sd.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12: false });
+  // ── Time-filter buttons ────────────────────────────────────────
+  const frameDefs = [['1h','1h'],['4h','4h'],['24h','24h'],['7d','7d'],['All','all']];
+  const btnHtml = frameDefs.map(([lbl, key]) =>
+    `<button class="stf-btn${frame === key ? ' active' : ''}" onclick="event.stopPropagation();window.sparkSetFrame('${addr}','${key}')">${lbl}</button>`
+  ).join('');
 
-  // Time labels
-  const _t = (offsetMs) => {
-    const d = new Date(Date.now() - offsetMs);
-    return d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: true });
-  };
-  // Put signal data on the wrapper div — hovering anywhere on the chart triggers the popup.
-  // This is 100% reliable: no SVG pointer-event quirks, no overflow:hidden clipping issues.
   return `<div class="card-sparkline sparkline-has-sig"
+    data-addr="${addr}"
     data-sig-date="${sigDateStr}"
     data-sig-price="${sigPrice > 0 ? sigPrice.toPrecision(6) : '0'}"
     data-sig-mc="${Math.max(0, Math.round(sigMC))}"
@@ -184,21 +256,13 @@ function sparklineChart(token) {
       </defs>
       <path d="${fillD}" fill="url(#${gradId})"/>
       <path d="${d}" fill="none" stroke="${lc}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-      ${showSecondMarker ? `
-      <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="7"   fill="${lc}" opacity="0.1"/>
-      <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="3.5" fill="${lc}" opacity="0.55"/>
-      <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="1.5" fill="white" opacity="0.6"/>
-      <text x="${sig2X.toFixed(1)}" y="${(sig2Y - 10).toFixed(1)}" font-size="7" fill="${lc}" opacity="0.55" text-anchor="middle">prev</text>` : ''}
-      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9"   fill="${lc}" opacity="0.15"/>
-      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="4.5" fill="${lc}"/>
-      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2"   fill="white" opacity="0.95"/>
+      ${histMarkersHtml}
+      ${primaryMarker}
     </svg>
     <div class="sparkline-labels">
-      <span>${_t(86400000)}</span>
-      <span>${_t(21600000)}</span>
-      <span>${_t(3600000)}</span>
-      <span>Now</span>
+      ${timeLabels.map(l => `<span>${l}</span>`).join('')}
     </div>
+    <div class="spark-timefilter">${btnHtml}</div>
   </div>`;
 }
 
@@ -510,8 +574,8 @@ function renderScannerCards() {
     </div>`;
     return;
   }
-  // Record signal timestamps so 2-marker sparklines work on next render
-  tokens.forEach(t => { if (t.address && t.scannedAt) recordSigTs(t.address, t.scannedAt); });
+  // Record signal data (price + MC) so history popups and long-frame charts work
+  tokens.forEach(t => { if (t.address && t.scannedAt) recordSigData(t.address, t.scannedAt, t.priceUSD, t.mktCap); });
   grid.innerHTML = tokens.map(t => {
     try { return renderScannerCard(t); }
     catch (e) { console.error('[renderScannerCard] error for', t?.symbol, e); return ''; }
@@ -655,7 +719,7 @@ function buildTechChart(token) {
   // Secondary: time-based position for a previous scan (skip if too close to primary)
   const sigTs0 = token.scannedAt || Date.now();
   const hist   = getSigHistory(token.address);
-  const prevTs = hist.find(ts => Math.abs(ts - sigTs0) > 300000 && Date.now() - ts < 86400000);
+  const prevTs = hist.find(e => Math.abs(e.ts - sigTs0) > 300000 && Date.now() - e.ts < 86400000)?.ts;
   let secondaryMarkerHtml = '';
   if (prevTs) {
     const af   = Math.min(1, Math.max(0, Date.now() - prevTs) / 86400000);
@@ -933,14 +997,25 @@ function renderScannerCard(token) {
       </div>`;
     })()}
 
-    <div class="card-coin-row">
+    ${(() => {
+      // Signal count badge — shows Nth detection; hover opens history popup
+      const sigHist   = getSigHistory(addr);
+      const sigNum    = sigHist.length + 1; // current is the Nth
+      return `<div class="card-coin-row">
       <div class="card-coin-info">
         <div style="position:relative;flex-shrink:0;">${logoHtml}</div>
         <div>
-          <div class="coin-name">${token.name} ${chainBadge}</div>
+          <div class="coin-name">${token.name} ${chainBadge}
+            <span class="sig-count-badge"
+              onmouseenter="event.stopPropagation();window.showSigPopup(this,'${addr}')"
+              onmouseleave="window.hideSigPopup()">
+              📡 ${ordSuffix(sigNum)}<span class="scb-age">${fmtAge(scannedAt)}</span>
+            </span>
+          </div>
           <div class="coin-vol" style="font-size:11px;">${token.symbol} · Vol: ${fmt.vol(token.volume.h1)}/h</div>
         </div>
-      </div>
+      </div>`;
+    })()}
       <div style="text-align:right;">
         <div style="font-size:13px;font-weight:700;font-family:var(--font-mono);">${fmt.price(token.priceUSD)}</div>
         <div class="${ch24 >= 0 ? 'num-green' : 'num-red'}" style="font-size:11.5px;font-weight:600;">${fmt.pct(ch24)}</div>
@@ -1697,6 +1772,86 @@ window.toggleMcMode = function (addr) {
   if (btnPrice) btnPrice.style.display = newIsMc ? 'none'   : 'inline';
   if (btnMc)    btnMc.style.display    = newIsMc ? 'inline' : 'none';
 };
+
+// ── Sparkline timeframe switcher ─────────────────────────────
+window.sparkSetFrame = function (addr, frame) {
+  const token = (AppState.scannerTokens || []).find(t => t.address === addr);
+  if (!token) return;
+  const wrapper = document.querySelector(`.card-sparkline[data-addr="${addr}"]`);
+  if (!wrapper) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = sparklineChart(token, frame);
+  wrapper.replaceWith(tmp.firstElementChild);
+};
+
+// ── Signal history popup ──────────────────────────────────────
+(function initSigPopup() {
+  const pop = document.createElement('div');
+  pop.id = 'tcmd-sig-pop';
+  document.body.appendChild(pop);
+  let hideTimer = null;
+
+  pop.addEventListener('mouseenter', () => clearTimeout(hideTimer));
+  pop.addEventListener('mouseleave', () => window.hideSigPopup());
+
+  window.showSigPopup = function (el, addr) {
+    clearTimeout(hideTimer);
+    const token = (AppState.scannerTokens || []).find(t => t.address === addr);
+    if (!token) return;
+
+    const hist = getSigHistory(addr); // [{ts,price,mc}] newest-first
+    const sigTs = token.scannedAt || Date.now();
+
+    // Build full list oldest→newest, append current
+    const allSigs = [...hist].reverse();
+    // Ensure current signal is at the end
+    if (!allSigs.length || Math.abs(allSigs[allSigs.length-1].ts - sigTs) > 300000) {
+      allSigs.push({ ts: sigTs, price: token.priceUSD || 0, mc: token.mktCap || 0 });
+    }
+    const count = allSigs.length;
+    const latest = allSigs[allSigs.length - 1];
+    const _sd = new Date(latest.ts);
+    const dateStr = `${_sd.getMonth()+1}/${_sd.getDate()}, ` +
+      _sd.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+
+    const rows = allSigs.map((e, i) => {
+      const isCurr = i === allSigs.length - 1;
+      return isCurr
+        ? `<tr class="sig-pop-current"><td colspan="2">Current</td><td>${fmt.vol(e.mc)}</td><td>${fmt.price(e.price)}</td></tr>`
+        : `<tr><td>${i+1}</td><td>${fmtAge(e.ts)}</td><td>${e.mc > 0 ? fmt.vol(e.mc) : '—'}</td><td>${e.price > 0 ? fmt.price(e.price) : '—'}</td></tr>`;
+    });
+
+    pop.innerHTML = `
+      <div class="sig-pop-header">
+        <strong>${ordSuffix(count)} Signal Alert</strong>
+        <span>${dateStr}</span>
+      </div>
+      <table class="sig-pop-table">
+        <thead><tr><th>#</th><th>Time</th><th>FDV</th><th>Price</th></tr></thead>
+        <tbody>${rows.slice(0, -1).join('')}</tbody>
+        <tfoot>${rows[rows.length-1]}</tfoot>
+      </table>`;
+
+    pop.style.display = 'block';
+    pop.style.opacity = '0';
+    const rect = el.getBoundingClientRect();
+    const popW = 270, popH = 44 + allSigs.length * 24;
+    let top  = rect.bottom + 6;
+    let left = rect.left;
+    if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
+    if (top + popH > window.innerHeight - 8) top = rect.top - popH - 6;
+    pop.style.top  = `${top}px`;
+    pop.style.left = `${left}px`;
+    requestAnimationFrame(() => { pop.style.opacity = '1'; });
+  };
+
+  window.hideSigPopup = function () {
+    hideTimer = setTimeout(() => {
+      pop.style.opacity = '0';
+      setTimeout(() => { pop.style.display = 'none'; }, 150);
+    }, 220);
+  };
+})();
 
 // ── Full tech chart: Price ↔ MC toggle ──────────────────────
 window.tcChartToggle = function (chartId) {

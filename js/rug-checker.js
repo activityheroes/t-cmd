@@ -57,6 +57,17 @@ const RugChecker = (() => {
   function pass(reason)           { return { flagged: false, severity: 0,                    reason }; }
   function skip(reason)           { return { flagged: false, severity: 0,                    reason, skipped: true }; }
 
+  /**
+   * noData(ctx, fallbackMsg) — produce the right skip message depending on
+   * whether the API key is configured.
+   *   • Key present → API failed / token not indexed → neutral message
+   *   • Key absent  → prompt the user to add key
+   */
+  function noData(ctx, fallbackMsg) {
+    if (ctx?.hasBirdeyeKey) return skip('Birdeye data unavailable — token may not be indexed yet');
+    return skip(fallbackMsg || 'No contract data — add Birdeye API key');
+  }
+
   function short(addr) {
     if (!addr) return '?';
     return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr;
@@ -84,7 +95,7 @@ const RugChecker = (() => {
   // ── SIGNAL 1 — Developer wallet large share ───────────────────
   function checkDevHoldings(ctx) {
     const { sec } = ctx;
-    if (!sec) return skip('No creator data — add Birdeye API key');
+    if (!sec) return noData(ctx, 'No creator data — add Birdeye API key');
 
     // creatorPercentage is 0–1 decimal in Birdeye
     const creatorPct = normPct(sec.creatorPercentage);
@@ -120,13 +131,13 @@ const RugChecker = (() => {
     const liqUsd = pair?.liquidity?.usd || 0;
     if (liqUsd < 500)  return flag(90, 'Essentially no liquidity and no lock data — trivial rug');
     if (liqUsd < 5000) return flag(65, `Only ${fmtUsd(liqUsd)} liquidity — lock status unknown`);
-    return skip('LP lock status unknown — Birdeye API key needed');
+    return noData(ctx, 'LP lock status unknown — Birdeye API key needed');
   }
 
   // ── SIGNAL 3 — Mint function / expandable supply ──────────────
   function checkMintExists(ctx) {
     const { sec, chain } = ctx;
-    if (!sec) return skip('No contract data — add Birdeye API key');
+    if (!sec) return noData(ctx, 'No contract data — add Birdeye API key');
 
     const isSolana = !chain || chain === 'solana';
 
@@ -156,7 +167,7 @@ const RugChecker = (() => {
   // ── SIGNAL 4 — Blacklist / trading restriction ────────────────
   function checkBlacklist(ctx) {
     const { sec, chain } = ctx;
-    if (!sec) return skip('No contract data — add Birdeye API key');
+    if (!sec) return noData(ctx, 'No contract data — add Birdeye API key');
 
     const isSolana = !chain || chain === 'solana';
 
@@ -279,7 +290,7 @@ const RugChecker = (() => {
       return pass(`Top 10 hold ${pct.toFixed(1)}% — reasonable distribution`);
     }
 
-    return skip('Holder data unavailable — add Birdeye API key');
+    return noData(ctx, 'Holder data unavailable — add Birdeye API key');
   }
 
   // ── SIGNAL 8 — Liquidity suddenly removed ─────────────────────
@@ -331,7 +342,7 @@ const RugChecker = (() => {
       if (mc > 0 && vol24 / mc > 5) {
         return flag(55, `Vol/MC ${(vol24 / mc).toFixed(1)}x — suspicious but no trade detail (add Birdeye key)`);
       }
-      return skip('No trade data — add Birdeye API key for wash-trade detection');
+      return noData(ctx, 'No trade data — add Birdeye API key for wash-trade detection');
     }
 
     const trades        = tradesData.items;
@@ -459,7 +470,7 @@ const RugChecker = (() => {
   // ── SIGNAL 12 — Ownership not renounced ──────────────────────
   function checkOwnership(ctx) {
     const { sec, chain } = ctx;
-    if (!sec) return skip('No contract data — add Birdeye API key');
+    if (!sec) return noData(ctx, 'No contract data — add Birdeye API key');
 
     const isSolana = !chain || chain === 'solana';
 
@@ -525,18 +536,25 @@ const RugChecker = (() => {
     const pair    = pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || null;
     const chain   = chainOverride || pair?.chainId || 'solana';
 
+    // Always use the base token address for Birdeye calls, not the raw input
+    // (input could be a pair address from DexScreener; Birdeye needs the token mint)
+    const baseAddress = pair?.baseToken?.address || tokenAddress;
+
+    // Check if key exists — used to improve error messages in check functions
+    const { birdeye: birdeyeKey } = ChainAPIs.getKeys();
+
     // 2. Fetch Birdeye security, holders, trades in parallel
     const [secRes, holdersRes, tradesRes] = await Promise.all([
-      ChainAPIs.beTokenSecurity(tokenAddress, chain),
-      ChainAPIs.beTopHolders(tokenAddress, chain, 20),
-      ChainAPIs.beTrades(tokenAddress, chain, 100)
+      ChainAPIs.beTokenSecurity(baseAddress, chain),
+      ChainAPIs.beTopHolders(baseAddress, chain, 20),
+      ChainAPIs.beTrades(baseAddress, chain, 100)
     ]);
 
     const sec        = secRes?.data    || null;
     const holdersData = holdersRes?.data || null;
     const tradesData  = tradesRes?.data  || null;
 
-    const ctx = { tokenAddress, chain, pair, dexData, sec, holdersData, tradesData };
+    const ctx = { tokenAddress: baseAddress, chain, pair, dexData, sec, holdersData, tradesData, hasBirdeyeKey: !!birdeyeKey };
 
     // 3. Run all 12 signals (sync + async)
     const [

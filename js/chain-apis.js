@@ -124,13 +124,22 @@ const ChainAPIs = (() => {
    * Returns: mintAuthority, freezeAuthority, creatorAddress, creatorPercentage,
    *          top10HolderPercent, lpLockedPercentage, lpBurntPercentage,
    *          mutableMetadata, isToken2022, transferFeeData, etc.
+   *
+   * Tries v3 endpoint first (consistent with beTopHolders), falls back to legacy.
    */
   async function beTokenSecurity(address, chain = 'solana') {
+    // v3 endpoint (preferred — consistent with beTopHolders)
+    const v3 = await beGet(`/defi/v3/token/security?address=${address}`, chain);
+    if (v3?.success) return v3;
+    // Legacy endpoint fallback
     return beGet(`/defi/token_security?address=${address}`, chain);
   }
 
   /** Price, volume, liquidity, holder count, market cap */
   async function beTokenOverview(address, chain = 'solana') {
+    // v3 endpoint first, then legacy
+    const v3 = await beGet(`/defi/v3/token/market-data?address=${address}`, chain);
+    if (v3?.success) return v3;
     return beGet(`/defi/token_overview?address=${address}`, chain);
   }
 

@@ -3600,6 +3600,68 @@ body.rug-panel-open { overflow: hidden; }
   color: #fde047;
 }
 
+/* ── Card tech bar (RSI · Support · Resistance · Range · Vol) ── */
+.card-tech-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  background: rgba(255,255,255,0.022);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.055);
+  margin: 3px 0 6px;
+}
+.ctb-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.ctb-k {
+  font-size: 9px;
+  color: rgba(255,255,255,0.33);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.ctb-v {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: rgba(255,255,255,0.78);
+  white-space: nowrap;
+}
+.ctb-sep {
+  color: rgba(255,255,255,0.08);
+  font-size: 13px;
+  flex-shrink: 0;
+  padding: 0 1px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+
+/* ── Full tech chart (Technical & Social detail tab) ───────── */
+.tech-chart-wrap {
+  background: rgba(255,255,255,0.022);
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.07);
+  padding: 12px 12px 6px;
+}
+.tech-chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 7px 2px 2px;
+  font-size: 10.5px;
+}
+.tcl-supp { color: #4ade80; }
+.tcl-res  { color: #f87171; }
+.tcl-info { color: rgba(255,255,255,0.3); margin-left: auto; font-style: italic; }
+
 /* ── Sparkline mini price chart ─────────────────────────── */
 .card-sparkline {
   margin: 6px 0 4px;

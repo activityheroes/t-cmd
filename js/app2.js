@@ -61,6 +61,23 @@ function fmtTimer(remainMs) {
 }
 
 // ── Sparkline mini-chart from price change data ─────────────────
+// ── Signal timestamp history (enables 2-marker sparklines) ───────
+function _sigHistKey(addr) { return `tcmd_sh_${addr}`; }
+function recordSigTs(addr, ts) {
+  if (!addr || !ts) return;
+  const key = _sigHistKey(addr);
+  let hist = [];
+  try { hist = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+  // Skip if already recorded within 5 min of the most recent entry
+  if (hist.length && Math.abs(hist[0] - ts) < 300000) return;
+  hist.unshift(ts);
+  try { localStorage.setItem(key, JSON.stringify(hist.slice(0, 4))); } catch {}
+}
+function getSigHistory(addr) {
+  if (!addr) return [];
+  try { return JSON.parse(localStorage.getItem(_sigHistKey(addr)) || '[]'); } catch { return []; }
+}
+
 function sparklineChart(token) {
   const ch24 = parseFloat(token.priceChange?.h24 || 0);
   const ch6  = parseFloat(token.priceChange?.h6  || 0);
@@ -101,15 +118,29 @@ function sparklineChart(token) {
   const isUp  = ch24 >= 0;
   const lc    = isUp ? '#22c55e' : '#ef4444';
   const gradId = `cg${token.address.slice(-6)}`;
-  // Signal marker: position based on when signal was scanned
+  // Signal markers — up to 2 (current + previous from localStorage history)
   const sigTs    = token.scannedAt || Date.now();
-  const ageMs    = Math.max(0, Date.now() - sigTs);
-  const ageFrac  = Math.min(1, ageMs / 86400000); // fraction through 24h window
-  const sigIdxF  = (1 - ageFrac) * (svgPts.length - 1);
-  const si0      = Math.min(Math.floor(sigIdxF), svgPts.length - 2);
-  const sf       = sigIdxF - si0;
-  const sigX     = svgPts[si0][0] + (svgPts[si0 + 1][0] - svgPts[si0][0]) * sf;
-  const sigY     = svgPts[si0][1] + (svgPts[si0 + 1][1] - svgPts[si0][1]) * sf;
+
+  // Helper: convert a timestamp → SVG [x, y] on the chart
+  function _mPos(ts) {
+    const am  = Math.max(0, Date.now() - ts);
+    const af  = Math.min(1, am / 86400000);
+    const idxF = (1 - af) * (svgPts.length - 1);
+    const i0  = Math.min(Math.floor(idxF), svgPts.length - 2);
+    const f   = idxF - i0;
+    return [
+      svgPts[i0][0] + (svgPts[i0 + 1][0] - svgPts[i0][0]) * f,
+      svgPts[i0][1] + (svgPts[i0 + 1][1] - svgPts[i0][1]) * f
+    ];
+  }
+
+  // Primary marker (current signal)
+  const [sigX, sigY] = _mPos(sigTs);
+
+  // Secondary marker: most recent previous signal (must be >5 min older, within 24h)
+  const history  = getSigHistory(token.address);
+  const prevTs   = history.find(ts => Math.abs(ts - sigTs) > 300000 && Date.now() - ts < 86400000);
+  const [sig2X, sig2Y] = prevTs ? _mPos(prevTs) : [null, null];
 
   // ── Signal popup metadata ─────────────────────────────────────
   // Pick the price-change window that best covers the signal age
@@ -148,9 +179,14 @@ function sparklineChart(token) {
       </defs>
       <path d="${fillD}" fill="url(#${gradId})"/>
       <path d="${d}" fill="none" stroke="${lc}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9" fill="${lc}" opacity="0.15"/>
+      ${sig2X !== null ? `
+      <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="7"   fill="${lc}" opacity="0.1"/>
+      <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="3.5" fill="${lc}" opacity="0.55"/>
+      <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="1.5" fill="white" opacity="0.6"/>
+      <text x="${sig2X.toFixed(1)}" y="${(sig2Y - 10).toFixed(1)}" font-size="7" fill="${lc}" opacity="0.55" text-anchor="middle">prev</text>` : ''}
+      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="9"   fill="${lc}" opacity="0.15"/>
       <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="4.5" fill="${lc}"/>
-      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2" fill="white" opacity="0.95"/>
+      <circle cx="${sigX.toFixed(1)}" cy="${sigY.toFixed(1)}" r="2"   fill="white" opacity="0.95"/>
     </svg>
     <div class="sparkline-labels">
       <span>${_t(86400000)}</span>
@@ -464,7 +500,196 @@ function renderScannerCards() {
     </div>`;
     return;
   }
+  // Record signal timestamps so 2-marker sparklines work on next render
+  tokens.forEach(t => { if (t.address && t.scannedAt) recordSigTs(t.address, t.scannedAt); });
   grid.innerHTML = tokens.map(renderScannerCard).join('');
+}
+
+// ── Technical levels: RSI · Support · Resistance · Range · Volume ─────
+function calcTechLevels(token) {
+  const p    = token.priceUSD || 0;
+  const ch1  = parseFloat(token.priceChange?.h1  || 0);
+  const ch6  = parseFloat(token.priceChange?.h6  || 0);
+  const ch24 = parseFloat(token.priceChange?.h24 || 0);
+  const ch5m = parseFloat(token.priceChange?.m5  || 0);
+
+  // Reconstruct prices at each timeframe (relative to current)
+  const safe = x => (Math.abs(1 + x / 100) > 0.01 ? 1 + x / 100 : 1);
+  const p1h  = p > 0 ? p / safe(ch1)  : p;
+  const p6h  = p > 0 ? p / safe(ch6)  : p;
+  const p24h = p > 0 ? p / safe(ch24) : p;
+  const prices = [p, p1h, p6h, p24h].filter(v => v > 0);
+
+  const rawLow  = Math.min(...prices);
+  const rawHigh = Math.max(...prices);
+
+  // Small buffer so lines sit just outside the price range (proper S/R levels)
+  const support    = rawLow  * 0.985;
+  const resistance = rawHigh * 1.015;
+  const range      = support > 0 ? ((resistance - support) / support) * 100 : 0;
+
+  // RSI estimate: same formula as scanner.js calcTechnicalSentiment
+  const rsi = Math.min(90, Math.max(10, 50 + ch1 * 1.5 + ch5m * 2));
+
+  // Volume quality relative to market cap
+  const vol24 = token.volume?.h24 || 0;
+  const mc    = token.mktCap || 1;
+  const vr    = vol24 / mc;
+  let volQuality, volColor;
+  if      (vr > 1)    { volQuality = 'Very High'; volColor = '#22c55e'; }
+  else if (vr > 0.3)  { volQuality = 'High';      volColor = '#4ade80'; }
+  else if (vr > 0.08) { volQuality = 'Normal';    volColor = '#94a3b8'; }
+  else if (vr > 0.02) { volQuality = 'Low';       volColor = '#f59e0b'; }
+  else                { volQuality = 'Very Low';   volColor = '#ef4444'; }
+
+  return { rsi: rsi.toFixed(1), support, resistance, range: range.toFixed(1), volQuality, volColor };
+}
+
+/**
+ * buildTechChart(token)
+ * Full-size SVG price chart for the Technical & Social detail tab.
+ * Shows: price line + gradient fill, support/resistance dashed lines,
+ * volume bars, up to 2 signal markers, axis labels.
+ */
+function buildTechChart(token) {
+  const W = 340, H = 160;
+  const lp = 44, rp = 4, tp = 10; // left / right / top padding
+  const chartH = 104;              // price chart height
+  const volGap = 8, volH = 26;    // volume section
+  const lblY   = H - 2;           // time label baseline
+
+  const cx0 = lp, cx1 = W - rp;
+  const cy0 = tp, cy1 = tp + chartH;
+  const vcy0 = cy1 + volGap, vcy1 = vcy0 + volH;
+
+  // Price reconstruction
+  const ch24 = parseFloat(token.priceChange?.h24 || 0);
+  const ch6  = parseFloat(token.priceChange?.h6  || 0);
+  const ch1  = parseFloat(token.priceChange?.h1  || 0);
+  const p_now = 1.0;
+  const p_1h  = p_now / (1 + ch1  / 100 || 1);
+  const p_6h  = p_now / (1 + ch6  / 100 || 1);
+  const p_24h = p_now / (1 + ch24 / 100 || 1);
+  const pPts  = [p_24h, p_24h*0.6+p_6h*0.4, p_24h*0.2+p_6h*0.8,
+                 p_6h,  p_6h*0.4+p_1h*0.6,  p_1h, p_now];
+
+  const minP = Math.min(...pPts), maxP = Math.max(...pPts);
+  const buf  = (maxP - minP) * 0.14; // 14% vertical buffer so S/R lines are visible
+  const normY = p => cy0 + (1 - (p - (minP - buf)) / ((maxP - minP) + 2 * buf)) * chartH;
+
+  const svgPts = pPts.map((p, i) => [
+    cx0 + (i / (pPts.length - 1)) * (cx1 - cx0),
+    normY(p)
+  ]);
+
+  // Bezier path
+  let d = `M ${svgPts[0][0].toFixed(1)} ${svgPts[0][1].toFixed(1)}`;
+  for (let i = 1; i < svgPts.length; i++) {
+    const [ax, ay] = svgPts[i-1], [bx, by] = svgPts[i];
+    const cpx = ax + (bx - ax) * 0.5;
+    d += ` C ${cpx.toFixed(1)} ${ay.toFixed(1)} ${cpx.toFixed(1)} ${by.toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}`;
+  }
+  const [lastX] = svgPts[svgPts.length - 1];
+  const fillD = `${d} L ${lastX.toFixed(1)} ${cy1} L ${cx0} ${cy1} Z`;
+
+  const isUp = ch24 >= 0;
+  const lc   = isUp ? '#22c55e' : '#ef4444';
+  const gradId = `tcg${token.address.slice(-8)}`;
+
+  // Support & resistance absolute prices and Y coordinates
+  const tl     = calcTechLevels(token);
+  const suppP  = tl.support;    // actual price value
+  const resP   = tl.resistance;
+  const pUsd   = token.priceUSD || 1;
+  const suppRatio = suppP / pUsd;  // ratio (p_now=1.0 scale)
+  const resRatio  = resP  / pUsd;
+  const suppY  = normY(suppRatio);
+  const resY   = normY(resRatio);
+
+  // Volume bars (estimated from available volume data)
+  const vol = token.volume || {};
+  const volPts = [
+    (vol.h24||0)/24, (vol.h24||0)/24*0.9, (vol.h24||0)/24*1.2,
+    (vol.h6||0)/6,   (vol.h1||0)*0.8,     (vol.h1||0), (vol.m5||0)*12
+  ];
+  const maxVol = Math.max(...volPts, 1);
+  const barW   = ((cx1 - cx0) / volPts.length) * 0.75;
+  const volBars = volPts.map((v, i) => {
+    const bx = cx0 + i * ((cx1 - cx0) / volPts.length);
+    const bh = Math.max(1, (v / maxVol) * volH);
+    const by = vcy1 - bh;
+    return `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" fill="${lc}" opacity="${i === volPts.length - 1 ? 0.65 : 0.28}" rx="1"/>`;
+  }).join('');
+
+  // Signal markers (up to 2)
+  const sigTs0 = token.scannedAt || Date.now();
+  const hist   = getSigHistory(token.address);
+  const sigTsList = [sigTs0, ...(hist.filter(ts => Math.abs(ts - sigTs0) > 300000))].slice(0, 2);
+  const sigMarkersHtml = sigTsList.map((ts, idx) => {
+    const af   = Math.min(1, Math.max(0, Date.now() - ts) / 86400000);
+    const idxF = (1 - af) * (svgPts.length - 1);
+    const i0   = Math.min(Math.floor(idxF), svgPts.length - 2);
+    const f    = idxF - i0;
+    const sx   = svgPts[i0][0] + (svgPts[i0+1][0] - svgPts[i0][0]) * f;
+    const sy   = svgPts[i0][1] + (svgPts[i0+1][1] - svgPts[i0][1]) * f;
+    const isPrimary = idx === 0;
+    const r1 = isPrimary ? 13 : 9, r2 = isPrimary ? 5.5 : 4, r3 = isPrimary ? 2.5 : 1.8;
+    const op = isPrimary ? 1 : 0.6;
+    return `
+      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${r1}" fill="${lc}" opacity="0.12"/>
+      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${r2}" fill="${lc}" opacity="${op}"/>
+      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${r3}" fill="white" opacity="${isPrimary ? 0.9 : 0.65}"/>
+      <text x="${sx.toFixed(1)}" y="${(sy - r1 - 3).toFixed(1)}" font-size="8" fill="${lc}" opacity="${op}" text-anchor="middle">${isPrimary ? 'Signal' : 'Prev'}</text>`;
+  }).join('');
+
+  // Time labels
+  const _t = ms => {
+    const d = new Date(Date.now() - ms);
+    return d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: true });
+  };
+  // Price label helper
+  const fPx = v => fmt.price(v);
+
+  return `<div class="tech-chart-wrap">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block;overflow:visible;">
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="${lc}" stop-opacity="0.28"/>
+          <stop offset="100%" stop-color="${lc}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <!-- Grid -->
+      <line x1="${cx0}" y1="${cy0}" x2="${cx1}" y2="${cy0}" stroke="rgba(255,255,255,0.05)" stroke-width="0.8"/>
+      <line x1="${cx0}" y1="${((cy0+cy1)/2).toFixed(1)}" x2="${cx1}" y2="${((cy0+cy1)/2).toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-width="0.8"/>
+      <line x1="${cx0}" y1="${cy1}" x2="${cx1}" y2="${cy1}" stroke="rgba(255,255,255,0.05)" stroke-width="0.8"/>
+      <!-- Support (dashed green) -->
+      <line x1="${cx0}" y1="${suppY.toFixed(1)}" x2="${cx1}" y2="${suppY.toFixed(1)}" stroke="#22c55e" stroke-width="1.2" stroke-dasharray="5,4" opacity="0.65"/>
+      <text x="${lp - 3}" y="${(suppY + 3).toFixed(1)}" font-size="8.5" fill="#22c55e" opacity="0.8" text-anchor="end">${fPx(suppP)}</text>
+      <!-- Resistance (dashed red) -->
+      <line x1="${cx0}" y1="${resY.toFixed(1)}" x2="${cx1}" y2="${resY.toFixed(1)}" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="5,4" opacity="0.65"/>
+      <text x="${lp - 3}" y="${(resY + 3).toFixed(1)}" font-size="8.5" fill="#ef4444" opacity="0.8" text-anchor="end">${fPx(resP)}</text>
+      <!-- Current price mid label -->
+      <text x="${lp - 3}" y="${((cy0+cy1)/2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fPx(pUsd)}</text>
+      <!-- Area + line -->
+      <path d="${fillD}" fill="url(#${gradId})"/>
+      <path d="${d}" fill="none" stroke="${lc}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- Markers -->
+      ${sigMarkersHtml}
+      <!-- Volume bars -->
+      ${volBars}
+      <!-- Volume label -->
+      <text x="${cx0}" y="${(vcy1 + 9).toFixed(1)}" font-size="7.5" fill="rgba(255,255,255,0.2)">Volume</text>
+      <!-- X labels -->
+      <text x="${cx0}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.28)">${_t(86400000)}</text>
+      <text x="${(cx0+(cx1-cx0)*0.5).toFixed(1)}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.2)" text-anchor="middle">${_t(43200000)}</text>
+      <text x="${cx1}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.28)" text-anchor="end">Now</text>
+    </svg>
+    <div class="tech-chart-legend">
+      <span class="tcl-supp">─ ─ Support: ${fPx(suppP)}</span>
+      <span class="tcl-res">─ ─ Resistance: ${fPx(resP)}</span>
+      <span class="tcl-info">RSI ${tl.rsi} · Range ${tl.range}%</span>
+    </div>
+  </div>`;
 }
 
 // ── FOMO alert banner — shown for exceptional signals ─────────────
@@ -687,6 +912,22 @@ function renderScannerCard(token) {
 
     ${sparklineChart(token)}
 
+    ${(() => {
+      const tl = calcTechLevels(token);
+      const rsiColor = tl.rsi < 30 ? '#22c55e' : tl.rsi > 70 ? '#ef4444' : '#94a3b8';
+      return `<div class="card-tech-bar">
+        <div class="ctb-item"><span class="ctb-k">RSI</span><span class="ctb-v" style="color:${rsiColor}">${tl.rsi}</span></div>
+        <div class="ctb-sep">|</div>
+        <div class="ctb-item"><span class="ctb-k">Support</span><span class="ctb-v num-green">${fmt.price(tl.support)}</span></div>
+        <div class="ctb-sep">|</div>
+        <div class="ctb-item"><span class="ctb-k">Resistance</span><span class="ctb-v num-red">${fmt.price(tl.resistance)}</span></div>
+        <div class="ctb-sep">|</div>
+        <div class="ctb-item"><span class="ctb-k">Range</span><span class="ctb-v">${tl.range}%</span></div>
+        <div class="ctb-sep">|</div>
+        <div class="ctb-item"><span class="ctb-k">Vol</span><span class="ctb-v" style="color:${tl.volColor};font-weight:700">${tl.volQuality}</span></div>
+      </div>`;
+    })()}
+
     ${sig ? (() => {
       const supply = token.mktCap > 0 && token.priceUSD > 0 ? token.mktCap / token.priceUSD : 0;
       const toMc = p => supply > 0 ? fmt.vol(p * supply) : '—';
@@ -860,7 +1101,8 @@ function populateScannerDrawer(token) {
   const ts = Scanner.calcTechnicalSentiment(token);
   const whaleRisk = token.pumpScore >= 70 ? 'High concentration possible' : token.pumpScore >= 50 ? 'Moderate distribution' : 'Distributed';
   document.getElementById('drawer-techsocial-panel').innerHTML = `
-    <div class="sentiment-card">
+    ${buildTechChart(token)}
+    <div class="sentiment-card" style="margin-top:12px;">
       <div class="sentiment-header"><div class="sentiment-title">\u2699\ufe0f Technical</div><div class="sentiment-label num-${ts.trend === 'Bullish' ? 'green' : ts.trend === 'Bearish' ? 'red' : 'amber'}">\u25cf ${ts.trend}</div></div>
       <div class="sentiment-bars">
         <div class="sentiment-bar-row"><div class="sentiment-bar-label">Momentum</div><div class="sentiment-bar-track"><div class="sentiment-bar-fill ${ts.momentum >= 50 ? 'green' : 'red'}" style="width:${ts.momentum}%"></div></div><span style="font-size:10px;color:var(--text-muted);margin-left:6px;">${ts.momentum}%</span></div>

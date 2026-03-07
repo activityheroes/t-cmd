@@ -142,6 +142,8 @@ function sparklineChart(token) {
   const history  = getSigHistory(token.address);
   const prevTs   = history.find(ts => Math.abs(ts - sigTs) > 300000 && Date.now() - ts < 86400000);
   const [sig2X, sig2Y] = prevTs ? _mPos(prevTs) : [null, null];
+  // Only show second marker if it's far enough away from primary (≥28 px) to avoid overlap
+  const showSecondMarker = sig2X !== null && Math.abs(sig2X - sigX) > 28;
 
   // ── Signal popup metadata ─────────────────────────────────────
   // Pick the price-change window that best covers the signal age
@@ -180,7 +182,7 @@ function sparklineChart(token) {
       </defs>
       <path d="${fillD}" fill="url(#${gradId})"/>
       <path d="${d}" fill="none" stroke="${lc}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-      ${sig2X !== null ? `
+      ${showSecondMarker ? `
       <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="7"   fill="${lc}" opacity="0.1"/>
       <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="3.5" fill="${lc}" opacity="0.55"/>
       <circle cx="${sig2X.toFixed(1)}" cy="${sig2Y.toFixed(1)}" r="1.5" fill="white" opacity="0.6"/>
@@ -551,7 +553,11 @@ function calcTechLevels(token) {
   else if (vr > 0.02) { volQuality = 'Low';       volColor = '#f59e0b'; }
   else                { volQuality = 'Very Low';   volColor = '#ef4444'; }
 
-  return { rsi: rsi.toFixed(1), support, resistance, range: range.toFixed(1), volQuality, volColor };
+  // MC equivalents (so users can read Support/Resistance as market cap values)
+  const suppMC = (token.mktCap > 0 && p > 0) ? token.mktCap * (support    / p) : 0;
+  const resMC  = (token.mktCap > 0 && p > 0) ? token.mktCap * (resistance / p) : 0;
+
+  return { rsi: rsi.toFixed(1), support, resistance, suppMC, resMC, range: range.toFixed(1), volQuality, volColor };
 }
 
 /**
@@ -924,16 +930,30 @@ function renderScannerCard(token) {
     ${(() => {
       const tl = calcTechLevels(token);
       const rsiColor = tl.rsi < 30 ? '#22c55e' : tl.rsi > 70 ? '#ef4444' : '#94a3b8';
-      return `<div class="card-tech-bar">
+      const hasMC = tl.suppMC > 0;
+      return `<div class="card-tech-bar" data-addr="${addr}" data-tech-mode="price">
         <div class="ctb-item"><span class="ctb-k">RSI</span><span class="ctb-v" style="color:${rsiColor}">${tl.rsi}</span></div>
         <div class="ctb-sep">|</div>
-        <div class="ctb-item"><span class="ctb-k">Support</span><span class="ctb-v num-green">${fmt.price(tl.support)}</span></div>
+        <div class="ctb-item">
+          <span class="ctb-k">Support</span>
+          <span class="ctb-v num-green">
+            <span class="ctb-p">${fmt.price(tl.support)}</span>
+            ${hasMC ? `<span class="ctb-m">${fmt.vol(tl.suppMC)}</span>` : ''}
+          </span>
+        </div>
         <div class="ctb-sep">|</div>
-        <div class="ctb-item"><span class="ctb-k">Resistance</span><span class="ctb-v num-red">${fmt.price(tl.resistance)}</span></div>
+        <div class="ctb-item">
+          <span class="ctb-k">Resistance</span>
+          <span class="ctb-v num-red">
+            <span class="ctb-p">${fmt.price(tl.resistance)}</span>
+            ${hasMC ? `<span class="ctb-m">${fmt.vol(tl.resMC)}</span>` : ''}
+          </span>
+        </div>
         <div class="ctb-sep">|</div>
         <div class="ctb-item"><span class="ctb-k">Range</span><span class="ctb-v">${tl.range}%</span></div>
         <div class="ctb-sep">|</div>
         <div class="ctb-item"><span class="ctb-k">Vol</span><span class="ctb-v" style="color:${tl.volColor};font-weight:700">${tl.volQuality}</span></div>
+        ${hasMC ? `<div class="ctb-sep">|</div><button class="ctb-toggle-btn" onclick="event.stopPropagation();window.ctbToggle('${addr}')" title="Switch Support &amp; Resistance between Price and Market Cap">📈 MC</button>` : ''}
       </div>`;
     })()}
 
@@ -1645,6 +1665,16 @@ window.toggleMcMode = function (addr) {
   const btnMc    = block.querySelector('.mc-toggle-mc');
   if (btnPrice) btnPrice.style.display = newIsMc ? 'none'   : 'inline';
   if (btnMc)    btnMc.style.display    = newIsMc ? 'inline' : 'none';
+};
+
+// ── Tech bar: Support/Resistance Price ↔ MC toggle ──────────
+window.ctbToggle = function (addr) {
+  const bar = document.querySelector(`.card-tech-bar[data-addr="${addr}"]`);
+  if (!bar) return;
+  const isMc = bar.dataset.techMode === 'mc';
+  bar.dataset.techMode = isMc ? 'price' : 'mc';
+  const btn = bar.querySelector('.ctb-toggle-btn');
+  if (btn) btn.textContent = isMc ? '📈 MC' : '💲 Price';
 };
 
 // ══════════════════════════════════════════════════════════════

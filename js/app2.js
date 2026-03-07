@@ -513,6 +513,62 @@ function fomoAlert(token, momResult) {
   return '';
 }
 
+/**
+ * signalDesc(token, momResult)
+ * Returns the plain-English signal description + action badge data for a card.
+ * Shown on every card as a one-line summary strip.
+ */
+function signalDesc(token, momResult) {
+  const isBreakout = token.isBreakout;
+  const isFresh    = token.signalType === 'fresh';
+  const isGem      = momResult?.isGem;
+  const score      = token.pumpScore;
+
+  // ── Action recommendation badge ──────────────────────────────
+  let action = null, actionClass = '';
+  if (isGem || (isBreakout && score >= 78)) {
+    action = '🔥 STRONG BUY'; actionClass = 'action-strongbuy';
+  } else if (isBreakout || score >= 70) {
+    action = '💚 BUY';        actionClass = 'action-buy';
+  } else if (score >= 50) {
+    action = '👀 WATCH';      actionClass = 'action-watch';
+  }
+  // Below 50 — no recommendation badge shown
+
+  // ── Signal narrative ─────────────────────────────────────────
+  let dot, color, text;
+  if (isGem && isBreakout) {
+    dot = '🔥'; color = '#ef4444';
+    text = 'Breakout Gem — rare convergence of momentum + breakout';
+  } else if (isGem) {
+    dot = '💎'; color = '#f59e0b';
+    text = 'Gem Signal — deep momentum signals aligned — rare setup';
+  } else if (isBreakout && score >= 75) {
+    dot = '🚀'; color = '#22c55e';
+    text = 'Strong Breakout — volume surging, price accelerating — momentum entry';
+  } else if (isBreakout) {
+    dot = '📈'; color = '#4ade80';
+    text = 'Breakout — volume above resistance, buys dominant — entry signal';
+  } else if (isFresh && score >= 70) {
+    dot = '⚡'; color = '#06b6d4';
+    text = 'Hot New Launch — early movers phase, buys dominant — high risk/reward';
+  } else if (isFresh) {
+    dot = '✦';  color = '#22d3ee';
+    text = 'Fresh Token — new launch < 6h, accumulation forming — early entry zone';
+  } else if (score >= 70) {
+    dot = '🟢'; color = '#22c55e';
+    text = 'Accumulation — volume declining, buys dominant — entry zone';
+  } else if (score >= 50) {
+    dot = '🟡'; color = '#eab308';
+    text = 'Building — buy pressure rising, volume stabilizing — watch closely';
+  } else {
+    dot = '📊'; color = '#6b7280';
+    text = 'Early Signal — initial momentum forming, needs confirmation';
+  }
+
+  return { dot, color, text, action, actionClass };
+}
+
 function renderScannerCard(token) {
   const scoreClass = token.pumpScore >= 70 ? 'high' : token.pumpScore >= 45 ? 'medium' : 'low';
   const ch24 = token.priceChange.h24;
@@ -600,6 +656,15 @@ function renderScannerCard(token) {
 
     ${fomoAlert(token, momResult)}
 
+    ${(() => {
+      const sd = signalDesc(token, momResult);
+      return `<div class="card-signal-desc" style="--sig-color:${sd.color}">
+        <span class="csd-icon">${sd.dot}</span>
+        <span class="csd-text">${sd.text}</span>
+        ${sd.action ? `<span class="csd-action ${sd.actionClass}">${sd.action}</span>` : ''}
+      </div>`;
+    })()}
+
     <div class="card-coin-row">
       <div class="card-coin-info">
         <div style="position:relative;flex-shrink:0;">${logoHtml}</div>
@@ -659,7 +724,7 @@ function renderScannerCard(token) {
         <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${addr}',this)" title="Copy contract address">
           📋 ${addr ? addr.slice(0, 4) + '…' + addr.slice(-4) : 'CA'}
         </button>
-        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep rug analysis — 12 signals + wallet clusters">🛡️ Rug</button>
+        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep rug analysis — 12 signals + wallet clusters">🛡️ Rug Check</button>
         ${navLink(token.dexUrl, dsFavicon, 'View on DexScreener', 'dex')}
         ${token.socials[0]?.url ? `<a class="card-action-icon x-social-link" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="X / Twitter"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.748l7.73-8.835L1.254 2.25H8.08l4.259 5.63L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z"/></svg></a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()" title="Website">🌐</a>` : ''}

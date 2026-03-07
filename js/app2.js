@@ -268,9 +268,14 @@ async function loadScanner() {
     // Background auto-analysis (non-blocking)
     autoAnalyzeTokens(AppState.scannerTokens);
   } catch (e) {
+    console.error('[loadScanner] caught error:', e);
+    const isNet = e?.message?.toLowerCase().includes('fetch') || e?.message?.toLowerCase().includes('network') || e?.name === 'TypeError';
+    const errMsg = isNet ? 'Could not reach DexScreener API. Check your connection.' : (e?.message || 'Unknown error');
     grid.innerHTML = `<div style="grid-column:1/-1;" class="empty-state">
       <div class="empty-state-icon">⚠️</div>
-      <h3>Scan Failed</h3><p>Could not reach DexScreener API. Check your connection.</p>
+      <h3>Scan Failed</h3>
+      <p>${errMsg}</p>
+      <p style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:4px;font-family:monospace;">${e?.name || ''}: ${e?.message || ''}</p>
       <button class="btn btn-outline" onclick="loadScanner()">↺ Retry</button>
     </div>`;
   }
@@ -503,7 +508,10 @@ function renderScannerCards() {
   }
   // Record signal timestamps so 2-marker sparklines work on next render
   tokens.forEach(t => { if (t.address && t.scannedAt) recordSigTs(t.address, t.scannedAt); });
-  grid.innerHTML = tokens.map(renderScannerCard).join('');
+  grid.innerHTML = tokens.map(t => {
+    try { return renderScannerCard(t); }
+    catch (e) { console.error('[renderScannerCard] error for', t?.symbol, e); return ''; }
+  }).join('');
 }
 
 // ── Technical levels: RSI · Support · Resistance · Range · Volume ─────

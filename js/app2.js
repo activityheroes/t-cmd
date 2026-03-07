@@ -120,6 +120,7 @@ function sparklineChart(token) {
   const gradId = `cg${token.address.slice(-6)}`;
   // Signal markers — up to 2 (current + previous from localStorage history)
   const sigTs    = token.scannedAt || Date.now();
+  const ageMs    = Math.max(0, Date.now() - sigTs); // used below for sigWindowPct
 
   // Helper: convert a timestamp → SVG [x, y] on the chart
   function _mPos(ts) {

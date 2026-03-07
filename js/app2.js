@@ -638,26 +638,45 @@ function buildTechChart(token) {
     return `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" fill="${lc}" opacity="${i === volPts.length - 1 ? 0.65 : 0.28}" rx="1"/>`;
   }).join('');
 
-  // Signal markers (up to 2)
+  // MC values for the toggle
+  const suppMC    = tl.suppMC;
+  const resMC     = tl.resMC;
+  const currentMC = token.mktCap || 0;
+  const hasMC     = suppMC > 0;
+  // Default to MC for meme / small-cap tokens (same rule as card tech bar)
+  const isMemeChart = hasMC && (!!token.memeSignal || (token.mktCap > 0 && token.mktCap < 10000000));
+  const initMode    = isMemeChart ? 'mc' : 'price';
+  const chartId     = `tcw-${token.address.slice(-8)}`;
+
+  // Signal markers
+  // Primary: always anchored to the rightmost chart point ("Now" / current price)
+  const [primaryX, primaryY] = svgPts[svgPts.length - 1];
+
+  // Secondary: time-based position for a previous scan (skip if too close to primary)
   const sigTs0 = token.scannedAt || Date.now();
   const hist   = getSigHistory(token.address);
-  const sigTsList = [sigTs0, ...(hist.filter(ts => Math.abs(ts - sigTs0) > 300000))].slice(0, 2);
-  const sigMarkersHtml = sigTsList.map((ts, idx) => {
-    const af   = Math.min(1, Math.max(0, Date.now() - ts) / 86400000);
+  const prevTs = hist.find(ts => Math.abs(ts - sigTs0) > 300000 && Date.now() - ts < 86400000);
+  let secondaryMarkerHtml = '';
+  if (prevTs) {
+    const af   = Math.min(1, Math.max(0, Date.now() - prevTs) / 86400000);
     const idxF = (1 - af) * (svgPts.length - 1);
     const i0   = Math.min(Math.floor(idxF), svgPts.length - 2);
     const f    = idxF - i0;
     const sx   = svgPts[i0][0] + (svgPts[i0+1][0] - svgPts[i0][0]) * f;
     const sy   = svgPts[i0][1] + (svgPts[i0+1][1] - svgPts[i0][1]) * f;
-    const isPrimary = idx === 0;
-    const r1 = isPrimary ? 13 : 9, r2 = isPrimary ? 5.5 : 4, r3 = isPrimary ? 2.5 : 1.8;
-    const op = isPrimary ? 1 : 0.6;
-    return `
-      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${r1}" fill="${lc}" opacity="0.12"/>
-      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${r2}" fill="${lc}" opacity="${op}"/>
-      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${r3}" fill="white" opacity="${isPrimary ? 0.9 : 0.65}"/>
-      <text x="${sx.toFixed(1)}" y="${(sy - r1 - 3).toFixed(1)}" font-size="8" fill="${lc}" opacity="${op}" text-anchor="middle">${isPrimary ? 'Signal' : 'Prev'}</text>`;
-  }).join('');
+    if (Math.abs(sx - primaryX) > 28) {
+      secondaryMarkerHtml = `
+      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="9"   fill="${lc}" opacity="0.12"/>
+      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="4"   fill="${lc}" opacity="0.6"/>
+      <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="1.8" fill="white" opacity="0.65"/>
+      <text x="${sx.toFixed(1)}" y="${(sy - 13).toFixed(1)}" font-size="8" fill="${lc}" opacity="0.65" text-anchor="middle">Prev</text>`;
+    }
+  }
+  const primaryMarkerHtml = `
+      <circle cx="${primaryX.toFixed(1)}" cy="${primaryY.toFixed(1)}" r="13"  fill="${lc}" opacity="0.12"/>
+      <circle cx="${primaryX.toFixed(1)}" cy="${primaryY.toFixed(1)}" r="5.5" fill="${lc}"/>
+      <circle cx="${primaryX.toFixed(1)}" cy="${primaryY.toFixed(1)}" r="2.5" fill="white" opacity="0.9"/>
+      <text x="${primaryX.toFixed(1)}" y="${(primaryY - 16).toFixed(1)}" font-size="8" fill="${lc}" text-anchor="middle">Signal</text>`;
 
   // Time labels
   const _t = ms => {
@@ -667,7 +686,7 @@ function buildTechChart(token) {
   // Price label helper
   const fPx = v => fmt.price(v);
 
-  return `<div class="tech-chart-wrap">
+  return `<div class="tech-chart-wrap" id="${chartId}" data-chart-mode="${initMode}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block;overflow:visible;">
       <defs>
         <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
@@ -679,19 +698,23 @@ function buildTechChart(token) {
       <line x1="${cx0}" y1="${cy0}" x2="${cx1}" y2="${cy0}" stroke="rgba(255,255,255,0.05)" stroke-width="0.8"/>
       <line x1="${cx0}" y1="${((cy0+cy1)/2).toFixed(1)}" x2="${cx1}" y2="${((cy0+cy1)/2).toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-width="0.8"/>
       <line x1="${cx0}" y1="${cy1}" x2="${cx1}" y2="${cy1}" stroke="rgba(255,255,255,0.05)" stroke-width="0.8"/>
-      <!-- Support (dashed green) -->
+      <!-- Support (dashed green) — dual price / MC labels -->
       <line x1="${cx0}" y1="${suppY.toFixed(1)}" x2="${cx1}" y2="${suppY.toFixed(1)}" stroke="#22c55e" stroke-width="1.2" stroke-dasharray="5,4" opacity="0.65"/>
-      <text x="${lp - 3}" y="${(suppY + 3).toFixed(1)}" font-size="8.5" fill="#22c55e" opacity="0.8" text-anchor="end">${fPx(suppP)}</text>
-      <!-- Resistance (dashed red) -->
+      <text class="tchart-p" x="${lp - 3}" y="${(suppY + 3).toFixed(1)}" font-size="8.5" fill="#22c55e" opacity="0.8" text-anchor="end">${fPx(suppP)}</text>
+      ${hasMC ? `<text class="tchart-m" x="${lp - 3}" y="${(suppY + 3).toFixed(1)}" font-size="8.5" fill="#22c55e" opacity="0.8" text-anchor="end">${fmt.vol(suppMC)}</text>` : ''}
+      <!-- Resistance (dashed red) — dual price / MC labels -->
       <line x1="${cx0}" y1="${resY.toFixed(1)}" x2="${cx1}" y2="${resY.toFixed(1)}" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="5,4" opacity="0.65"/>
-      <text x="${lp - 3}" y="${(resY + 3).toFixed(1)}" font-size="8.5" fill="#ef4444" opacity="0.8" text-anchor="end">${fPx(resP)}</text>
-      <!-- Current price mid label -->
-      <text x="${lp - 3}" y="${((cy0+cy1)/2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fPx(pUsd)}</text>
+      <text class="tchart-p" x="${lp - 3}" y="${(resY + 3).toFixed(1)}" font-size="8.5" fill="#ef4444" opacity="0.8" text-anchor="end">${fPx(resP)}</text>
+      ${hasMC ? `<text class="tchart-m" x="${lp - 3}" y="${(resY + 3).toFixed(1)}" font-size="8.5" fill="#ef4444" opacity="0.8" text-anchor="end">${fmt.vol(resMC)}</text>` : ''}
+      <!-- Mid-axis value label — dual price / MC -->
+      <text class="tchart-p" x="${lp - 3}" y="${((cy0+cy1)/2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fPx(pUsd)}</text>
+      ${hasMC ? `<text class="tchart-m" x="${lp - 3}" y="${((cy0+cy1)/2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fmt.vol(currentMC)}</text>` : ''}
       <!-- Area + line -->
       <path d="${fillD}" fill="url(#${gradId})"/>
       <path d="${d}" fill="none" stroke="${lc}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      <!-- Markers -->
-      ${sigMarkersHtml}
+      <!-- Markers: secondary first (behind), primary on top -->
+      ${secondaryMarkerHtml}
+      ${primaryMarkerHtml}
       <!-- Volume bars -->
       ${volBars}
       <!-- Volume label -->
@@ -702,9 +725,12 @@ function buildTechChart(token) {
       <text x="${cx1}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.28)" text-anchor="end">Now</text>
     </svg>
     <div class="tech-chart-legend">
-      <span class="tcl-supp">─ ─ Support: ${fPx(suppP)}</span>
-      <span class="tcl-res">─ ─ Resistance: ${fPx(resP)}</span>
+      <span class="tcl-supp tchart-p">─ ─ Support: ${fPx(suppP)}</span>
+      ${hasMC ? `<span class="tcl-supp tchart-m">─ ─ Support: ${fmt.vol(suppMC)}</span>` : ''}
+      <span class="tcl-res tchart-p">─ ─ Resistance: ${fPx(resP)}</span>
+      ${hasMC ? `<span class="tcl-res tchart-m">─ ─ Resistance: ${fmt.vol(resMC)}</span>` : ''}
       <span class="tcl-info">RSI ${tl.rsi} · Range ${tl.range}%</span>
+      ${hasMC ? `<button class="tc-mode-btn" onclick="window.tcChartToggle('${chartId}')">${isMemeChart ? '💲 Price' : '📈 MC'}</button>` : ''}
     </div>
   </div>`;
 }
@@ -1670,6 +1696,16 @@ window.toggleMcMode = function (addr) {
   const btnMc    = block.querySelector('.mc-toggle-mc');
   if (btnPrice) btnPrice.style.display = newIsMc ? 'none'   : 'inline';
   if (btnMc)    btnMc.style.display    = newIsMc ? 'inline' : 'none';
+};
+
+// ── Full tech chart: Price ↔ MC toggle ──────────────────────
+window.tcChartToggle = function (chartId) {
+  const el = document.getElementById(chartId);
+  if (!el) return;
+  const isMc = el.dataset.chartMode === 'mc';
+  el.dataset.chartMode = isMc ? 'price' : 'mc';
+  const btn = el.querySelector('.tc-mode-btn');
+  if (btn) btn.textContent = isMc ? '📈 MC' : '💲 Price';
 };
 
 // ── Tech bar: Support/Resistance Price ↔ MC toggle ──────────

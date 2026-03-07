@@ -3690,7 +3690,36 @@ body.rug-panel-open { overflow: hidden; }
 }
 .tcl-supp { color: #4ade80; }
 .tcl-res  { color: #f87171; }
-.tcl-info { color: rgba(255,255,255,0.3); margin-left: auto; font-style: italic; }
+.tcl-info { color: rgba(255,255,255,0.3); font-style: italic; }
+
+/* ── Tech chart MC/Price toggle ─────────────────────────────── */
+/* Default: price visible, MC hidden */
+.tech-chart-wrap .tchart-m { display: none; }
+/* MC mode: flip visibility */
+.tech-chart-wrap[data-chart-mode="mc"] .tchart-m { display: inline; }
+.tech-chart-wrap[data-chart-mode="mc"] .tchart-p { display: none; }
+
+.tc-mode-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 4px;
+  color: rgba(255,255,255,0.5);
+  font-size: 9px;
+  padding: 2px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  margin-left: auto;
+  line-height: 1.5;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tc-mode-btn:hover {
+  color: rgba(255,255,255,0.85);
+  border-color: rgba(255,255,255,0.3);
+}
+.tech-chart-wrap[data-chart-mode="mc"] .tc-mode-btn {
+  color: #22c55e;
+  border-color: rgba(34,197,94,0.35);
+}
 
 /* ── Sparkline mini price chart ─────────────────────────── */
 .card-sparkline {

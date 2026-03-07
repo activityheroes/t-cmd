@@ -5,6 +5,66 @@
 
 const Scanner = (() => {
 
+    // ── Native / infra token blocklist ────────────────────────
+    // Filters out chain-native tokens, wrapped versions, stablecoins, and
+    // major infrastructure tokens that are NOT meme coins.
+    const BLOCKED_SYMBOLS = new Set([
+        // Solana native & liquid staking
+        'SOL','WSOL','MSOL','JSOL','BSOL','HSOL','STSOL','JITOSOL',
+        // Ethereum / EVM natives
+        'ETH','WETH',
+        // BNB / BSC
+        'BNB','WBNB',
+        // Polygon
+        'MATIC','WMATIC','POL',
+        // Arbitrum
+        'ARB',
+        // Optimism
+        'OP',
+        // Avalanche
+        'AVAX','WAVAX',
+        // Cronos
+        'CRO','WCRO',
+        // Fantom
+        'FTM','WFTM',
+        // Base (Coinbase)
+        'CBETH',
+        // Other EVM chains
+        'CELO','GLMR','MOVR','ONE','KLAY','METIS','ROSE',
+        // Stablecoins
+        'USDC','USDT','DAI','BUSD','TUSD','USDD','FRAX','LUSD','GUSD','USDP','USDH','USDE','PYUSD','FDUSD',
+        // Wrapped Bitcoin
+        'WBTC','BTCB',
+        // Major blue-chips (appear in pairs but are not memes)
+        'LINK','UNI','AAVE',
+    ]);
+
+    // Known contract addresses of wrapped/native tokens (lowercase)
+    const BLOCKED_ADDRESSES = new Set([
+        'so11111111111111111111111111111111111111112',           // WSOL (Solana)
+        '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',           // WETH (Ethereum)
+        '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',           // WBNB (BSC)
+        '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',           // WMATIC (Polygon)
+        '0x82af49447d8a07e3bd95bd0d56f35241523fbab1',           // WETH (Arbitrum)
+        '0x4200000000000000000000000000000000000006',           // WETH (Optimism & Base)
+        '0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7',           // WAVAX (Avalanche)
+        '0x5c7f8a570d578ed84e63fdfa7b1ee72deae1ae23',           // WCRO (Cronos)
+        '0x21be370d5312f44cb42ce377bc9b8a0cef1a4c83',           // WFTM (Fantom)
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',           // USDC (Ethereum)
+        '0xdac17f958d2ee523a2206206994597c13d831ec7',           // USDT (Ethereum)
+        '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599',           // WBTC (Ethereum)
+    ]);
+
+    /**
+     * Returns true if the token is a chain-native, wrapped, or stablecoin —
+     * i.e. NOT a meme coin and should be excluded from scanner results.
+     */
+    function isBlockedToken(pair) {
+        const sym  = (pair.baseToken?.symbol || '').trim().toUpperCase();
+        const addr = (pair.baseToken?.address || '').toLowerCase();
+        return BLOCKED_SYMBOLS.has(sym) || BLOCKED_ADDRESSES.has(addr);
+    }
+
     // ── Manipulation risk helper (DexScreener-only signals) ────
     function calcManipulationRisk(pair) {
         const vol24h   = parseFloat(pair.volume?.h24 || 0);
@@ -370,8 +430,9 @@ const Scanner = (() => {
             const trending = await API.DexScreener.getTrending().catch(() => []);
             const allPairs = trending.slice(0, 30);
 
-            // Map boost info onto pairs
+            // Map boost info onto pairs (skip native/infra/stablecoin tokens)
             for (const pair of allPairs) {
+                if (isBlockedToken(pair)) continue;
                 const addr = pair.baseToken?.address || '';
                 const token = formatToken(pair, boostMap[addr] || 0);
                 if (token.priceUSD > 0) results.push(token);
@@ -383,7 +444,7 @@ const Scanner = (() => {
                     try {
                         const pairs = await API.DexScreener.getTokenPairs(b.chainId || 'solana', b.tokenAddress);
                         const bestPair = pairs.sort((a, b) => parseFloat(b.liquidity?.usd || 0) - parseFloat(a.liquidity?.usd || 0))[0];
-                        if (bestPair && parseFloat(bestPair.priceUsd || 0) > 0) {
+                        if (bestPair && !isBlockedToken(bestPair) && parseFloat(bestPair.priceUsd || 0) > 0) {
                             results.push(formatToken(bestPair, b.totalAmount || 0));
                         }
                     } catch (_) { /* skip */ }

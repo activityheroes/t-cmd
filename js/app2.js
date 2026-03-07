@@ -931,7 +931,10 @@ function renderScannerCard(token) {
       const tl = calcTechLevels(token);
       const rsiColor = tl.rsi < 30 ? '#22c55e' : tl.rsi > 70 ? '#ef4444' : '#94a3b8';
       const hasMC = tl.suppMC > 0;
-      return `<div class="card-tech-bar" data-addr="${addr}" data-tech-mode="price">
+      // Default to MC view for meme coins (has memeSignal OR small-cap < $10M)
+      const isMeme = hasMC && (!!token.memeSignal || (token.mktCap > 0 && token.mktCap < 10000000));
+      const techMode = isMeme ? 'mc' : 'price';
+      return `<div class="card-tech-bar" data-addr="${addr}" data-tech-mode="${techMode}">
         <div class="ctb-item"><span class="ctb-k">RSI</span><span class="ctb-v" style="color:${rsiColor}">${tl.rsi}</span></div>
         <div class="ctb-sep">|</div>
         <div class="ctb-item">
@@ -953,7 +956,7 @@ function renderScannerCard(token) {
         <div class="ctb-item"><span class="ctb-k">Range</span><span class="ctb-v">${tl.range}%</span></div>
         <div class="ctb-sep">|</div>
         <div class="ctb-item"><span class="ctb-k">Vol</span><span class="ctb-v" style="color:${tl.volColor};font-weight:700">${tl.volQuality}</span></div>
-        ${hasMC ? `<div class="ctb-sep">|</div><button class="ctb-toggle-btn" onclick="event.stopPropagation();window.ctbToggle('${addr}')" title="Switch Support &amp; Resistance between Price and Market Cap">📈 MC</button>` : ''}
+        ${hasMC ? `<div class="ctb-sep">|</div><button class="ctb-toggle-btn" onclick="event.stopPropagation();window.ctbToggle('${addr}')" title="Switch Support &amp; Resistance between Price and Market Cap">${isMeme ? '💲 Price' : '📈 MC'}</button>` : ''}
       </div>`;
     })()}
 

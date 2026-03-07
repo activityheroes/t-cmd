@@ -135,8 +135,10 @@ function sparklineChart(token) {
     ];
   }
 
-  // Primary marker (current signal)
-  const [sigX, sigY] = _mPos(sigTs);
+  // Primary marker — always anchored to the rightmost chart point (current price / "Now").
+  // Time-based positioning would place it at the edge anyway (signal is recent), so
+  // anchoring it explicitly makes the design intentional and consistent across all cards.
+  const [sigX, sigY] = svgPts[svgPts.length - 1];
 
   // Secondary marker: most recent previous signal (must be >5 min older, within 24h)
   const history  = getSigHistory(token.address);

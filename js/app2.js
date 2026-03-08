@@ -378,9 +378,65 @@ async function autoAnalyzeOne(token) {
     if (mom && mom.momentumScore >= 0) {
       AppState.momentumResults[token.address] = mom;
       updateCardMomentum(token.address, mom);
+
+      // Re-classify with enriched MomentumDetector data
+      if (typeof PhaseClassifier !== 'undefined') {
+        const updated = PhaseClassifier.classify(token, mom);
+        // Update the token in AppState
+        AppState.scannerTokens = AppState.scannerTokens.map(t => {
+          if (t.address !== token.address) return t;
+          return {
+            ...t,
+            phase:           updated.phase,
+            phaseMeta:       updated.phaseMeta,
+            accumScore:      updated.accumScore,
+            trapScore:       updated.trapScore,
+            breakoutScore:   updated.breakoutScore,
+            distScore:       updated.distScore,
+            finalScore:      updated.finalScore,
+            phaseReasons:    updated.reasons,
+            phasePenalties:  updated.penalties,
+            phaseTier:       updated.tier
+          };
+        });
+        // Live-update the card's phase badge and reasons row without full re-render
+        updateCardPhase(token.address, updated);
+      }
     }
   } catch (e) {
     // silent — background task
+  }
+}
+
+function updateCardPhase(address, pc) {
+  const card = document.querySelector(`.scanner-card[data-addr="${address}"]`);
+  if (!card) return;
+  // Update phase border
+  if (pc.phaseMeta) card.style.borderLeft = `3px solid ${pc.phaseMeta.border}`;
+  // Update phase card class
+  card.classList.forEach(c => { if (c.startsWith('phase-card-')) card.classList.remove(c); });
+  card.classList.add(`phase-card-${pc.phase}`);
+  // Update phase badge
+  const phaseBadge = card.querySelector('.phase-badge');
+  if (phaseBadge && pc.phaseMeta) {
+    phaseBadge.className = `phase-badge phase-${pc.phase}`;
+    phaseBadge.textContent = `${pc.phaseMeta.emoji} ${pc.phaseMeta.label}`;
+    phaseBadge.title = `Phase: ${pc.phaseMeta.label} — finalScore ${pc.finalScore}`;
+  }
+  // Update score display
+  const scoreVal = card.querySelector('.pump-score-value');
+  if (scoreVal) scoreVal.textContent = pc.finalScore;
+  // Update reasons row
+  const existingReasons = card.querySelector('.card-reasons-row');
+  if (pc.reasons && pc.reasons.length > 0) {
+    const html = `<div class="card-reasons-row">${pc.reasons.slice(0,3).map(r => `<span class="cr-pill">${r}</span>`).join('')}</div>`;
+    if (existingReasons) {
+      existingReasons.outerHTML = html;
+    } else {
+      // Insert after card-top-row
+      const topRow = card.querySelector('.card-top-row');
+      if (topRow) topRow.insertAdjacentHTML('afterend', html);
+    }
   }
 }
 
@@ -521,8 +577,11 @@ function filterScannerTokens(tokens) {
   let t = tokens;
   // Type filter
   if (AppState.scannerFilter === 'hot') t = t.filter(x => x.pumpScore >= 70);
-  if (AppState.scannerFilter === 'breakout') t = t.filter(x => x.isBreakout);
+  if (AppState.scannerFilter === 'breakout') t = t.filter(x => x.isBreakout || x.phase === 'breakout' || (x.breakoutScore >= 55));
   if (AppState.scannerFilter === 'accumulating') t = t.filter(x => !x.isBreakout && x.pumpScore >= 50);
+  if (AppState.scannerFilter === 'accumulation') t = t.filter(x => (x.accumScore >= 55) && x.phase !== 'distribution');
+  if (AppState.scannerFilter === 'trap') t = t.filter(x => x.trapScore >= 55);
+  if (AppState.scannerFilter === 'distribution') t = t.filter(x => x.distScore >= 55);
   if (AppState.scannerFilter === 'risk') t = t.filter(x => x.rugFlags.length >= 2);
   if (AppState.scannerFilter === 'fresh') t = t.filter(x => x.signalType === 'fresh');
   if (AppState.scannerFilter === 'revived') t = t.filter(x => x.signalType === 'revived');
@@ -537,9 +596,9 @@ function filterScannerTokens(tokens) {
   if (AppState.scannerChain && AppState.scannerChain !== 'all') {
     t = t.filter(x => (x.chainId || '').toLowerCase().includes(AppState.scannerChain));
   }
-  // Score filter
+  // Score filter — uses finalScore when available, fallback pumpScore
   if (AppState.scannerScore && AppState.scannerScore > 0) {
-    t = t.filter(x => x.pumpScore >= AppState.scannerScore);
+    t = t.filter(x => (x.finalScore ?? x.pumpScore) >= AppState.scannerScore);
   }
   // Text search
   const q = AppState.scannerQuery || '';
@@ -576,11 +635,60 @@ function renderScannerCards() {
   }
   // Record signal data (price + MC) so history popups and long-frame charts work
   tokens.forEach(t => { if (t.address && t.scannedAt) recordSigData(t.address, t.scannedAt, t.priceUSD, t.mktCap); });
-  grid.innerHTML = tokens.map(t => {
+
+  const renderCards = (list) => list.map(t => {
     try { return renderScannerCard(t); }
     catch (e) { console.error('[renderScannerCard] error for', t?.symbol, e); return ''; }
   }).join('');
+
+  // Sectioned view — only when no specific phase filter active
+  const filter = AppState.scannerFilter || 'all';
+  const phaseFilters = ['trap','accumulation','breakout','distribution'];
+  const useSections = filter === 'all' && tokens.some(t => t.phase);
+
+  if (useSections) {
+    const trapTokens  = tokens.filter(t => t.trapScore  >= 55).sort((a,b) => b.trapScore  - a.trapScore);
+    const accumTokens = tokens.filter(t => t.accumScore >= 55 && t.phase !== 'distribution' && !trapTokens.includes(t)).sort((a,b) => b.accumScore - a.accumScore);
+    const boTokens    = tokens.filter(t => (t.phase === 'breakout' || t.breakoutScore >= 55) && !trapTokens.includes(t) && !accumTokens.includes(t)).sort((a,b) => b.breakoutScore - a.breakoutScore);
+    const distTokens  = tokens.filter(t => t.distScore  >= 55 && !trapTokens.includes(t) && !boTokens.includes(t) && !accumTokens.includes(t)).sort((a,b) => b.distScore - a.distScore);
+    const otherTokens = tokens.filter(t => !trapTokens.includes(t) && !accumTokens.includes(t) && !boTokens.includes(t) && !distTokens.includes(t));
+
+    const buildSection = (id, emoji, title, cls, tokenList, collapsed = false) => {
+      if (!tokenList.length) return '';
+      const collapseId = `ss-${id}`;
+      return `<div class="scanner-section" id="${collapseId}">
+        <div class="scanner-section-header ${cls}" onclick="window.toggleScannerSection('${collapseId}')">
+          <span class="ss-emoji">${emoji}</span>
+          <span class="ss-title">${title}</span>
+          <span class="ss-count">${tokenList.length}</span>
+          <span class="ss-chevron">${collapsed ? '▶' : '▼'}</span>
+        </div>
+        <div class="scanner-section-body${collapsed ? ' collapsed' : ''}" id="${collapseId}-body">
+          <div class="signals-grid scanner-section-grid">${renderCards(tokenList)}</div>
+        </div>
+      </div>`;
+    };
+
+    grid.innerHTML = [
+      buildSection('trap',  '🪤', 'Liquidity Trap Candidates', 'ss-trap',  trapTokens),
+      buildSection('accum', '📦', 'Accumulation Opportunities','ss-accum', accumTokens),
+      buildSection('bo',    '🚀', 'Breakout Trades',           'ss-bo',    boTokens),
+      buildSection('dist',  '⚠️', 'Distribution / Avoid',      'ss-dist',  distTokens,  true),
+      buildSection('other', '📊', 'Other / Watch',             'ss-other', otherTokens, true),
+    ].join('');
+  } else {
+    grid.innerHTML = renderCards(tokens);
+  }
 }
+
+window.toggleScannerSection = function(id) {
+  const sec  = document.getElementById(id);
+  const body = document.getElementById(id + '-body');
+  const chev = sec?.querySelector('.ss-chevron');
+  if (!body) return;
+  const isCollapsed = body.classList.toggle('collapsed');
+  if (chev) chev.textContent = isCollapsed ? '▶' : '▼';
+};
 
 // ── Technical levels: RSI · Support · Resistance · Range · Volume ─────
 function calcTechLevels(token) {
@@ -902,7 +1010,8 @@ function signalDesc(token, momResult) {
 }
 
 function renderScannerCard(token) {
-  const scoreClass = token.pumpScore >= 70 ? 'high' : token.pumpScore >= 45 ? 'medium' : 'low';
+  const displayScore = token.finalScore ?? token.pumpScore;
+  const scoreClass = displayScore >= 70 ? 'high' : displayScore >= 45 ? 'medium' : 'low';
   const ch24 = token.priceChange.h24;
   const sig = token.memeSignal;
   const isFav = isFavorite(token.address);
@@ -971,9 +1080,24 @@ function renderScannerCard(token) {
     ? `<span class="card-bundle-badge bundle-score-badge ${bundleRes.tier.cls}" title="${bundleRes.summary}" style="display:inline-flex">🔗 ${bundleRes.tier.label} ${bundleRes.bundle_risk_score}</span>`
     : `<span class="card-bundle-badge bundle-score-badge" style="display:none"></span>`;
 
-  return `<div class="signal-card ${token.isBreakout ? 'long-card' : token.pumpScore >= 50 && !token.isBreakout ? 'accum-card' : ''} animate-fadeInUp scanner-card" data-addr="${addr}" onclick="openScannerDetail('${addr}')">
+  // Phase badge
+  const pm = token.phaseMeta || (typeof PhaseClassifier !== 'undefined' ? PhaseClassifier.PHASE_META[token.phase || 'accumulation'] : null);
+  const phaseBadgeHtml = pm
+    ? `<span class="phase-badge phase-${token.phase || 'accumulation'}" ${tip('Phase: ' + pm.label + ' — finalScore ' + displayScore)}>${pm.emoji} ${pm.label}</span>`
+    : '';
+
+  // Reasons row (top 3)
+  const reasonsHtml = (token.phaseReasons && token.phaseReasons.length > 0)
+    ? `<div class="card-reasons-row">${token.phaseReasons.slice(0,3).map(r => `<span class="cr-pill">${r}</span>`).join('')}</div>`
+    : '';
+
+  // Card phase border color
+  const phaseBorderStyle = pm ? `style="border-left:3px solid ${pm.border};"` : '';
+
+  return `<div class="signal-card ${token.isBreakout || token.phase === 'breakout' ? 'long-card' : token.phase === 'liquidity_trap' ? 'trap-card' : displayScore >= 50 ? 'accum-card' : ''} animate-fadeInUp scanner-card phase-card-${token.phase || 'accumulation'}" data-addr="${addr}" ${phaseBorderStyle} onclick="openScannerDetail('${addr}')">
     <div class="card-top-row">
       <span class="card-type-badge ${token.signalType}" ${tip(token.signalType === 'fresh' ? 'Fresh token — launched < 6 hours ago' : 'Revived — older token with new momentum')}>${token.signalType === 'fresh' ? '\u2726 Fresh' : '\u21ba Revived'}</span>
+      ${phaseBadgeHtml}
       <span class="signal-age-clock" data-signal-ts="${scannedAt}" ${tip('Signal detected ' + fmtAge(scannedAt) + ' ago')}>${fmtAge(scannedAt)}</span>
       ${momResult
         ? momResult.isGem
@@ -985,12 +1109,13 @@ function renderScannerCard(token) {
               : `<span class="mom-auto-badge low" data-addr="${addr}" ${tip('LOW momentum — weak signals')}>📊 ${momResult.momentumScore}</span>`
         : `<span class="mom-auto-badge pending" data-addr="${addr}" ${tip('Scanning momentum in background…')}>⟳</span>`
       }
-      <div class="pump-score ${scoreClass}" ${tip('Pump Score: composite signal strength 0–100. 70+ = Hot 🔥')}>
-        <div class="pump-score-value">${token.pumpScore}</div>
+      <div class="pump-score ${scoreClass}" ${tip('Final Score: phase-adjusted opportunity score 0–100')}>
+        <div class="pump-score-value">${displayScore}</div>
         <div class="pump-score-label">Score</div>
       </div>
       <button class="fav-btn ${isFav ? 'active' : ''}" data-addr="${addr}" onclick="event.stopPropagation();window.toggleFavorite('${addr}')" title="${isFav ? 'Remove from favorites' : 'Save to favorites'}">⭐</button>
     </div>
+    ${reasonsHtml}
 
     ${fomoAlert(token, momResult)}
 
@@ -1128,13 +1253,33 @@ function updateScannerStats() {
   const tokens = AppState.scannerTokens;
   const el = document.getElementById('scanner-stats');
   if (!el) return;
-  const hot = tokens.filter(t => t.pumpScore >= 70).length;
-  const breakouts = tokens.filter(t => t.isBreakout).length;
-  const accum = tokens.filter(t => !t.isBreakout && t.pumpScore >= 50).length;
-  const risk = tokens.filter(t => t.rugFlags.length >= 2).length;
-  const gems = tokens.filter(t => AppState.momentumResults?.[t.address]?.isGem).length;
-  const favs = getFavorites().length;
-  el.innerHTML = `<span>${tokens.length} scanned</span> · <span class="num-amber">🔥 ${hot} hot</span> · <span class="num-green">🚀 ${breakouts} breakout</span> · <span class="num-cyan">📦 ${accum} accum</span> · <span class="num-red">⚠️ ${risk} risk</span>${gems ? ` · <span style="color:#a855f7;">💎 ${gems} gem${gems !== 1 ? 's' : ''}</span>` : ''}${favs ? ` · <span class="num-amber">⭐ ${favs} fav${favs !== 1 ? 's' : ''}</span>` : ''}`;
+  const hot       = tokens.filter(t => (t.finalScore ?? t.pumpScore) >= 70).length;
+  const breakouts = tokens.filter(t => t.phase === 'breakout' || t.isBreakout).length;
+  const traps     = tokens.filter(t => t.trapScore  >= 55).length;
+  const accum     = tokens.filter(t => t.accumScore >= 55 && t.phase !== 'distribution').length;
+  const dist      = tokens.filter(t => t.distScore  >= 55).length;
+  const risk      = tokens.filter(t => t.rugFlags.length >= 2).length;
+  const gems      = tokens.filter(t => AppState.momentumResults?.[t.address]?.isGem).length;
+  const favs      = getFavorites().length;
+
+  const hasPhase = tokens.some(t => t.phase);
+  if (hasPhase) {
+    el.innerHTML =
+      `<span>${tokens.length} scanned</span>` +
+      (traps     ? ` · <span style="color:#8b5cf6;">🪤 ${traps} trap</span>` : '') +
+      (accum     ? ` · <span class="num-green">📦 ${accum} accum</span>` : '') +
+      (breakouts ? ` · <span class="num-amber">🚀 ${breakouts} breakout</span>` : '') +
+      (dist      ? ` · <span class="num-red">⚠️ ${dist} dist</span>` : '') +
+      (risk      ? ` · <span class="num-red">🛡️ ${risk} risk</span>` : '') +
+      (gems      ? ` · <span style="color:#a855f7;">💎 ${gems} gem${gems !== 1 ? 's' : ''}</span>` : '') +
+      (favs      ? ` · <span class="num-amber">⭐ ${favs} fav${favs !== 1 ? 's' : ''}</span>` : '');
+  } else {
+    // Fallback: old style
+    el.innerHTML =
+      `<span>${tokens.length} scanned</span> · <span class="num-amber">🔥 ${hot} hot</span> · <span class="num-green">🚀 ${breakouts} breakout</span> · <span class="num-cyan">📦 ${accum} accum</span> · <span class="num-red">⚠️ ${risk} risk</span>` +
+      (gems ? ` · <span style="color:#a855f7;">💎 ${gems} gem${gems !== 1 ? 's' : ''}</span>` : '') +
+      (favs ? ` · <span class="num-amber">⭐ ${favs} fav${favs !== 1 ? 's' : ''}</span>` : '');
+  }
 }
 
 // Scanner detail drawer

@@ -4145,3 +4145,116 @@ button.terminal-icon-link {
   border-color: rgba(59,130,246,0.3);
   color: #3b82f6;
 }
+
+/* ============================================================
+   PHASE CLASSIFIER — Badges, Section Headers, Reasons Row
+   ============================================================ */
+
+/* ── Phase badges on scanner cards ────────────────────────── */
+.phase-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(255,255,255,0.15);
+  cursor: default;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.phase-badge.phase-launch {
+  background: rgba(6,182,212,0.12);
+  border-color: rgba(6,182,212,0.35);
+  color: #06b6d4;
+}
+.phase-badge.phase-accumulation {
+  background: rgba(34,197,94,0.12);
+  border-color: rgba(34,197,94,0.35);
+  color: #22c55e;
+}
+.phase-badge.phase-liquidity_trap {
+  background: rgba(139,92,246,0.14);
+  border-color: rgba(139,92,246,0.4);
+  color: #a78bfa;
+}
+.phase-badge.phase-breakout {
+  background: rgba(245,158,11,0.13);
+  border-color: rgba(245,158,11,0.4);
+  color: #fbbf24;
+}
+.phase-badge.phase-distribution {
+  background: rgba(239,68,68,0.12);
+  border-color: rgba(239,68,68,0.35);
+  color: #f87171;
+}
+
+/* ── Reasons row ─────────────────────────────────────────── */
+.card-reasons-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 14px 2px;
+}
+.cr-pill {
+  font-size: 9.5px;
+  color: rgba(255,255,255,0.55);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* ── Card phase border accents ───────────────────────────── */
+.phase-card-launch          { border-left: 3px solid #06b6d4 !important; }
+.phase-card-accumulation    { border-left: 3px solid #22c55e !important; }
+.phase-card-liquidity_trap  { border-left: 3px solid #8b5cf6 !important; }
+.phase-card-breakout        { border-left: 3px solid #f59e0b !important; }
+.phase-card-distribution    { border-left: 3px solid #ef4444 !important; }
+
+/* ── Sectioned scanner layout ────────────────────────────── */
+.scanner-section {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+}
+.scanner-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  user-select: none;
+  border-left: 4px solid currentColor;
+  background: rgba(255,255,255,0.04);
+  font-size: 13px;
+  font-weight: 700;
+  transition: background 0.15s;
+}
+.scanner-section-header:hover { background: rgba(255,255,255,0.07); }
+
+.ss-trap   { color: #a78bfa; border-color: #8b5cf6; }
+.ss-accum  { color: #4ade80; border-color: #22c55e; }
+.ss-bo     { color: #fbbf24; border-color: #f59e0b; }
+.ss-dist   { color: #f87171; border-color: #ef4444; }
+.ss-other  { color: #94a3b8; border-color: #475569; }
+
+.ss-emoji  { font-size: 15px; }
+.ss-title  { flex: 1; }
+.ss-count  {
+  background: rgba(255,255,255,0.1);
+  border-radius: 10px;
+  font-size: 11px;
+  padding: 1px 8px;
+  font-weight: 700;
+}
+.ss-chevron { font-size: 10px; opacity: 0.6; }
+
+.scanner-section-body { overflow: visible; }
+.scanner-section-body.collapsed { display: none; }
+
+.scanner-section-grid {
+  padding: 10px 0 0;
+}

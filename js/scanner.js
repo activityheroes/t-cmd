@@ -356,6 +356,30 @@ const Scanner = (() => {
         };
         // Attach memecoin signal if score >= 60
         tokenObj.memeSignal = generateMemeSignal(tokenObj, score);
+
+        // Phase classification (synchronous, DexScreener data only)
+        // Will be upgraded in autoAnalyzeOne() when MomentumDetector completes.
+        if (typeof PhaseClassifier !== 'undefined') {
+            const pc = PhaseClassifier.classify(tokenObj);
+            tokenObj.phase         = pc.phase;
+            tokenObj.phaseMeta     = pc.phaseMeta;
+            tokenObj.accumScore    = pc.accumScore;
+            tokenObj.trapScore     = pc.trapScore;
+            tokenObj.breakoutScore = pc.breakoutScore;
+            tokenObj.distScore     = pc.distScore;
+            tokenObj.finalScore    = pc.finalScore;
+            tokenObj.phaseReasons  = pc.reasons;
+            tokenObj.phasePenalties = pc.penalties;
+            tokenObj.phaseTier     = pc.tier;
+            // Cache manipulation penalty for classifier re-use
+            const { penalty } = calcManipulationRisk(pair);
+            tokenObj._manipPenalty = penalty;
+        } else {
+            // Fallback: use pumpScore as finalScore
+            tokenObj.phase      = tokenObj.isBreakout ? 'breakout' : 'accumulation';
+            tokenObj.finalScore = tokenObj.pumpScore;
+        }
+
         return tokenObj;
     }
 
@@ -454,8 +478,8 @@ const Scanner = (() => {
             console.warn('Scanner fetch error:', err);
         }
 
-        // Sort by pump score
-        return results.sort((a, b) => b.pumpScore - a.pumpScore);
+        // Sort by finalScore (phase-aware) falling back to pumpScore
+        return results.sort((a, b) => (b.finalScore ?? b.pumpScore) - (a.finalScore ?? a.pumpScore));
     }
 
     // ══════════════════════════════════════════════════════════

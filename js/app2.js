@@ -1789,7 +1789,31 @@ const App = {
         if (t === 'scanner') renderScannerCards();
         if (t === 'log') renderTradingLog();
         if (t === 'whales') { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
-        if (t === 'tax')    { if (typeof TaxUI    !== 'undefined') TaxUI.init(); }
+        if (t === 'tax') {
+          const user = AuthManager.getUser();
+          // Admin users always have access; regular users need taxCalculator feature
+          const hasAccess = user?.role === 'admin' || user?.features?.taxCalculator;
+          if (hasAccess) {
+            if (typeof TaxUI !== 'undefined') TaxUI.init();
+          } else {
+            // Show access-denied screen instead of the full UI
+            const panel = document.getElementById('tax-panel');
+            if (panel) {
+              panel.innerHTML = `
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;gap:16px;text-align:center;padding:40px;">
+                  <div style="font-size:48px">🔒</div>
+                  <div style="font-size:20px;font-weight:700;color:var(--text-primary)">Tax Calculator — Access Required</div>
+                  <div style="font-size:14px;color:var(--text-muted);max-width:380px;line-height:1.6">
+                    The Swedish Tax Calculator is a premium feature.<br>
+                    Contact your administrator to request access.
+                  </div>
+                  <div style="margin-top:8px;padding:12px 20px;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.25);border-radius:10px;font-size:13px;color:#818cf8;">
+                    🇸🇪 Skatteverket K4 · Genomsnittsmetoden · Crypto Tax
+                  </div>
+                </div>`;
+            }
+          }
+        }
       });
     });
 
@@ -1907,12 +1931,18 @@ const App = {
   gateFeatures() {
     const user = AuthManager.getUser();
     if (!user) return;
+    const isAdmin = user.role === 'admin';
     const tabs = document.querySelectorAll('.nav-tab');
     tabs.forEach(t => {
       const tab = t.dataset.tab;
       if (tab === 'scanner' && !user.features?.memeScanner) t.style.opacity = '0.4';
       if (tab === 'log' && !user.features?.tradingLog) t.style.opacity = '0.4';
       if (tab === 'whales' && !user.features?.whalesWallets) t.style.opacity = '0.4';
+      // Tax Calculator: admin always has access, others need taxCalculator feature
+      if (tab === 'tax' && !isAdmin && !user.features?.taxCalculator) {
+        t.style.opacity = '0.4';
+        t.title = 'Tax Calculator — contact admin to enable';
+      }
     });
   }
 };

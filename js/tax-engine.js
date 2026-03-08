@@ -626,27 +626,149 @@ const TaxEngine = (() => {
     };
   }
 
-  // ── K4 Export ─────────────────────────────────────────────
-  function generateK4CSV(result) {
+  // ── K4 Export — SKV 2104 Section D (kryptovalutor) ───────
+  /*
+   * Generates a CSV that directly mirrors the K4 paper form (SKV 2104).
+   * Crypto assets belong in Section D:
+   *   "Övriga värdepapper, andra tillgångar — t.ex. råvaror, kryptovalutor"
+   *
+   * Each K4 form can hold 7 rows (Section D, rows 1–7).
+   * If more than 7 disposals, the output is split across multiple K4 pages
+   * (each with its own header, rows 1–7, and summary rows).
+   *
+   * Column order matches the printed form exactly:
+   *   Antal/Belopp | Beteckning/Valutakod | Försäljningspris (SEK) | Omkostnadsbelopp (SEK) | Vinst | Förlust
+   *
+   * Transfer to Inkomstdeklaration 1:
+   *   Summa vinst  → ruta 7.5
+   *   Summa förlust → ruta 8.4 (70% avdragsgill, dvs × 0,70)
+   */
+  function generateK4CSV(result, userInfo = {}) {
     const { disposals, year } = result;
-    const lines = [
-      'Beteckning,Antal,Försäljningspris (SEK),Omkostnadsbelopp (SEK),Vinst (SEK),Förlust (SEK)',
-    ];
+    const today = new Date().toLocaleDateString('sv-SE');
+    const ROWS_PER_PAGE = 7;
 
-    for (const d of disposals) {
-      const gain  = d.gainLossSEK > 0 ? d.gainLossSEK.toFixed(0) : '';
-      const loss  = d.gainLossSEK < 0 ? Math.abs(d.gainLossSEK).toFixed(0) : '';
-      lines.push([
-        `${d.assetSymbol} (krypto)`,
-        d.amountSold.toFixed(8),
-        d.proceedsSEK.toFixed(0),
-        d.costBasisSEK.toFixed(0),
-        gain,
-        loss,
-      ].join(','));
+    // Split into pages of 7
+    const pages = [];
+    for (let i = 0; i < Math.max(disposals.length, 1); i += ROWS_PER_PAGE) {
+      pages.push(disposals.slice(i, i + ROWS_PER_PAGE));
     }
 
-    return lines.join('\n');
+    const sections = [];
+
+    // ── Global summary block at top ─────────────────────────
+    const totalGains  = disposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
+    const totalLosses = disposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
+
+    sections.push([
+      `; ═══════════════════════════════════════════════════════════════`,
+      `; SKV 2104 — Försäljning Värdepapper m.m. — BILAGA K4`,
+      `; Sektion D: Övriga tillgångar (kryptovalutor)`,
+      `; Inkomstår:,${year}`,
+      `; Datum:,${today}`,
+      `; Framtagen av:,T-CMD Tax Calculator (Genomsnittsmetoden)`,
+      userInfo.name        ? `; Namn:,${userInfo.name}` : '',
+      userInfo.personnummer ? `; Personnummer:,${userInfo.personnummer}` : '',
+      `; `,
+      `; SAMMANFATTNING — för Inkomstdeklaration 1:`,
+      `; Summa vinst  → ruta 7.5 på Inkomstdeklaration 1:,${Math.round(totalGains)} kr`,
+      `; Summa förlust → ruta 8.4 (avdragsgill del 70%):,${Math.round(totalLosses * 0.70)} kr`,
+      `; `,
+      `; Antal avyttringar:,${disposals.length}`,
+      `; Antal K4-blanketter:,${pages.length}`,
+      `; ═══════════════════════════════════════════════════════════════`,
+      ``,
+    ].filter(l => l !== '').join('\n'));
+
+    // ── One K4 page per 7 disposals ─────────────────────────
+    pages.forEach((pageDisposals, pageIdx) => {
+      const pageNum = pageIdx + 1;
+      const isLastPage = pageIdx === pages.length - 1;
+
+      // Partial sums for this page
+      const pageGain  = pageDisposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
+      const pageLoss  = pageDisposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
+      const pageProc  = pageDisposals.reduce((s, d) => s + d.proceedsSEK, 0);
+      const pageCost  = pageDisposals.reduce((s, d) => s + d.costBasisSEK, 0);
+
+      const block = [];
+
+      // Page header
+      block.push(
+        `; ─────────────────────────────────────────────────────────────`,
+        `; K4 BLANKETT ${pageNum} av ${pages.length}  |  Inkomstår ${year}`,
+        `; Sektion D — Övriga värdepapper/andra tillgångar (kryptovalutor)`,
+        `; ─────────────────────────────────────────────────────────────`,
+        `;`,
+        `; D. Övriga värdepapper / andra tillgångar / kryptovalutor`,
+        `;`,
+      );
+
+      // Column headers — exact match to K4 form Section D
+      block.push(
+        `Rad,` +
+        `Antal/Belopp,` +
+        `Beteckning/Valutakod,` +
+        `Försäljningspris omräknat till svenska kronor,` +
+        `Omkostnadsbelopp omräknat till svenska kronor,` +
+        `Vinst,` +
+        `Förlust`
+      );
+
+      // Rows 1–7 (pad with empty rows if fewer than 7)
+      for (let row = 1; row <= ROWS_PER_PAGE; row++) {
+        const d = pageDisposals[row - 1];
+        if (d) {
+          const gain = d.gainLossSEK > 0 ? Math.round(d.gainLossSEK) : '';
+          const loss = d.gainLossSEK < 0 ? Math.round(Math.abs(d.gainLossSEK)) : '';
+          // Beteckning: e.g. "BTC (kryptovaluta)" or "ETH/BTC byta (kryptovaluta)"
+          const beteckning = d.isTrade
+            ? `${d.assetSymbol} → ${d.inAsset || '?'} (kryptovaluta byte)`
+            : `${d.assetSymbol} (kryptovaluta)`;
+          block.push(
+            `${row},` +
+            `"${parseFloat(d.amountSold).toFixed(8)}",` +
+            `"${beteckning}",` +
+            `${Math.round(d.proceedsSEK)},` +
+            `${Math.round(d.costBasisSEK)},` +
+            `${gain},` +
+            `${loss}`
+          );
+        } else {
+          // Empty row placeholder
+          block.push(`${row},,,,,,`);
+        }
+      }
+
+      // Summary rows for this page (required on each K4 form)
+      block.push(
+        ``,
+        `; SUMMERING (rad 1–7 på denna blankett):`,
+        `; Summa vinst (Sektion D),,,${Math.round(pageProc)},${Math.round(pageCost)},${Math.round(pageGain)},`,
+        `; Summa förlust (Sektion D),,,,,,${Math.round(pageLoss)}`,
+      );
+
+      // If last page, add the carry-forward instructions
+      if (isLastPage) {
+        block.push(
+          ``,
+          `; ─────────────────────────────────────────────────────────────`,
+          `; TOTALBELOPP ATT FÖR ÖVER TILL INKOMSTDEKLARATION 1:`,
+          `; ─────────────────────────────────────────────────────────────`,
+          `; Summa vinst alla blanketter → ruta 7.5 på Inkomstdeklaration 1:,${Math.round(totalGains)} kr`,
+          `; Summa förlust alla blanketter → ruta 8.4 på Inkomstdeklaration 1:,${Math.round(totalLosses)} kr`,
+          `; Avdragsgill förlust (70% av förlust) → ruta 8.4:,${Math.round(totalLosses * 0.70)} kr`,
+          `; ─────────────────────────────────────────────────────────────`,
+          `; OBS! Belopp avrundas till hela kronor enligt Skatteverkets regler.`,
+          `; Genomsnittsmetoden (SFS 1999:1229 44 kap. 7§) har använts.`,
+        );
+      }
+
+      block.push('');
+      sections.push(block.join('\n'));
+    });
+
+    return sections.join('\n');
   }
 
   function generateK4Summary(result) {
@@ -672,6 +794,8 @@ const TaxEngine = (() => {
         loss:        Math.abs(sumGL(losses)),
       },
       deductibleLoss: result.summary.deductibleLoss,
+      // How many K4 forms needed
+      formsNeeded: Math.max(1, Math.ceil(disposals.length / 7)),
     };
   }
 

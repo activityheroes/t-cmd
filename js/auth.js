@@ -74,7 +74,7 @@ const AuthManager = (() => {
 
     // ── Admin helpers (async) ──────────────────────────────
     async getAllUsers() { return SupabaseDB.getAllUsers(); },
-    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false } }); },
+    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false } }); },
     async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
     async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
 
@@ -406,10 +406,10 @@ async function renderAdminPanel() {
                     <td><span class="status-badge status-${u.status}">${u.status}</span></td>
                     <td>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
-                            ${['coinSignals', 'memeScanner', 'tradingLog', 'whalesWallets'].map(f => `
-                            <label class="feat-toggle" title="${f}">
+                            ${['coinSignals', 'memeScanner', 'tradingLog', 'whalesWallets', 'taxCalculator'].map(f => `
+                            <label class="feat-toggle" title="${f}" style="position:relative">
                                 <input type="checkbox" ${u.features?.[f] ? 'checked' : ''} onchange="toggleFeature('${u.id}','${f}',this.checked)" ${u.id === currentUser?.userId ? 'disabled' : ''}>
-                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : f === 'tradingLog' ? '📋' : '🐋'}</span>
+                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : f === 'tradingLog' ? '📋' : f === 'whalesWallets' ? '🐋' : '🇸🇪'}</span>
                             </label>`).join('')}
                         </div>
                     </td>

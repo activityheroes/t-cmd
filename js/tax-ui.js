@@ -727,7 +727,8 @@ const TaxUI = (() => {
         <!-- K4 breakdown -->
         <div class="tax-section">
           <div class="tax-section-header">
-            <h2>K4 — Box D (Övriga tillgångar — Krypto)</h2>
+            <h2>K4 — Sektion D (Övriga tillgångar — Kryptovalutor)</h2>
+            ${k4.formsNeeded > 1 ? `<span class="tax-badge" style="background:rgba(99,102,241,0.15);color:#818cf8">${k4.formsNeeded} K4-blanketter behövs (7 rader/blankett)</span>` : ''}
           </div>
 
           <div class="tax-k4-section">
@@ -782,7 +783,7 @@ const TaxUI = (() => {
           <div class="tax-section-header">
             <h2>All Disposals ${state.taxYear}</h2>
             <div class="tax-report-dl-btns">
-              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4CSV()">⬇ Download K4 CSV</button>
+              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4CSV()">⬇ Download K4 CSV (SKV 2104-D)</button>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.printReport()">🖨 Print</button>
             </div>
           </div>
@@ -1223,12 +1224,20 @@ const TaxUI = (() => {
   // ── Report Export ─────────────────────────────────────────
   function downloadK4CSV() {
     const result = getOrComputeTaxResult();
-    const csv = TaxEngine.generateK4CSV(result);
-    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }); // BOM for Excel
+    // Pass current user info if available (for header on the K4)
+    const userInfo = {};
+    try {
+      if (typeof AuthManager !== 'undefined') {
+        const u = AuthManager.getUser();
+        if (u) { userInfo.name = u.name; }
+      }
+    } catch {}
+    const csv = TaxEngine.generateK4CSV(result, userInfo);
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }); // BOM for Excel / Numbers
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
-    a.download = `K4_crypto_${state.taxYear}.csv`;
+    a.download = `SKV2104_K4_D_krypto_${state.taxYear}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }

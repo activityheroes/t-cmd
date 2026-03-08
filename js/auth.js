@@ -74,7 +74,7 @@ const AuthManager = (() => {
 
     // ── Admin helpers (async) ──────────────────────────────
     async getAllUsers() { return SupabaseDB.getAllUsers(); },
-    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true } }); },
+    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false } }); },
     async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
     async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
 
@@ -406,10 +406,10 @@ async function renderAdminPanel() {
                     <td><span class="status-badge status-${u.status}">${u.status}</span></td>
                     <td>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
-                            ${['coinSignals', 'memeScanner', 'tradingLog'].map(f => `
+                            ${['coinSignals', 'memeScanner', 'tradingLog', 'whalesWallets'].map(f => `
                             <label class="feat-toggle" title="${f}">
                                 <input type="checkbox" ${u.features?.[f] ? 'checked' : ''} onchange="toggleFeature('${u.id}','${f}',this.checked)" ${u.id === currentUser?.userId ? 'disabled' : ''}>
-                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : '📋'}</span>
+                                <span>${f === 'coinSignals' ? '📡' : f === 'memeScanner' ? '🔍' : f === 'tradingLog' ? '📋' : '🐋'}</span>
                             </label>`).join('')}
                         </div>
                     </td>
@@ -459,10 +459,58 @@ async function renderAdminPanel() {
         </div>
 
         <div class="admin-section" style="margin-top:20px;">
-            <div class="admin-section-title">🐋 Wallet Tracker</div>
+            <div class="admin-section-title">🔑 API Keys — Rug Checker</div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-                Track smart money wallets across chains. When a tracked wallet holds a scanned memecoin, you'll see an alert in Smart Trades.
+                Keys are stored locally in your browser only. Required for the 12-signal rug checker and cluster detector.
+                Get keys: <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
+                &nbsp;·&nbsp;
+                <a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
             </div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <!-- Birdeye key -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦅 Birdeye</label>
+                    <input id="admin-birdeye-key" type="password" placeholder="Paste Birdeye API key…"
+                        value="${localStorage.getItem('tcmd_birdeye_key')||''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('birdeye')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('birdeye')" id="birdeye-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                </div>
+                <!-- Helius key -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🔆 Helius</label>
+                    <input id="admin-helius-key" type="password" placeholder="Paste Helius API key (Solana)…"
+                        value="${localStorage.getItem('tcmd_helius_key')||''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('helius')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('helius')" id="helius-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                </div>
+                <div id="admin-key-status" style="font-size:11px;color:var(--text-muted);min-height:16px;"></div>
+            </div>
+        </div>
+
+        <div class="admin-section" style="margin-top:20px;">
+            <div class="admin-section-title">🐋 Wallet Tracker</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
+                Track smart money wallets across chains. Wallets saved here are <strong style="color:var(--accent-cyan)">shared with all users</strong> via Supabase.
+            </div>
+            ${SUPABASE_READY ? `
+            <details style="margin-bottom:12px;">
+              <summary style="font-size:11px;color:var(--accent-amber);cursor:pointer;list-style:none;">
+                ⚠️ If users can't see wallets — run this SQL in Supabase
+              </summary>
+              <pre style="margin-top:8px;background:var(--bg-deep);border:1px solid var(--border-subtle);border-radius:6px;padding:10px;font-size:10.5px;color:var(--accent-cyan);overflow-x:auto;white-space:pre-wrap;">CREATE TABLE IF NOT EXISTS watched_wallets (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  chain text NOT NULL,
+  address text NOT NULL,
+  label text,
+  created_at timestamptz DEFAULT now()
+);
+ALTER TABLE watched_wallets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public read"   ON watched_wallets FOR SELECT USING (true);
+CREATE POLICY "public insert" ON watched_wallets FOR INSERT WITH CHECK (true);
+CREATE POLICY "public delete" ON watched_wallets FOR DELETE USING (true);</pre>
+            </details>` : ''}
             <div class="wallet-tracker-chains">
                 <button class="wt-chain-tab active" data-chain="SOL" onclick="switchWtChain('SOL',this)">◎ SOL</button>
                 <button class="wt-chain-tab" data-chain="ETH" onclick="switchWtChain('ETH',this)">Ξ ETH</button>
@@ -588,6 +636,16 @@ async function renderWtPanel() {
 
   panel.innerHTML = `
     ${keySection}
+    <div class="wt-import-section">
+      <div class="wt-import-title">📤 Bulk Import JSON</div>
+      <div class="wt-import-row">
+        <textarea id="wt-json-input" class="wt-json-textarea"
+          placeholder='[{"address":"4V91ZL...","name":"rookixbt","emoji":"🧑"},...]'></textarea>
+        <button class="btn btn-ghost" style="font-size:11px;white-space:nowrap;align-self:flex-end;"
+          onclick="importWalletsJson('${chain}')">Import</button>
+      </div>
+      <div id="wt-import-result" class="wt-import-result"></div>
+    </div>
     <div class="wt-add-row">
       <input id="wt-addr-input" class="auth-input" type="text" placeholder="${cfg?.label} wallet address…" style="flex:1;">
       <input id="wt-label-input" class="auth-input" type="text" placeholder="Label (e.g. Whale123)" style="width:130px;">
@@ -661,6 +719,76 @@ window.fetchWtActivity = async function (id, address, chain) {
         ${tx.sig ? `<a href="${tx.url}" target="_blank" class="wt-tx-link" title="${tx.sig}">tx ↗</a>` : ''}
       </div>`).join('')}
   </div>`;
+};
+
+// ── API Key management (Rug Checker) ─────────────────────────
+window.adminSaveKey = function (name) {
+  const input = document.getElementById(`admin-${name}-key`);
+  if (!input) return;
+  const val = input.value.trim();
+  if (typeof ChainAPIs !== 'undefined') {
+    ChainAPIs.setKey(name, val);
+  } else {
+    localStorage.setItem(`tcmd_${name}_key`, val);
+  }
+  const status = document.getElementById('admin-key-status');
+  if (status) { status.textContent = `✓ ${name} key saved`; status.style.color = 'var(--accent-green)'; }
+  setTimeout(() => { const s = document.getElementById('admin-key-status'); if (s) s.textContent = ''; }, 3000);
+};
+
+window.adminTestKey = async function (name) {
+  const btn    = document.getElementById(`${name}-test-btn`);
+  const status = document.getElementById('admin-key-status');
+  if (!btn || typeof ChainAPIs === 'undefined') return;
+  const key = document.getElementById(`admin-${name}-key`)?.value?.trim();
+  if (!key) { if (status) { status.textContent = `No ${name} key entered`; status.style.color = '#f59e0b'; } return; }
+  btn.textContent = 'Testing…'; btn.disabled = true;
+  try {
+    const ok = name === 'birdeye'
+      ? await ChainAPIs.testBirdeyeKey(key)
+      : await ChainAPIs.testHeliusKey(key);
+    if (status) {
+      status.textContent = ok ? `✓ ${name} key is valid!` : `✗ ${name} key invalid or quota exceeded`;
+      status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+    }
+  } catch (e) {
+    if (status) { status.textContent = `Error testing ${name} key`; status.style.color = '#ef4444'; }
+  }
+  btn.textContent = 'Test'; btn.disabled = false;
+};
+
+window.importWalletsJson = async function (chain) {
+  const textarea = document.getElementById('wt-json-input');
+  const resultEl = document.getElementById('wt-import-result');
+  const raw = (textarea?.value || '').trim();
+  if (!raw) return;
+
+  let entries;
+  try {
+    entries = JSON.parse(raw);
+    if (!Array.isArray(entries)) throw new Error('Expected a JSON array');
+  } catch (e) {
+    resultEl.textContent = '❌ Invalid JSON: ' + e.message;
+    resultEl.style.color = 'var(--accent-red)';
+    return;
+  }
+
+  let added = 0, skipped = 0;
+  for (const item of entries) {
+    const addr = (item.address || '').trim();
+    if (!addr) { skipped++; continue; }
+    const label = [item.emoji, item.name].filter(Boolean).join(' ') || addr.slice(0, 8) + '…';
+    try {
+      await WalletTracker.addWallet(chain, addr, label);
+      added++;
+    } catch { skipped++; }
+  }
+
+  resultEl.textContent = `✅ Imported ${added} wallet${added !== 1 ? 's' : ''}${skipped ? ` · ${skipped} skipped` : ''}`;
+  resultEl.style.color = 'var(--accent-green)';
+  textarea.value = '';
+  setTimeout(() => renderWtPanel(), 400);
+  showToast('📤', 'Wallets Imported', `${added} wallets added to ${chain}`, 'success');
 };
 
 // Re-render wallet panel after admin panel loads

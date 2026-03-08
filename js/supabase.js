@@ -40,6 +40,11 @@ const SupabaseDB = (() => {
         return Array.isArray(data) ? data[0] : data;
     }
 
+    async function sbDelete(table, query) {
+        const r = await fetch(url(table, query), { method: 'DELETE', headers: headers() });
+        if (!r.ok) throw new Error(`Supabase DELETE ${table} failed: ${r.status}`);
+    }
+
     // ── localStorage fallback helpers ─────────────────────────
     const LS_USERS = 'tcmd_users';
     const LS_INVITES = 'tcmd_invites';
@@ -168,6 +173,42 @@ const SupabaseDB = (() => {
                 ? `created_by=eq.${createdBy}&order=created_at.desc`
                 : 'order=created_at.desc';
             return sbGet('invites', q);
+        },
+
+        // ── Watched Wallets (shared across all users) ─────────
+        // Required Supabase table:
+        //   CREATE TABLE watched_wallets (
+        //     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+        //     chain text NOT NULL,
+        //     address text NOT NULL,
+        //     label text,
+        //     created_at timestamptz DEFAULT now()
+        //   );
+        //   ALTER TABLE watched_wallets ENABLE ROW LEVEL SECURITY;
+        //   CREATE POLICY "public read"  ON watched_wallets FOR SELECT USING (true);
+        //   CREATE POLICY "public write" ON watched_wallets FOR INSERT WITH CHECK (true);
+        //   CREATE POLICY "public delete" ON watched_wallets FOR DELETE USING (true);
+
+        async getWallets() {
+            if (!SUPABASE_READY) return null;
+            try {
+                return await sbGet('watched_wallets', 'order=created_at.desc');
+            } catch { return null; }
+        },
+
+        async addWallet({ chain, address, label }) {
+            if (!SUPABASE_READY) return null;
+            try {
+                return await sbPost('watched_wallets', { chain, address, label });
+            } catch { return null; }
+        },
+
+        async deleteWallet(id) {
+            if (!SUPABASE_READY) return false;
+            try {
+                await sbDelete('watched_wallets', `id=eq.${id}`);
+                return true;
+            } catch { return false; }
         }
     };
 })();

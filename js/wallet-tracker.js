@@ -16,26 +16,27 @@ const WalletTracker = (() => {
 
     // ── CRUD ─────────────────────────────────────────────────────
     async function getWallets() {
+        // Try Supabase first — wallets are admin-curated and shared across all users
         if (typeof SupabaseDB !== 'undefined' && SUPABASE_READY) {
-            try {
-                const { data } = await SupabaseDB.client
-                    .from('watched_wallets').select('*').order('created_at', { ascending: false });
-                return data || _loadLocal();
-            } catch { return _loadLocal(); }
+            const data = await SupabaseDB.getWallets();
+            if (Array.isArray(data)) return data;
+            // null means Supabase call failed (table may not exist yet) — fall through
         }
         return _loadLocal();
     }
 
     async function addWallet(chain, address, label) {
-        const entry = { id: Date.now().toString(), chain, address: address.trim(), label: label || address.slice(0, 8) + '…', created_at: new Date().toISOString() };
+        const trimmed = address.trim();
+        const lbl = label || trimmed.slice(0, 8) + '…';
+        // Try Supabase — persists across all users/devices
         if (typeof SupabaseDB !== 'undefined' && SUPABASE_READY) {
-            try {
-                await SupabaseDB.client.from('watched_wallets').insert([{ chain, address: entry.address, label: entry.label }]);
-                return true;
-            } catch { /* fall through to local */ }
+            const result = await SupabaseDB.addWallet({ chain, address: trimmed, label: lbl });
+            if (result) return true;
+            // Supabase failed (table not set up) — fall through to localStorage
         }
+        const entry = { id: Date.now().toString(), chain, address: trimmed, label: lbl, created_at: new Date().toISOString() };
         const wallets = _loadLocal();
-        if (!wallets.find(w => w.address === entry.address && w.chain === chain)) {
+        if (!wallets.find(w => w.address === trimmed && w.chain === chain)) {
             wallets.unshift(entry); _saveLocal(wallets);
         }
         return true;
@@ -43,8 +44,9 @@ const WalletTracker = (() => {
 
     async function removeWallet(id, address) {
         if (typeof SupabaseDB !== 'undefined' && SUPABASE_READY) {
-            try { await SupabaseDB.client.from('watched_wallets').delete().eq('id', id); } catch { }
+            await SupabaseDB.deleteWallet(id);
         }
+        // Also clean local cache
         const wallets = _loadLocal().filter(w => w.id !== id && w.address !== address);
         _saveLocal(wallets);
     }

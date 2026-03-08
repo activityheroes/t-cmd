@@ -455,9 +455,19 @@ const Scanner = (() => {
             const allPairs = trending.slice(0, 30);
 
             // Map boost info onto pairs (skip native/infra/stablecoin tokens)
+            // Deduplicate by base token address — keep only the highest-liquidity pair per token
+            const bestPairByAddr = new Map();
             for (const pair of allPairs) {
                 if (isBlockedToken(pair)) continue;
                 const addr = pair.baseToken?.address || '';
+                if (!addr) continue;
+                const liq = parseFloat(pair.liquidity?.usd || 0);
+                const existing = bestPairByAddr.get(addr);
+                if (!existing || liq > parseFloat(existing.liquidity?.usd || 0)) {
+                    bestPairByAddr.set(addr, pair);
+                }
+            }
+            for (const [addr, pair] of bestPairByAddr) {
                 const token = formatToken(pair, boostMap[addr] || 0);
                 if (token.priceUSD > 0) results.push(token);
             }
@@ -478,8 +488,20 @@ const Scanner = (() => {
             console.warn('Scanner fetch error:', err);
         }
 
+        // Final dedup safety net — remove any remaining address duplicates (keep highest score)
+        const seen = new Map();
+        for (const t of results) {
+            if (!t.address) continue;
+            const existing = seen.get(t.address);
+            const tScore = t.finalScore ?? t.pumpScore;
+            if (!existing || tScore > (existing.finalScore ?? existing.pumpScore)) {
+                seen.set(t.address, t);
+            }
+        }
+        const deduped = [...seen.values()];
+
         // Sort by finalScore (phase-aware) falling back to pumpScore
-        return results.sort((a, b) => (b.finalScore ?? b.pumpScore) - (a.finalScore ?? a.pumpScore));
+        return deduped.sort((a, b) => (b.finalScore ?? b.pumpScore) - (a.finalScore ?? a.pumpScore));
     }
 
     // ══════════════════════════════════════════════════════════

@@ -629,6 +629,13 @@ function _buildTokenFromPair(pair) {
 
 function filterScannerTokens(tokens) {
   let t = tokens;
+  // Safety-net dedup by address (catches multi-pair tokens and restored customs)
+  const addrSeen = new Set();
+  t = t.filter(x => {
+    if (!x.address || addrSeen.has(x.address)) return false;
+    addrSeen.add(x.address);
+    return true;
+  });
   // Always filter out blacklisted tokens
   const bl = getBlacklist();
   if (bl.length) t = t.filter(x => !bl.includes(x.address));

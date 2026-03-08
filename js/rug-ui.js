@@ -94,6 +94,7 @@ const RugUI = (() => {
       if (bundleResult?.success && typeof AppState !== 'undefined') {
         if (!AppState.bundleResults) AppState.bundleResults = {};
         AppState.bundleResults[tokenAddress] = bundleResult;
+
         // Trigger a lightweight card re-render for the bundle badge only
         const cardEl = document.querySelector(`.scanner-card[data-addr="${tokenAddress}"] .card-bundle-badge`);
         if (cardEl && bundleResult.bundle_risk_score >= 40) {
@@ -102,6 +103,31 @@ const RugUI = (() => {
           cardEl.className = `card-bundle-badge bundle-score-badge ${t.cls}`;
           cardEl.title = bundleResult.summary;
           cardEl.style.display = 'inline-flex';
+        }
+
+        // Distribution monitoring hook — if cluster is actively dumping, apply
+        // a -20 penalty to the token's finalScore via the PhaseClassifier
+        if (bundleResult.distributionAlert && typeof PhaseClassifier !== 'undefined') {
+          const token = (AppState.scannerTokens || []).find(t => t.address === tokenAddress);
+          if (token) {
+            const penalisedScore = Math.max(0, (token.finalScore ?? token.pumpScore) - 20);
+            AppState.scannerTokens = AppState.scannerTokens.map(t =>
+              t.address === tokenAddress
+                ? { ...t, finalScore: penalisedScore, phase: 'distribution',
+                    phaseMeta: PhaseClassifier.PHASE_META.distribution,
+                    phaseReasons: ['🚨 Cluster wallets actively selling', ...(t.phaseReasons || []).slice(0,2)] }
+                : t
+            );
+            // Live-update the card
+            if (typeof updateCardPhase === 'function') {
+              updateCardPhase(tokenAddress, {
+                phase:    'distribution',
+                phaseMeta: PhaseClassifier.PHASE_META.distribution,
+                finalScore: penalisedScore,
+                reasons: ['🚨 Cluster wallets selling NOW', 'Distribution detected by bundle check']
+              });
+            }
+          }
         }
       }
       renderResults(panel, rugResult, clusterResult, bundleResult);
@@ -171,6 +197,9 @@ const RugUI = (() => {
             : bundleResult?.success
               ? `<div class="rp-cluster-ok">✅ No bundle patterns detected</div>`
               : ''}
+          ${bundleResult?.distributionAlert
+            ? `<div class="bundle-dist-alert">🚨 CLUSTER DUMPING NOW — Wallets identified in bundle are actively selling</div>`
+            : ''}
         </div>
       </div>
 
@@ -225,13 +254,17 @@ const RugUI = (() => {
   // ── Bundle section ────────────────────────────────────────────
   function bundlePatternLabel(pattern) {
     const MAP = {
-      fixedBuySize:     '💰 Fixed-Size Buys',
-      sameBlock:        '🧱 Same-Block Bundle',
-      burstTiming:      '⚡ Burst Timing',
-      coordinatedSells: '📉 Coordinated Sells',
-      regularTiming:    '⏱️ Regular Timing',
-      sameFunder:       '🏦 Same Funder',
-      relatedFunding:   '🔗 Related Funding'
+      fixedBuySize:        '💰 Fixed-Size Buys',
+      sameBlock:           '🧱 Same-Block Bundle',
+      burstTiming:         '⚡ Burst Timing',
+      coordinatedSells:    '📉 Coordinated Sells',
+      regularTiming:       '⏱️ Regular Timing',
+      sameFunder:          '🏦 Same Funder',
+      fundingTree:         '🌳 Funding Tree (2-hop)',
+      relatedFunding:      '🔗 Related Funding',
+      behaviorCluster:     '🤖 Behavioral Cluster',
+      supplyConcentration: '📊 Supply Concentration',
+      activeDistribution:  '🚨 Active Distribution',
     };
     return MAP[pattern] || pattern;
   }
@@ -244,9 +277,9 @@ const RugUI = (() => {
     const patterns = br.detected_patterns || [];
     const hasData  = br.success && patterns.length > 0;
     const stageStr = br.stage === 2
-      ? `🔬 Deep analysis (Stage 2 · Helius) · ${br.early_buyers_analyzed || 0} early buyers`
+      ? `🔬 Deep analysis (Stage 2 · Helius + behavioral clustering) · ${br.early_buyers_analyzed || 0} early buyers`
       : br.stage === 1
-        ? `⚡ Fast screen (Stage 1) · ${br.early_buyers_analyzed || 0} early buyers analyzed${!ChainAPIs.getKeys().helius ? ' · <em>Add Helius key for deeper analysis</em>' : ''}`
+        ? `⚡ Stage 1 — behavioral clustering + supply check · ${br.early_buyers_analyzed || 0} early buyers${!ChainAPIs.getKeys().helius ? ' · <em>Add Helius key for funding-tree analysis</em>' : ''}`
         : '';
 
     return `

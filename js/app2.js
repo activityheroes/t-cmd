@@ -463,11 +463,65 @@ function updateCardMomentum(address, result) {
   }
 }
 
-// ── Favorites helpers ─────────────────────────────────────────
+// ── Favorites helpers (with dedup) ───────────────────────────
 function getFavorites() {
-  try { return JSON.parse(localStorage.getItem('tcmd_favorites') || '[]'); } catch { return []; }
+  try {
+    const raw     = JSON.parse(localStorage.getItem('tcmd_favorites') || '[]');
+    const deduped = [...new Set(raw)];
+    if (deduped.length !== raw.length) {
+      localStorage.setItem('tcmd_favorites', JSON.stringify(deduped));
+    }
+    return deduped;
+  } catch { return []; }
 }
 function isFavorite(addr) { return getFavorites().includes(addr); }
+
+// ── Blacklist helpers ──────────────────────────────────────────
+function getBlacklist() {
+  try { return [...new Set(JSON.parse(localStorage.getItem('tcmd_blacklist') || '[]'))]; }
+  catch { return []; }
+}
+function isBlacklisted(addr) { return getBlacklist().includes(addr); }
+
+window.addToBlacklist = function(addr, name) {
+  if (!addr) return;
+  const bl = getBlacklist();
+  if (bl.includes(addr)) return;
+  bl.push(addr);
+  localStorage.setItem('tcmd_blacklist', JSON.stringify(bl));
+
+  // Remove from active scanner tokens immediately
+  AppState.scannerTokens = (AppState.scannerTokens || []).filter(t => t.address !== addr);
+  renderScannerCards();
+  updateScannerStats();
+
+  // Toast with inline undo button
+  const container = document.getElementById('toast-container');
+  if (container) {
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-info';
+    const safeName = (name || addr.slice(0,6)+'…').replace(/[<>"']/g, '');
+    toast.innerHTML = `
+      <span class="toast-icon">🚫</span>
+      <div><div class="toast-title">Hidden: ${safeName}</div><div class="toast-msg">Won't appear in scanner again</div></div>
+      <button class="bl-undo-btn" onclick="window.undoBlacklist('${addr}',this.closest('.toast'))">Undo</button>
+      <span class="toast-close" onclick="this.parentElement.remove()">×</span>`;
+    container.prepend(toast);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 6000);
+  }
+};
+
+window.undoBlacklist = function(addr, toastEl) {
+  const bl = getBlacklist().filter(a => a !== addr);
+  localStorage.setItem('tcmd_blacklist', JSON.stringify(bl));
+  if (toastEl) toastEl.remove();
+  showToast('↩️', 'Unhidden', 'Token restored — rescan to see it again', 'info');
+};
+
+window.clearBlacklist = function() {
+  localStorage.removeItem('tcmd_blacklist');
+  showToast('🗑️', 'Blacklist cleared', 'All hidden tokens restored on next scan', 'info');
+};
 window.toggleFavorite = function (addr) {
   const favs = getFavorites();
   const idx = favs.indexOf(addr);
@@ -575,6 +629,9 @@ function _buildTokenFromPair(pair) {
 
 function filterScannerTokens(tokens) {
   let t = tokens;
+  // Always filter out blacklisted tokens
+  const bl = getBlacklist();
+  if (bl.length) t = t.filter(x => !bl.includes(x.address));
   // Type filter
   if (AppState.scannerFilter === 'hot') t = t.filter(x => x.pumpScore >= 70);
   if (AppState.scannerFilter === 'breakout') t = t.filter(x => x.isBreakout || x.phase === 'breakout' || (x.breakoutScore >= 55));
@@ -1237,6 +1294,7 @@ function renderScannerCard(token) {
           📋 ${addr ? addr.slice(0, 4) + '…' + addr.slice(-4) : 'CA'}
         </button>
         <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep rug analysis — 12 signals + wallet clusters">🛡️ Rug Check</button>
+        <button class="blacklist-btn" onclick="event.stopPropagation();window.addToBlacklist('${addr}','${token.name.replace(/'/g,'').replace(/"/g,'').slice(0,20)}')" title="Hide this token — won't show in scanner again">🚫 Hide</button>
         ${navLink(token.dexUrl, dsFavicon, 'View on DexScreener', 'dex')}
         ${token.socials[0]?.url ? `<a class="card-action-icon x-social-link" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="X / Twitter"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.748l7.73-8.835L1.254 2.25H8.08l4.259 5.63L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z"/></svg></a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()" title="Website">🌐</a>` : ''}

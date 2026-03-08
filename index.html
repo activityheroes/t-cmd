@@ -11,6 +11,7 @@
     content="AI-powered crypto trading signals for BTC, ETH, SOL and altcoins. Real-time data, memecoin scanner, smart whale tracking.">
   <link rel="stylesheet" href="styles/main.css">
   <link rel="stylesheet" href="styles/components.css">
+  <link rel="stylesheet" href="styles/tax.css">
 </head>
 
 <body>
@@ -35,6 +36,7 @@
         </button>
         <button class="nav-tab" data-tab="log">📒 Trading Log</button>
         <button class="nav-tab" data-tab="whales" id="nav-tab-whales">🐋 Whales & Wallets</button>
+        <button class="nav-tab" data-tab="tax" id="nav-tab-tax">🇸🇪 Tax Calculator</button>
       </div>
 
       <div class="nav-actions">
@@ -292,6 +294,15 @@
         </div>
       </div>
 
+      <!-- ══════════════════════════════════════════════
+         TAX CALCULATOR TAB
+    ═══════════════════════════════════════════════ -->
+      <div id="panel-tax" class="tab-panel">
+        <div id="tax-panel">
+          <!-- Populated by TaxUI.init() in tax-ui.js -->
+        </div>
+      </div>
+
     </div><!-- /main-content -->
   </div><!-- /app -->
 
@@ -439,6 +450,8 @@
   <script src="js/phase-classifier.js"></script>
   <script src="js/rug-ui.js"></script>
   <script src="js/momentum-detector.js"></script>
+  <script src="js/tax-engine.js"></script>
+  <script src="js/tax-ui.js"></script>
 
   <!-- ── Badge Info Popover ───────────────────────────────────── -->
   <div id="badge-info-overlay" class="bi-overlay bi-hidden" onclick="if(event.target===this)window.toggleBadgeInfo()">

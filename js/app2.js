@@ -1789,6 +1789,7 @@ const App = {
         if (t === 'scanner') renderScannerCards();
         if (t === 'log') renderTradingLog();
         if (t === 'whales') { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
+        if (t === 'tax')    { if (typeof TaxUI    !== 'undefined') TaxUI.init(); }
       });
     });
 

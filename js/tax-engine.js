@@ -1068,11 +1068,13 @@ const TaxEngine = (() => {
   // ════════════════════════════════════════════════════════════
 
   // Solana via Helius — paginates through ALL transactions
+  // IMPORTANT: raw Helius JSON (5–20 KB/tx) is normalized and discarded per page.
+  // Never accumulate allRaw — 8000 raw txns ≈ 100 MB in V8, which crashes Chrome.
   async function importSolanaWallet(address, accountId, onProgress) {
     const heliusKey = localStorage.getItem('tcmd_helius_key');
     if (!heliusKey) return { txns:[], error:'No Helius API key configured', missingKey:true };
 
-    let allRaw = [], before = null, hasMore = true;
+    let allTxns = [], totalFetched = 0, before = null, hasMore = true;
     setImportStatus(accountId, { status:'syncing', source:'solana', address });
 
     try {
@@ -1087,20 +1089,25 @@ const TaxEngine = (() => {
         const page = await r.json();
         if (!page.length) { hasMore = false; break; }
 
-        allRaw  = allRaw.concat(page);
+        // Normalize this page immediately — raw data is discarded after this block
+        const pageTxns = page
+          .flatMap(tx => normalizeSolanaTx(tx, address, accountId) || [])
+          .filter(Boolean);
+        allTxns.push(...pageTxns);
+
+        totalFetched += page.length;
         before  = page[page.length-1].signature;
         hasMore = page.length === 100;
 
-        if (onProgress) onProgress({ step:'import', msg:`Fetched ${allRaw.length} Solana transactions…` });
-        await sleep(250);
+        if (onProgress) onProgress({ step:'import', msg:`Fetched ${totalFetched} Solana transactions…` });
+        await tick(); // yield to browser between pages
       }
 
-      const txns = allRaw.flatMap(tx => normalizeSolanaTx(tx, address, accountId)||[]).filter(Boolean);
-      const start = txns.length ? txns.reduce((a,b) => a.date < b.date ? a : b).date : null;
-      const end   = txns.length ? txns.reduce((a,b) => a.date > b.date ? a : b).date : null;
+      const start = allTxns.length ? allTxns.reduce((a,b) => a.date < b.date ? a : b).date : null;
+      const end   = allTxns.length ? allTxns.reduce((a,b) => a.date > b.date ? a : b).date : null;
 
-      setImportStatus(accountId, { status:'synced', totalFetched:allRaw.length, totalTxns:txns.length, startDate:start, endDate:end });
-      return { txns, totalFetched:allRaw.length };
+      setImportStatus(accountId, { status:'synced', totalFetched, totalTxns:allTxns.length, startDate:start, endDate:end });
+      return { txns:allTxns, totalFetched };
     } catch (e) {
       setImportStatus(accountId, { status:'failed', error:e.message });
       return { txns:[], error:e.message };

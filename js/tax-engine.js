@@ -1217,6 +1217,139 @@ const TaxEngine = (() => {
     }
   }
 
+  // ════════════════════════════════════════════════════════════
+  // PORTFOLIO LIVE DATA
+  // ════════════════════════════════════════════════════════════
+
+  // Fetch current USD→SEK rate from Frankfurter
+  async function fetchLiveSEKRate() {
+    try {
+      const r = await fetchWithTimeout('https://api.frankfurter.app/latest?from=USD&to=SEK', 8000);
+      if (!r || !r.ok) return null;
+      const d = await r.json();
+      return d.rates?.SEK || null;
+    } catch { return null; }
+  }
+
+  // Fetch current USD prices + 24h change for a list of asset symbols (one bulk request)
+  // Returns Map<SYMBOL, { priceUsd: number, changePercent24Hr: number }>
+  async function fetchLivePrices(symbols) {
+    const result   = new Map();
+    const toFetch  = [];
+    const idToSym  = {};
+    for (const sym of symbols) {
+      const ccId = CC_IDS[sym.toUpperCase()];
+      if (ccId) { toFetch.push(ccId); idToSym[ccId] = sym.toUpperCase(); }
+    }
+    if (!toFetch.length) return result;
+    try {
+      const url = `https://api.coincap.io/v2/assets?ids=${toFetch.join(',')}`;
+      const r   = await fetchWithTimeout(url, 10000);
+      if (!r || !r.ok) return result;
+      const data = await r.json();
+      for (const asset of (data.data || [])) {
+        const sym = idToSym[asset.id];
+        if (sym) result.set(sym, {
+          priceUsd:         parseFloat(asset.priceUsd)         || 0,
+          changePercent24Hr: parseFloat(asset.changePercent24Hr) || 0,
+        });
+      }
+    } catch {}
+    return result;
+  }
+
+  // Pure: enrich currentHoldings (from computeTaxYear) with live prices and aggregate totals
+  function buildPortfolioSnapshot(currentHoldings, livePrices, sekRate, allTxns) {
+    sekRate = sekRate || STABLE_SEK.USD; // fallback if FX fetch failed
+    let totalValueSEK     = 0;
+    let totalCostSEK      = 0;
+    let totalUnrealizedSEK = 0;
+    let fiatInvestedSEK   = 0;
+    let fiatProceedsSEK   = 0;
+    let totalFeesSEK      = 0;
+
+    const holdings = currentHoldings.map(h => {
+      const live            = livePrices.get(h.symbol);
+      const currentPriceSEK = live ? live.priceUsd * sekRate : null;
+      const currentValueSEK = currentPriceSEK != null ? currentPriceSEK * h.quantity : null;
+      const unrealizedSEK   = currentValueSEK != null ? currentValueSEK - h.totalCostSEK : null;
+      const unrealizedPct   = unrealizedSEK != null && h.totalCostSEK > 0
+                              ? (unrealizedSEK / h.totalCostSEK) * 100 : null;
+      if (currentValueSEK != null) totalValueSEK     += currentValueSEK;
+      totalCostSEK += h.totalCostSEK;
+      if (unrealizedSEK   != null) totalUnrealizedSEK += unrealizedSEK;
+      return { ...h, currentPriceSEK, currentValueSEK, unrealizedSEK, unrealizedPct,
+               changePercent24Hr: live?.changePercent24Hr ?? null };
+    });
+
+    for (const t of (allTxns || [])) {
+      if ((t.feeSEK || 0) > 0)          totalFeesSEK      += t.feeSEK;
+      if (t.category === CAT.BUY  && (t.costBasisSEK || 0) > 0) fiatInvestedSEK  += t.costBasisSEK;
+      if (t.category === CAT.SELL && (t.costBasisSEK || 0) > 0) fiatProceedsSEK += t.costBasisSEK;
+    }
+
+    return { holdings, totalValueSEK, totalCostSEK, totalUnrealizedSEK,
+             fiatInvestedSEK, fiatProceedsSEK, totalFeesSEK, sekRate,
+             fetchedAt: Date.now() };
+  }
+
+  // Build time-series of portfolio value for the chart.
+  // Replays transaction history and looks up prices from cache at each month end.
+  // Returns Array<{ date: string (YYYY-MM-DD), valueSEK: number }>
+  function buildPortfolioHistory(allTxns, priceCache) {
+    if (!allTxns?.length) return [];
+    const sorted = [...allTxns]
+      .filter(t => !t.isInternalTransfer &&
+                   t.category !== CAT.SPAM && t.category !== CAT.APPROVAL)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (!sorted.length) return [];
+
+    const hlds  = {};   // sym → quantity
+    function ens(sym) { if (!hlds[sym]) hlds[sym] = 0; }
+
+    // Collect month-end snapshots from first tx date to today
+    const first = new Date(sorted[0].date);
+    const now   = new Date();
+    const months = [];
+    const cur   = new Date(first.getFullYear(), first.getMonth(), 1);
+    while (cur <= now) { months.push(new Date(cur)); cur.setMonth(cur.getMonth()+1); }
+
+    const points = [];
+    let tIdx = 0;
+
+    for (const mStart of months) {
+      const mEnd    = new Date(mStart.getFullYear(), mStart.getMonth()+1, 0);
+      const dateStr = mEnd.toISOString().slice(0,10);
+
+      // Apply all txns up to end of month
+      while (tIdx < sorted.length && new Date(sorted[tIdx].date) <= mEnd) {
+        const t = sorted[tIdx++];
+        const sym = t.assetSymbol; if (!sym) continue;
+        ens(sym);
+        const cat = t.category;
+        if ([CAT.BUY, CAT.TRANSFER_IN, CAT.RECEIVE, CAT.INCOME].includes(cat))
+          hlds[sym] = (hlds[sym]||0) + (t.amount||0);
+        else if ([CAT.SELL, CAT.SEND, CAT.TRANSFER_OUT].includes(cat))
+          hlds[sym] = Math.max(0, (hlds[sym]||0) - (t.amount||0));
+        else if (cat === CAT.TRADE) {
+          hlds[sym] = Math.max(0, (hlds[sym]||0) - (t.amount||0));
+          if (t.inAsset && t.inAmount > 0) { ens(t.inAsset); hlds[t.inAsset] = (hlds[t.inAsset]||0) + t.inAmount; }
+        }
+      }
+
+      // Value at month end using price cache
+      let valueSEK = 0, hasPrice = false;
+      for (const [sym, qty] of Object.entries(hlds)) {
+        if (qty <= 1e-9) continue;
+        const ccId  = CC_IDS[sym]; if (!ccId) continue;
+        const price = priceCache[`${ccId}_${dateStr}`];
+        if (price > 0) { valueSEK += price * qty; hasPrice = true; }
+      }
+      if (hasPrice) points.push({ date: dateStr, valueSEK });
+    }
+    return points;
+  }
+
   // ── Utilities ─────────────────────────────────────────────
   function formatSEK(amt, d=0) {
     if (amt===null||amt===undefined||isNaN(amt)) return '—';
@@ -1264,6 +1397,8 @@ const TaxEngine = (() => {
     parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
     // Blockchain import
     importSolanaWallet, importEthWallet,
+    // Portfolio live data
+    fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory,
     // Utils
     formatSEK, formatCrypto, getAvailableTaxYears,
     isPipelineRunning: () => _pipelineRunning,

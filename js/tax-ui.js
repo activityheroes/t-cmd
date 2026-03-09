@@ -24,6 +24,11 @@ const TaxUI = (() => {
     pipelinePct:  0,
     pipelineMsg:  '',
     pipelineRunning: false,
+    // Portfolio dashboard
+    portfolioSnap:   null,   // live-price enriched snapshot
+    portfolioHist:   null,   // time-series history for chart
+    portfolioRange:  '1W',   // selected time range
+    portfolioCharts: {},     // Chart.js instances { main, alloc, perf }
   };
 
   let _pendingCSVText   = null;
@@ -41,7 +46,7 @@ const TaxUI = (() => {
     });
     TaxEngine.Events.on('pipeline:done', ({ totalTxns, reviewIssues }) => {
       S.pipelineRunning = false;
-      S.taxResult = null; // force recompute
+      S.taxResult = null; S.portfolioSnap = null; S.portfolioHist = null; // force recompute
       hidePipelineBar();
       render();
       showTaxToast('✅', 'Processing complete',
@@ -164,22 +169,42 @@ const TaxUI = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
-  // PORTFOLIO PAGE
+  // PORTFOLIO PAGE  — full dashboard with charts
   // ════════════════════════════════════════════════════════════
   function renderPortfolio() {
-    const result = getOrComputeTaxResult();
+    const result            = getOrComputeTaxResult();
     const { summary, currentHoldings } = result;
-    const issues = TaxEngine.getReviewIssues().length;
+    const issues            = TaxEngine.getReviewIssues().length;
+    const snap              = S.portfolioSnap;
+    const totalVal          = snap ? snap.totalValueSEK      : null;
+    const unrealized        = snap ? snap.totalUnrealizedSEK : null;
+    const fiatIn            = snap ? snap.fiatInvestedSEK    : null;
+    const fiatOut           = snap ? snap.fiatProceedsSEK    : null;
+    const fees              = snap ? snap.totalFeesSEK       : null;
+    const totalReturn       = snap ? (unrealized || 0) + summary.netGainLoss : null;
+    const fmtVal = v => v !== null ? TaxEngine.formatSEK(v) : '<span class="tax-port-loading-val">—</span>';
+    const fmtPct = p => p !== null
+      ? `<span class="${p>=0?'tax-port-pos':'tax-port-neg'}">${p>=0?'+':''}${p.toFixed(2)}%</span>` : '—';
+
+    // Holdings for assets table (snap-enriched if available, else raw)
+    const tableHoldings = snap ? snap.holdings : currentHoldings.map(h => ({
+      ...h, currentPriceSEK:null, currentValueSEK:null, unrealizedSEK:null,
+      unrealizedPct:null, changePercent24Hr:null,
+    }));
+    // Sort by current value desc (or cost basis if no live price)
+    const sortedHoldings = [...tableHoldings].sort((a,b) =>
+      (b.currentValueSEK ?? b.totalCostSEK) - (a.currentValueSEK ?? a.totalCostSEK));
+
+    // Trigger async chart init after DOM is painted
+    setTimeout(initPortfolioCharts, 0);
 
     return `
-      <div class="tax-page">
+      <div class="tax-page tax-page--portfolio">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Portfolio</h1>
           <span class="tax-page-subtitle">Inkomstår ${S.taxYear}</span>
           <div class="tax-page-actions">
-            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">
-              ⚙️ Recalculate
-            </button>
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Recalculate</button>
           </div>
         </div>
 
@@ -190,6 +215,65 @@ const TaxUI = (() => {
           <span class="tax-rb-link">Fix now →</span>
         </div>` : ''}
 
+        <!-- ── TOP ROW: chart + summary panel ─────────────── -->
+        <div class="tax-port-top">
+          <!-- Left: value headline + chart canvas + time range -->
+          <div class="tax-port-chart-card">
+            <div class="tax-port-value-header">
+              <div>
+                <div class="tax-port-val-label">Total value</div>
+                <div class="tax-port-val-number" id="tax-port-total-val">
+                  ${totalVal !== null ? TaxEngine.formatSEK(totalVal) : '<span class="tax-port-loading-val">Loading…</span>'}
+                </div>
+              </div>
+            </div>
+            <div class="tax-port-chart-wrap">
+              <canvas id="tax-port-chart" height="180"></canvas>
+              <div class="tax-port-chart-overlay" id="tax-port-overlay" style="display:none">Loading chart…</div>
+            </div>
+            <div class="tax-port-time-row">
+              ${['1D','1W','1M','1Y','YTD','All'].map(r=>`
+                <button class="tax-port-tb ${S.portfolioRange===r?'active':''}"
+                  onclick="TaxUI.portSetRange('${r}')">${r}</button>`).join('')}
+              <span style="flex:1"></span>
+              <span class="tax-port-legend-dot" style="background:#6366f1"></span>
+              <span class="tax-port-legend-lbl">Total value</span>
+              <span class="tax-port-legend-dot" style="background:rgba(148,163,184,0.4)"></span>
+              <span class="tax-port-legend-lbl">Net cost basis</span>
+            </div>
+          </div>
+
+          <!-- Right: summary panel -->
+          <div class="tax-port-summary-panel">
+            <div class="tax-port-sum-title">Performance</div>
+            <div class="tax-port-sum-row">
+              <span class="tax-port-sum-lbl">Total return</span>
+              <span class="tax-port-sum-val" id="tax-ps-return">${fmtVal(totalReturn)}</span>
+            </div>
+            <div class="tax-port-sum-div"></div>
+            <div class="tax-port-sum-row">
+              <span class="tax-port-sum-lbl">Unrealized gains</span>
+              <span class="tax-port-sum-val ${unrealized!==null?(unrealized>=0?'tax-port-pos':'tax-port-neg'):''}" id="tax-ps-unrealized">${fmtVal(unrealized)}</span>
+            </div>
+            <div class="tax-port-sum-div"></div>
+            <div class="tax-port-sum-row">
+              <span class="tax-port-sum-lbl">Fiat invested</span>
+              <span class="tax-port-sum-val" id="tax-ps-fiatin">${fmtVal(fiatIn)}</span>
+            </div>
+            <div class="tax-port-sum-div"></div>
+            <div class="tax-port-sum-row">
+              <span class="tax-port-sum-lbl">Fiat proceeds</span>
+              <span class="tax-port-sum-val" id="tax-ps-fiatout">${fmtVal(fiatOut)}</span>
+            </div>
+            <div class="tax-port-sum-div"></div>
+            <div class="tax-port-sum-row">
+              <span class="tax-port-sum-lbl">Fees paid</span>
+              <span class="tax-port-sum-val" id="tax-ps-fees">${fmtVal(fees)}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── STAT CARDS ──────────────────────────────────── -->
         <div class="tax-stat-grid">
           <div class="tax-stat-card">
             <div class="tax-stat-label">Holdings</div>
@@ -200,49 +284,415 @@ const TaxUI = (() => {
             <div class="tax-stat-value">${TaxEngine.formatSEK(summary.netGainLoss)}</div>
           </div>
           <div class="tax-stat-card">
-            <div class="tax-stat-label">Skatt (uppskattad 30%)</div>
+            <div class="tax-stat-label">Estimated tax (30%)</div>
             <div class="tax-stat-value tax-red">${TaxEngine.formatSEK(summary.estimatedTax)}</div>
           </div>
           <div class="tax-stat-card">
-            <div class="tax-stat-label">Transaktioner ${S.taxYear}</div>
+            <div class="tax-stat-label">Transactions ${S.taxYear}</div>
             <div class="tax-stat-value">${summary.totalTransactions.toLocaleString()}</div>
           </div>
         </div>
 
-        ${summary.netGainLoss !== 0 || summary.estimatedTax > 0 ? `
-        <div class="tax-section">
-          <div class="tax-section-header"><h2>Skattesammanfattning ${S.taxYear}</h2></div>
-          <div class="tax-gain-loss-card">
-            <div class="tax-gl-row"><span>Vinst (disposals)</span><span class="tax-green">${TaxEngine.formatSEK(summary.totalGains)}</span></div>
-            <div class="tax-gl-row"><span>Förlust (disposals)</span><span class="tax-red">−${TaxEngine.formatSEK(summary.totalLosses)}</span></div>
-            <div class="tax-gl-divider"></div>
-            <div class="tax-gl-row tax-gl-total"><span>Netto kapitalvinst</span><span class="${summary.netGainLoss>=0?'tax-green':'tax-red'}">${TaxEngine.formatSEK(summary.netGainLoss)}</span></div>
-            ${summary.deductibleLoss>0?`<div class="tax-gl-row"><span>Avdragsgill förlust (70%)</span><span class="tax-amber">−${TaxEngine.formatSEK(summary.deductibleLoss)}</span></div>`:''}
-            <div class="tax-gl-row tax-gl-highlight"><span>Uppskattad skatt 30%</span><span>${TaxEngine.formatSEK(summary.estimatedTax)}</span></div>
-            ${summary.totalIncome>0?`<div class="tax-gl-row"><span>Inkomst (staking/rewards)</span><span class="tax-amber">${TaxEngine.formatSEK(summary.totalIncome)}</span></div>`:''}
+        <!-- ── CHARTS ROW: donut + winners/losers ─────────── -->
+        <div class="tax-port-mid">
+          <div class="tax-chart-card">
+            <div class="tax-chart-card-title">Asset allocation</div>
+            <div class="tax-alloc-inner">
+              <div class="tax-alloc-donut-wrap">
+                <canvas id="tax-alloc-chart"></canvas>
+                <div class="tax-alloc-center" id="tax-alloc-center">
+                  <div class="tax-alloc-center-lbl">All assets</div>
+                  <div class="tax-alloc-center-val" id="tax-alloc-total">
+                    ${totalVal !== null ? TaxEngine.formatSEK(totalVal) : TaxEngine.formatSEK(currentHoldings.reduce((s,h)=>s+h.totalCostSEK,0))}
+                  </div>
+                </div>
+              </div>
+              <div class="tax-alloc-legend" id="tax-alloc-legend">
+                ${sortedHoldings.slice(0,8).map((h,_,arr)=>{
+                  const total = arr.reduce((s,x)=>s+(x.currentValueSEK??x.totalCostSEK),0);
+                  const val   = h.currentValueSEK ?? h.totalCostSEK;
+                  const pct   = total > 0 ? (val/total*100).toFixed(0) : 0;
+                  return `<div class="tax-alloc-row">
+                    <img class="tax-alloc-icon" src="https://assets.coincap.io/assets/icons/${h.symbol.toLowerCase()}@2x.png"
+                         onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
+                         alt="${h.symbol}">
+                    <span class="tax-asset-icon" style="display:none;font-size:9px">${h.symbol.slice(0,3)}</span>
+                    <span class="tax-alloc-sym">${h.symbol}</span>
+                    <span class="tax-alloc-pct">${pct}%</span>
+                    <span class="tax-alloc-val">${TaxEngine.formatSEK(val)}</span>
+                  </div>`;
+                }).join('')}
+                ${sortedHoldings.length > 8 ? `<div class="tax-alloc-row tax-alloc-other">
+                  <span class="tax-asset-icon" style="font-size:9px">…</span>
+                  <span class="tax-alloc-sym">Other</span>
+                  <span class="tax-alloc-pct">&lt;1%</span>
+                  <span class="tax-alloc-val">${TaxEngine.formatSEK(sortedHoldings.slice(8).reduce((s,h)=>s+(h.currentValueSEK??h.totalCostSEK),0))}</span>
+                </div>` : ''}
+              </div>
+            </div>
           </div>
-        </div>` : ''}
+          <div class="tax-chart-card">
+            <div class="tax-chart-card-title">Winners and losers</div>
+            <div class="tax-perf-wrap">
+              <canvas id="tax-perf-chart"></canvas>
+              ${!snap ? '<p class="tax-port-loading-val" style="padding:12px 0;font-size:12px">Loading prices…</p>' : ''}
+            </div>
+            ${!snap || tableHoldings.some(h=>h.unrealizedPct===null) ? `
+            <div class="tax-port-accuracy-note">
+              ⓘ Improve accuracy by categorizing transactions
+            </div>` : ''}
+          </div>
+        </div>
 
+        <!-- ── ASSETS TABLE ────────────────────────────────── -->
         <div class="tax-section">
-          <div class="tax-section-header"><h2>Innehav</h2><span class="tax-section-count">${currentHoldings.length}</span></div>
-          ${currentHoldings.length === 0
-            ? renderEmpty('Inga innehav', 'Importera transaktioner från Accounts-sidan.', '💼')
+          <div class="tax-section-header">
+            <h2>Assets</h2>
+            <input class="tax-search-input" id="tax-asset-search" placeholder="Find asset"
+              oninput="TaxUI.filterAssets(this.value)">
+          </div>
+          ${sortedHoldings.length === 0
+            ? renderEmpty('No holdings found', 'Import transactions to see your portfolio.', '💼')
             : `<div class="tax-table-wrap"><table class="tax-table">
-                <thead><tr><th>Tillgång</th><th class="ta-r">Antal</th><th class="ta-r">Snittpris (SEK)</th><th class="ta-r">Totalt anskaffningsvärde (SEK)</th></tr></thead>
-                <tbody>
-                  ${currentHoldings.map(h=>`
-                    <tr>
-                      <td><div class="tax-asset-cell"><span class="tax-asset-icon">${h.symbol.slice(0,3)}</span><span class="tax-asset-sym">${h.symbol}</span></div></td>
-                      <td class="ta-r tax-mono">${TaxEngine.formatCrypto(h.quantity)}</td>
-                      <td class="ta-r tax-mono">${TaxEngine.formatSEK(h.avgCostSEK,2)}</td>
-                      <td class="ta-r tax-mono">${TaxEngine.formatSEK(h.totalCostSEK)}</td>
-                    </tr>`).join('')}
+                <thead><tr>
+                  <th>Asset</th>
+                  <th class="ta-r">Price</th>
+                  <th class="ta-r">Cost</th>
+                  <th class="ta-r">Holdings</th>
+                  <th class="ta-r">Profit / Loss</th>
+                  <th class="ta-r">Last 24h</th>
+                </tr></thead>
+                <tbody id="tax-assets-tbody">
+                  ${sortedHoldings.map(renderAssetRow).join('')}
                 </tbody>
-              </table></div>`
+              </table></div>
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" style="margin-top:10px"
+                onclick="TaxUI.toggleSmallBalances()">Show tokens with small balances ▾</button>`
           }
         </div>
       </div>
     `;
+  }
+
+  function renderAssetRow(h) {
+    const sym    = h.symbol;
+    const price  = h.currentPriceSEK;
+    const value  = h.currentValueSEK;
+    const ugl    = h.unrealizedSEK;
+    const uglPct = h.unrealizedPct;
+    const ch24   = h.changePercent24Hr;
+    const icon   = `https://assets.coincap.io/assets/icons/${sym.toLowerCase()}@2x.png`;
+    return `<tr>
+      <td>
+        <div class="tax-asset-cell">
+          <img class="tax-alloc-icon" src="${icon}"
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="${sym}">
+          <span class="tax-asset-icon" style="display:none;font-size:9px">${sym.slice(0,3)}</span>
+          <div>
+            <div class="tax-asset-sym">${sym}</div>
+            <div class="tax-asset-name">${h.assetName || sym}</div>
+          </div>
+        </div>
+      </td>
+      <td class="ta-r tax-mono">${price !== null ? TaxEngine.formatSEK(price,2) : '<span class="tax-port-loading-val">—</span>'}</td>
+      <td class="ta-r tax-mono">${TaxEngine.formatSEK(h.totalCostSEK)}</td>
+      <td class="ta-r">
+        <div class="tax-mono">${value !== null ? TaxEngine.formatSEK(value) : '<span class="tax-port-loading-val">—</span>'}</div>
+        <div class="tax-asset-qty">${TaxEngine.formatCrypto(h.quantity)} ${sym}</div>
+      </td>
+      <td class="ta-r">
+        ${ugl !== null
+          ? `<div class="tax-mono ${ugl>=0?'tax-port-pos':'tax-port-neg'}">${ugl>=0?'+':''}${TaxEngine.formatSEK(ugl)}</div>
+             <div class="${uglPct>=0?'tax-port-pos':'tax-port-neg'}">${uglPct>=0?'+':''}${uglPct.toFixed(2)}%</div>`
+          : '<span class="tax-port-loading-val">—</span>'}
+      </td>
+      <td class="ta-r">
+        ${ch24 !== null
+          ? `<span class="tax-24h-badge ${ch24>=0?'up':'down'}">${ch24>=0?'+':''}${ch24.toFixed(2)}%</span>`
+          : '<span class="tax-port-loading-val">—</span>'}
+      </td>
+    </tr>`;
+  }
+
+  // ── Portfolio chart initialisation (async, fires after render) ───────
+  async function initPortfolioCharts() {
+    if (S.page !== 'portfolio') return;
+
+    // Destroy stale Chart.js instances before touching canvases
+    destroyPortfolioCharts();
+
+    const canvasMain  = document.getElementById('tax-port-chart');
+    const canvasAlloc = document.getElementById('tax-alloc-chart');
+    const canvasPerf  = document.getElementById('tax-perf-chart');
+    if (!canvasMain) return; // user navigated away
+
+    // If we already have a fresh snapshot (< 5 min), skip the API calls
+    const FRESH_MS = 5 * 60 * 1000;
+    const needsFetch = !S.portfolioSnap || (Date.now() - S.portfolioSnap.fetchedAt) > FRESH_MS;
+
+    if (needsFetch) {
+      const overlay = document.getElementById('tax-port-overlay');
+      if (overlay) overlay.style.display = 'flex';
+
+      const result    = getOrComputeTaxResult();
+      const allTxns   = TaxEngine.getTransactions();
+      const symbols   = result.currentHoldings.map(h => h.symbol);
+
+      // Fetch live prices and FX in parallel
+      const [livePrices, sekRate] = await Promise.all([
+        TaxEngine.fetchLivePrices(symbols),
+        TaxEngine.fetchLiveSEKRate(),
+      ]);
+
+      if (S.page !== 'portfolio') return; // navigated away during fetch
+
+      S.portfolioSnap = TaxEngine.buildPortfolioSnapshot(
+        result.currentHoldings, livePrices, sekRate, allTxns
+      );
+      S.portfolioHist = TaxEngine.buildPortfolioHistory(allTxns, TaxEngine.getPriceCache());
+
+      // Patch live values into DOM without full re-render (preserves canvas elements)
+      _patchPortfolioDOM(S.portfolioSnap, result.summary);
+      if (overlay) overlay.style.display = 'none';
+    }
+
+    // Re-check canvases — might have been removed during DOM patch
+    if (!document.getElementById('tax-port-chart')) return;
+
+    // Draw charts
+    S.portfolioCharts.main  = _drawMainChart(canvasMain,  S.portfolioHist,  S.portfolioRange);
+    S.portfolioCharts.alloc = _drawAllocChart(canvasAlloc, S.portfolioSnap);
+    S.portfolioCharts.perf  = _drawPerfChart(canvasPerf,  S.portfolioSnap);
+  }
+
+  function _patchPortfolioDOM(snap, summary) {
+    const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+    const fmt = v => TaxEngine.formatSEK(v);
+    const fmtClass = (v, id) => {
+      const el = document.getElementById(id); if (!el) return;
+      el.innerHTML = fmt(v);
+      el.className = 'tax-port-sum-val ' + (v >= 0 ? 'tax-port-pos' : 'tax-port-neg');
+    };
+    const totalReturn = (snap.totalUnrealizedSEK || 0) + (summary.netGainLoss || 0);
+    set('tax-port-total-val', fmt(snap.totalValueSEK));
+    set('tax-ps-return',      fmt(totalReturn));
+    fmtClass(snap.totalUnrealizedSEK, 'tax-ps-unrealized');
+    set('tax-ps-fiatin',  fmt(snap.fiatInvestedSEK));
+    set('tax-ps-fiatout', fmt(snap.fiatProceedsSEK));
+    set('tax-ps-fees',    fmt(snap.totalFeesSEK));
+    set('tax-alloc-total', fmt(snap.totalValueSEK));
+    // Update assets table rows
+    const tbody = document.getElementById('tax-assets-tbody');
+    if (tbody) {
+      const sorted = [...snap.holdings].sort((a,b)=>
+        (b.currentValueSEK??b.totalCostSEK)-(a.currentValueSEK??a.totalCostSEK));
+      tbody.innerHTML = sorted.map(renderAssetRow).join('');
+    }
+  }
+
+  function _drawMainChart(canvas, hist, range) {
+    if (!hist?.length || typeof Chart === 'undefined') return null;
+    const now = new Date();
+    const cutoff = { '1D':1, '1W':7, '1M':30, '3M':90, '1Y':365, 'YTD':null, 'All':99999 };
+    const days = cutoff[range] ?? 99999;
+    let filtered = hist;
+    if (range === 'YTD') {
+      filtered = hist.filter(p => p.date >= `${now.getFullYear()}-01-01`);
+    } else if (days < 99999) {
+      const from = new Date(now); from.setDate(from.getDate() - days);
+      const fromStr = from.toISOString().slice(0,10);
+      filtered = hist.filter(p => p.date >= fromStr);
+    }
+    if (!filtered.length) filtered = hist.slice(-3); // show last few if range is too short
+
+    const labels = filtered.map(p => {
+      const d = new Date(p.date);
+      return d.toLocaleDateString('sv-SE', { month:'short', year: filtered.length > 24 ? '2-digit' : undefined });
+    });
+    const values  = filtered.map(p => p.valueSEK);
+    const costPts = filtered.map(() => null); // placeholder for cost basis series
+
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createLinearGradient(0, 0, 0, 200);
+    grad.addColorStop(0,   'rgba(99,102,241,0.35)');
+    grad.addColorStop(1,   'rgba(99,102,241,0)');
+
+    return new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Total value',
+          data: values,
+          borderColor: '#6366f1',
+          backgroundColor: grad,
+          fill: true,
+          tension: 0.4,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          pointHoverBackgroundColor: '#6366f1',
+          borderWidth: 2,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode:'index', intersect:false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1e293b',
+            titleColor: '#94a3b8',
+            bodyColor: '#f1f5f9',
+            borderColor: 'rgba(99,102,241,0.3)',
+            borderWidth: 1,
+            callbacks: {
+              label: ctx => ' ' + TaxEngine.formatSEK(ctx.parsed.y),
+            },
+          },
+        },
+        scales: {
+          x: { grid:{ display:false }, ticks:{ color:'#64748b', maxTicksLimit:8, font:{size:11} }, border:{display:false} },
+          y: { grid:{ color:'rgba(255,255,255,0.04)' }, ticks:{ color:'#64748b', font:{size:11},
+               callback: v => TaxEngine.formatSEK(v,0) }, border:{display:false} },
+        },
+      },
+    });
+  }
+
+  // Colour palette matching the dark design
+  const ALLOC_COLORS = ['#6366f1','#8b5cf6','#a78bfa','#c4b5fd','#e0d9ff',
+                        '#4f46e5','#7c3aed','#9333ea','#a855f7','#c084fc'];
+
+  function _drawAllocChart(canvas, snap) {
+    if (!canvas || !snap || typeof Chart === 'undefined') return null;
+    const holdings = [...snap.holdings]
+      .filter(h => (h.currentValueSEK ?? h.totalCostSEK) > 0)
+      .sort((a,b) => (b.currentValueSEK??b.totalCostSEK) - (a.currentValueSEK??a.totalCostSEK));
+    if (!holdings.length) return null;
+
+    const top    = holdings.slice(0, 8);
+    const others = holdings.slice(8);
+    const labels = [...top.map(h => h.symbol), ...(others.length ? ['Other'] : [])];
+    const values = [...top.map(h => h.currentValueSEK ?? h.totalCostSEK),
+                    ...(others.length ? [others.reduce((s,h)=>s+(h.currentValueSEK??h.totalCostSEK),0)] : [])];
+
+    return new Chart(canvas, {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{ data: values, backgroundColor: ALLOC_COLORS, borderWidth: 2,
+                     borderColor: '#111827', hoverBorderColor: '#1e293b' }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: true,
+        cutout: '68%',
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1e293b', titleColor:'#94a3b8', bodyColor:'#f1f5f9',
+            borderColor:'rgba(99,102,241,0.3)', borderWidth:1,
+            callbacks: {
+              label: ctx => {
+                const total = ctx.dataset.data.reduce((a,b)=>a+b, 0);
+                const pct   = ((ctx.parsed / total) * 100).toFixed(1);
+                return ` ${TaxEngine.formatSEK(ctx.parsed)}  (${pct}%)`;
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  function _drawPerfChart(canvas, snap) {
+    if (!canvas || !snap || typeof Chart === 'undefined') return null;
+    const withPct = snap.holdings
+      .filter(h => h.unrealizedPct !== null)
+      .sort((a,b) => (b.unrealizedPct||0) - (a.unrealizedPct||0));
+    const top = withPct.slice(0, 5);
+    const bot = withPct.slice(-Math.min(4, withPct.length - top.length)).reverse();
+    const items = [...new Map([...top,...bot].map(h=>[h.symbol,h])).values()];
+    if (!items.length) return null;
+
+    const labels = items.map(h => h.symbol);
+    const values = items.map(h => h.unrealizedPct ?? 0);
+    const colors = values.map(v => v >= 0 ? 'rgba(74,222,128,0.8)' : 'rgba(248,113,113,0.8)');
+
+    return new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{ data: values, backgroundColor: colors, borderRadius: 4, borderWidth: 0 }],
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1e293b', titleColor:'#94a3b8', bodyColor:'#f1f5f9',
+            borderColor:'rgba(99,102,241,0.3)', borderWidth:1,
+            callbacks: {
+              label: ctx => ` ${ctx.parsed.x >= 0 ? '+' : ''}${ctx.parsed.x.toFixed(2)}%`,
+            },
+          },
+        },
+        scales: {
+          x: { grid:{ color:'rgba(255,255,255,0.04)' }, ticks:{ color:'#64748b', font:{size:11},
+               callback: v => `${v >= 0 ? '+' : ''}${v.toFixed(0)}%` }, border:{display:false} },
+          y: { grid:{ display:false }, ticks:{ color:'#94a3b8', font:{size:12} }, border:{display:false} },
+        },
+      },
+    });
+  }
+
+  function destroyPortfolioCharts() {
+    Object.values(S.portfolioCharts).forEach(c => { try { c?.destroy(); } catch {} });
+    S.portfolioCharts = {};
+  }
+
+  function portSetRange(range) {
+    S.portfolioRange = range;
+    // Redraw only the main chart if it exists
+    destroyPortfolioCharts();
+    const c = document.getElementById('tax-port-chart');
+    if (c && S.portfolioHist) {
+      S.portfolioCharts.main  = _drawMainChart(c, S.portfolioHist, range);
+    }
+    const ca = document.getElementById('tax-alloc-chart');
+    if (ca && S.portfolioSnap) S.portfolioCharts.alloc = _drawAllocChart(ca, S.portfolioSnap);
+    const cp = document.getElementById('tax-perf-chart');
+    if (cp && S.portfolioSnap) S.portfolioCharts.perf  = _drawPerfChart(cp,  S.portfolioSnap);
+    // Update active button styles
+    document.querySelectorAll('.tax-port-tb').forEach(b => {
+      b.classList.toggle('active', b.textContent.trim() === range);
+    });
+  }
+
+  function filterAssets(query) {
+    const q     = (query || '').toLowerCase();
+    const tbody = document.getElementById('tax-assets-tbody');
+    if (!tbody) return;
+    tbody.querySelectorAll('tr').forEach(row => {
+      const text = row.textContent.toLowerCase();
+      row.style.display = !q || text.includes(q) ? '' : 'none';
+    });
+  }
+
+  let _showSmallBalances = false;
+  function toggleSmallBalances() {
+    _showSmallBalances = !_showSmallBalances;
+    const THRESHOLD_SEK = 10;
+    const tbody = document.getElementById('tax-assets-tbody');
+    if (!tbody) return;
+    tbody.querySelectorAll('tr').forEach(row => {
+      const costCell = row.cells[2];
+      if (!costCell) return;
+      // parse SEK value from cost column
+      const raw = costCell.textContent.replace(/[^\d,.]/g,'').replace(',','.');
+      const val = parseFloat(raw) || 0;
+      if (val < THRESHOLD_SEK) row.style.display = _showSmallBalances ? '' : 'none';
+    });
   }
 
   // ════════════════════════════════════════════════════════════
@@ -1063,7 +1513,11 @@ const TaxUI = (() => {
   // ── Event binding ─────────────────────────────────────────
   function bindEvents() {
     document.querySelectorAll('.tax-nav-item').forEach(btn => {
-      btn.addEventListener('click', () => { S.page=btn.dataset.page; render(); });
+      btn.addEventListener('click', () => {
+        if (btn.dataset.page !== 'portfolio') destroyPortfolioCharts();
+        S.page = btn.dataset.page;
+        render();
+      });
     });
     const yp = document.getElementById('tax-year-picker');
     if (yp) yp.addEventListener('change', () => {
@@ -1097,7 +1551,11 @@ const TaxUI = (() => {
     render();
   }
 
-  function navigate(page) { S.page=page; render(); }
+  function navigate(page) {
+    if (page !== 'portfolio') destroyPortfolioCharts();
+    S.page = page;
+    render();
+  }
 
   // ── Public ────────────────────────────────────────────────
   return {
@@ -1109,6 +1567,8 @@ const TaxUI = (() => {
     editTx, closeEdit, saveEdit, deleteTx,
     markReviewed, markAllReviewed, removeAccount,
     downloadK4CSV, printReport,
+    // Portfolio dashboard
+    portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns
     filterTxns, sortTxnsArr: txns => sortTxnsArr(txns),
   };

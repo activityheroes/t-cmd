@@ -319,13 +319,19 @@
 .tax-page--portfolio .tax-table-wrap::-webkit-scrollbar-thumb:hover {
   background: rgba(255,255,255,0.22);
 }
-/* Sticky column headers so they stay visible while scrolling */
+/* border-collapse:collapse breaks position:sticky in all browsers.
+   Switch to separate + border-spacing:0 (visually identical) so sticky works. */
+.tax-page--portfolio .tax-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+/* Sticky column headers — applied to th, not thead */
 .tax-page--portfolio .tax-table thead th {
   position: sticky;
   top: 0;
-  z-index: 1;
-  background: var(--bg-card, #111827);
-  box-shadow: 0 1px 0 rgba(255,255,255,0.06);
+  z-index: 2;
+  background: #0d1424;   /* slightly darker than card bg so rows don't bleed through */
+  box-shadow: 0 1px 0 rgba(255,255,255,0.08);
 }
 
 .tax-table {

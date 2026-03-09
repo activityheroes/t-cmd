@@ -451,6 +451,12 @@ const TaxUI = (() => {
       );
       S.portfolioHist = TaxEngine.buildPortfolioHistory(allTxns, TaxEngine.getPriceCache());
 
+      // Fallback: if no cached prices found for user's holdings, use cost-basis history
+      // (always computable from transaction data — no external prices needed)
+      if (!S.portfolioHist?.length) {
+        S.portfolioHist = TaxEngine.buildCostBasisHistory(allTxns);
+      }
+
       // Patch live values into DOM without full re-render (preserves canvas elements)
       _patchPortfolioDOM(S.portfolioSnap, result.summary);
       if (overlay) overlay.style.display = 'none';
@@ -458,6 +464,12 @@ const TaxUI = (() => {
 
     // Re-check canvases — might have been removed during DOM patch
     if (!document.getElementById('tax-port-chart')) return;
+
+    // Safety: if hist still empty (e.g. data loaded from cache but no prices), use cost basis
+    if (!S.portfolioHist?.length) {
+      const allTxns2 = TaxEngine.getTransactions();
+      S.portfolioHist = TaxEngine.buildCostBasisHistory(allTxns2);
+    }
 
     // Draw charts
     S.portfolioCharts.main  = _drawMainChart(canvasMain,  S.portfolioHist,  S.portfolioRange);
@@ -492,6 +504,13 @@ const TaxUI = (() => {
 
   function _drawMainChart(canvas, hist, range) {
     if (!hist?.length || typeof Chart === 'undefined') return null;
+
+    // Ensure canvas has a CSS height so Chart.js can measure the container correctly.
+    // Without this, responsive mode may read 0px height when the parent flex height
+    // isn't resolved yet.
+    if (!canvas.style.height) canvas.style.height = '200px';
+
+    const isCostBasis = !!(hist[0]?.isCostBasis); // true when using fallback history
     const now = new Date();
     const cutoff = { '1D':1, '1W':7, '1M':30, '3M':90, '1Y':365, 'YTD':null, 'All':99999 };
     const days = cutoff[range] ?? 99999;
@@ -510,27 +529,29 @@ const TaxUI = (() => {
       return d.toLocaleDateString('sv-SE', { month:'short', year: filtered.length > 24 ? '2-digit' : undefined });
     });
     const values  = filtered.map(p => p.valueSEK);
-    const costPts = filtered.map(() => null); // placeholder for cost basis series
 
     const ctx = canvas.getContext('2d');
+    // Use teal tint for cost-basis fallback, indigo for live values
+    const lineColor = isCostBasis ? '#2dd4bf' : '#6366f1';
+    const gradTop   = isCostBasis ? 'rgba(45,212,191,0.30)' : 'rgba(99,102,241,0.35)';
     const grad = ctx.createLinearGradient(0, 0, 0, 200);
-    grad.addColorStop(0,   'rgba(99,102,241,0.35)');
-    grad.addColorStop(1,   'rgba(99,102,241,0)');
+    grad.addColorStop(0, gradTop);
+    grad.addColorStop(1, isCostBasis ? 'rgba(45,212,191,0)' : 'rgba(99,102,241,0)');
 
     return new Chart(canvas, {
       type: 'line',
       data: {
         labels,
         datasets: [{
-          label: 'Total value',
+          label: isCostBasis ? 'Cost basis (no price data)' : 'Total value',
           data: values,
-          borderColor: '#6366f1',
+          borderColor: lineColor,
           backgroundColor: grad,
           fill: true,
           tension: 0.4,
           pointRadius: 0,
           pointHoverRadius: 5,
-          pointHoverBackgroundColor: '#6366f1',
+          pointHoverBackgroundColor: lineColor,
           borderWidth: 2,
         }],
       },

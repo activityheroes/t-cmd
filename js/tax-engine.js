@@ -1350,6 +1350,71 @@ const TaxEngine = (() => {
     return points;
   }
 
+  // Build cost-basis time-series for the chart — no price cache needed.
+  // Uses transaction costBasisSEK to replay cumulative holdings value month by month.
+  // Falls back to this when buildPortfolioHistory returns nothing (e.g. unknown tokens).
+  // Returns Array<{ date: string (YYYY-MM-DD), valueSEK: number, isCostBasis: true }>
+  function buildCostBasisHistory(allTxns) {
+    if (!allTxns?.length) return [];
+    const sorted = [...allTxns]
+      .filter(t => !t.isInternalTransfer &&
+                   t.category !== CAT.SPAM && t.category !== CAT.APPROVAL)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (!sorted.length) return [];
+
+    // Track average-cost per symbol: { qty, totalCostSEK }
+    const hlds = {};
+    function ens(sym) { if (!hlds[sym]) hlds[sym] = { qty: 0, totalCostSEK: 0 }; }
+
+    const first = new Date(sorted[0].date);
+    const now   = new Date();
+    const cur   = new Date(first.getFullYear(), first.getMonth(), 1);
+    const months = [];
+    while (cur <= now) { months.push(new Date(cur)); cur.setMonth(cur.getMonth() + 1); }
+
+    const points = [];
+    let tIdx = 0;
+
+    for (const mStart of months) {
+      const mEnd    = new Date(mStart.getFullYear(), mStart.getMonth() + 1, 0);
+      const dateStr = mEnd.toISOString().slice(0, 10);
+
+      // Replay all txns up to month end
+      while (tIdx < sorted.length && new Date(sorted[tIdx].date) <= mEnd) {
+        const t   = sorted[tIdx++];
+        const sym = t.assetSymbol; if (!sym) continue;
+        ens(sym);
+        const cost = t.costBasisSEK || 0;
+        const cat  = t.category;
+        if ([CAT.BUY, CAT.TRANSFER_IN, CAT.RECEIVE, CAT.INCOME].includes(cat)) {
+          hlds[sym].qty          += (t.amount || 0);
+          hlds[sym].totalCostSEK += cost;
+        } else if ([CAT.SELL, CAT.SEND, CAT.TRANSFER_OUT].includes(cat)) {
+          const qty    = hlds[sym].qty;
+          const remove = Math.min(t.amount || 0, qty);
+          const avg    = qty > 0 ? hlds[sym].totalCostSEK / qty : 0;
+          hlds[sym].qty          = Math.max(0, qty - remove);
+          hlds[sym].totalCostSEK = Math.max(0, hlds[sym].totalCostSEK - avg * remove);
+        } else if (cat === CAT.TRADE) {
+          const qty    = hlds[sym].qty;
+          const remove = Math.min(t.amount || 0, qty);
+          const avg    = qty > 0 ? hlds[sym].totalCostSEK / qty : 0;
+          hlds[sym].qty          = Math.max(0, qty - remove);
+          hlds[sym].totalCostSEK = Math.max(0, hlds[sym].totalCostSEK - avg * remove);
+          if (t.inAsset && t.inAmount > 0) {
+            ens(t.inAsset);
+            hlds[t.inAsset].qty          += t.inAmount;
+            hlds[t.inAsset].totalCostSEK += cost;
+          }
+        }
+      }
+
+      const totalCostSEK = Object.values(hlds).reduce((s, h) => s + (h.totalCostSEK || 0), 0);
+      if (totalCostSEK > 0) points.push({ date: dateStr, valueSEK: totalCostSEK, isCostBasis: true });
+    }
+    return points;
+  }
+
   // ── Utilities ─────────────────────────────────────────────
   function formatSEK(amt, d=0) {
     if (amt===null||amt===undefined||isNaN(amt)) return '—';
@@ -1398,7 +1463,7 @@ const TaxEngine = (() => {
     // Blockchain import
     importSolanaWallet, importEthWallet,
     // Portfolio live data
-    fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory,
+    fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory, buildCostBasisHistory,
     // Utils
     formatSEK, formatCrypto, getAvailableTaxYears,
     isPipelineRunning: () => _pipelineRunning,

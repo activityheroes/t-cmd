@@ -332,15 +332,16 @@ const TaxUI = (() => {
             </div>
           </div>
           <div class="tax-chart-card">
-            <div class="tax-chart-card-title">Winners and losers</div>
+            <div class="tax-chart-card-title" id="tax-perf-title">Winners and losers</div>
             <div class="tax-perf-wrap">
               <canvas id="tax-perf-chart"></canvas>
-              ${!snap ? '<p class="tax-port-loading-val" style="padding:12px 0;font-size:12px">Loading prices…</p>' : ''}
+              <p id="tax-perf-loading" class="tax-port-loading-val"
+                 style="padding:12px 0;font-size:12px;${snap ? 'display:none' : ''}">Loading prices…</p>
             </div>
-            ${!snap || tableHoldings.some(h=>h.unrealizedPct===null) ? `
-            <div class="tax-port-accuracy-note">
+            <div id="tax-perf-note" class="tax-port-accuracy-note"
+                 style="${snap && !tableHoldings.some(h=>h.unrealizedPct===null) ? 'display:none' : ''}">
               ⓘ Improve accuracy by categorizing transactions
-            </div>` : ''}
+            </div>
           </div>
         </div>
 
@@ -540,6 +541,10 @@ const TaxUI = (() => {
     const valLabelEl = document.querySelector('.tax-port-val-label');
     if (valLabelEl) valLabelEl.textContent = hasLivePrices ? 'TOTAL VALUE' : 'COST BASIS';
 
+    // Clear the "Loading prices…" spinner and accuracy note in the perf chart area
+    const perfLoading = document.getElementById('tax-perf-loading');
+    if (perfLoading) perfLoading.style.display = 'none';
+
     set('tax-port-total-val', fmt(displayTotalSEK));
     set('tax-ps-return',      fmt(totalReturn));
     fmtClass(snap.totalUnrealizedSEK, 'tax-ps-unrealized');
@@ -681,15 +686,80 @@ const TaxUI = (() => {
 
   function _drawPerfChart(canvas, snap) {
     if (!canvas || !snap || typeof Chart === 'undefined') return null;
+
+    // Ensure canvas has a measurable height before Chart.js reads it.
+    // Without this, maintainAspectRatio:false + flex parent = 0px canvas.
+    if (!canvas.style.height) canvas.style.height = '200px';
+
     const withPct = snap.holdings
       .filter(h => h.unrealizedPct !== null)
       .sort((a,b) => (b.unrealizedPct||0) - (a.unrealizedPct||0));
-    const top = withPct.slice(0, 5);
-    const bot = withPct.slice(-Math.min(4, withPct.length - top.length)).reverse();
-    const items = [...new Map([...top,...bot].map(h=>[h.symbol,h])).values()];
-    if (!items.length) return null;
 
-    const labels = items.map(h => h.symbol);
+    // ── Fallback: no live prices available ───────────────────
+    // Show top holdings by % of total invested cost so the chart is always
+    // useful even when CoinCap can't price the user's tokens.
+    if (!withPct.length) {
+      const titleEl = document.getElementById('tax-perf-title');
+      if (titleEl) titleEl.textContent = 'Top holdings by cost';
+      const noteEl  = document.getElementById('tax-perf-note');
+      if (noteEl)  noteEl.textContent = 'ⓘ Live prices unavailable — showing cost basis allocation';
+
+      const byBasis = [...snap.holdings]
+        .filter(h => h.totalCostSEK > 0)
+        .sort((a,b) => b.totalCostSEK - a.totalCostSEK)
+        .slice(0, 8);
+      if (!byBasis.length) return null;
+
+      const total  = byBasis.reduce((s,h) => s + h.totalCostSEK, 0);
+      const labels = byBasis.map(h => {
+        const td = TaxEngine.resolveTokenDisplay(h.symbol);
+        return td.symbol || h.symbol;
+      });
+      const values = byBasis.map(h => parseFloat((h.totalCostSEK / total * 100).toFixed(1)));
+
+      return new Chart(canvas, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{ data: values, backgroundColor: 'rgba(99,102,241,0.75)',
+                       borderRadius: 4, borderWidth: 0 }],
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1e293b', titleColor:'#94a3b8', bodyColor:'#f1f5f9',
+              borderColor:'rgba(99,102,241,0.3)', borderWidth:1,
+              callbacks: {
+                label: ctx => {
+                  const h = byBasis[ctx.dataIndex];
+                  return ` ${ctx.parsed.x}%  (${TaxEngine.formatSEK(h.totalCostSEK)})`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: { grid:{ color:'rgba(255,255,255,0.04)' }, ticks:{ color:'#64748b', font:{size:11},
+                 callback: v => `${v}%` }, border:{display:false}, max: 100 },
+            y: { grid:{ display:false }, ticks:{ color:'#94a3b8', font:{size:12} }, border:{display:false} },
+          },
+        },
+      });
+    }
+
+    // ── Live-price path: show unrealized P/L % winners and losers ─
+    const titleEl = document.getElementById('tax-perf-title');
+    if (titleEl) titleEl.textContent = 'Winners and losers';
+    const noteEl  = document.getElementById('tax-perf-note');
+    if (noteEl)  noteEl.style.display = withPct.every(h => h.unrealizedPct !== null) ? 'none' : '';
+
+    const top   = withPct.slice(0, 5);
+    const bot   = withPct.slice(-Math.min(4, Math.max(0, withPct.length - top.length))).reverse();
+    const items = [...new Map([...top, ...bot].map(h => [h.symbol, h])).values()];
+
+    const labels = items.map(h => { const td = TaxEngine.resolveTokenDisplay(h.symbol); return td.symbol || h.symbol; });
     const values = items.map(h => h.unrealizedPct ?? 0);
     const colors = values.map(v => v >= 0 ? 'rgba(74,222,128,0.8)' : 'rgba(248,113,113,0.8)');
 

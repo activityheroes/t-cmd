@@ -98,9 +98,81 @@ const TaxEngine = (() => {
   }
   function getImportStatus(accountId) { return getImportStatuses()[accountId] || { status:'never_synced' }; }
 
-  // ── Transactions ──────────────────────────────────────────
-  function getTransactions() { try { return JSON.parse(localStorage.getItem(LS.TRANSACTIONS)||'[]'); } catch { return []; } }
-  function saveTransactions(txns) { localStorage.setItem(LS.TRANSACTIONS, JSON.stringify(txns)); }
+  // ── IndexedDB helpers (no 5 MB quota limit) ───────────────
+  const IDB_NAME    = 'tcmd_tax';
+  const IDB_STORE   = 'transactions';
+  const IDB_VERSION = 1;
+
+  function idbOpen() {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE))
+          db.createObjectStore(IDB_STORE, { keyPath: 'id' });
+      };
+      req.onsuccess = e => res(e.target.result);
+      req.onerror   = e => rej(e.target.error);
+    });
+  }
+
+  async function idbSaveAll(txns) {
+    try {
+      const db    = await idbOpen();
+      const tx    = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      store.clear();
+      for (const t of txns) store.put(t);
+      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+    } catch (e) {
+      // Fallback: try localStorage (may fail for large datasets)
+      console.warn('[TaxEngine] IDB write failed, trying localStorage:', e.message);
+      try { localStorage.setItem(LS.TRANSACTIONS, JSON.stringify(txns)); } catch {}
+    }
+  }
+
+  async function idbLoadAll() {
+    try {
+      const db    = await idbOpen();
+      const tx    = db.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      return await new Promise((res, rej) => {
+        const req = store.getAll();
+        req.onsuccess = () => res(req.result || []);
+        req.onerror   = () => rej(req.error);
+      });
+    } catch (e) {
+      console.warn('[TaxEngine] IDB read failed, falling back to localStorage:', e.message);
+      try { return JSON.parse(localStorage.getItem(LS.TRANSACTIONS)||'[]'); } catch { return []; }
+    }
+  }
+
+  // ── Transactions (in-memory cache backed by IndexedDB) ────
+  let _txCache = null;  // null = not yet loaded
+
+  function getTransactions() { return _txCache || []; }
+
+  function saveTransactions(txns) {
+    _txCache = txns;
+    idbSaveAll(txns).catch(e => console.warn('[TaxEngine] saveTransactions error:', e));
+  }
+
+  async function loadTransactions() {
+    if (_txCache !== null) return;  // already loaded
+    _txCache = await idbLoadAll();
+    // One-time migration: if IDB is empty, check localStorage
+    if (!_txCache.length) {
+      try {
+        const raw = localStorage.getItem(LS.TRANSACTIONS);
+        if (raw) {
+          _txCache = JSON.parse(raw);
+          await idbSaveAll(_txCache);
+          localStorage.removeItem(LS.TRANSACTIONS);  // free up space
+          console.log('[TaxEngine] Migrated', _txCache.length, 'transactions from localStorage to IDB');
+        }
+      } catch {}
+    }
+  }
 
   function addTransactions(newTxns) {
     const existing = getTransactions();
@@ -121,6 +193,9 @@ const TaxEngine = (() => {
 
   // ── Normalise raw → standard transaction ─────────────────
   function normalizeTransaction(raw, accountId, source) {
+    // Promote rawType from the source record so classification works
+    // after storage reload without needing the full raw object.
+    const rawType = (raw.type || raw.side || raw.category || raw.transactionType || '').toLowerCase();
     return {
       id:             raw.id || mkId(),
       accountId,
@@ -143,7 +218,7 @@ const TaxEngine = (() => {
       needsReview:    raw.needsReview !== undefined ? raw.needsReview : true,
       reviewReason:   raw.reviewReason || null,
       notes:          raw.notes || '',
-      _raw:           raw,
+      rawType,        // stored for re-classification; no full _raw object saved
     };
   }
 
@@ -175,8 +250,7 @@ const TaxEngine = (() => {
   }
 
   function detectCategory(t) {
-    const raw     = t._raw || {};
-    const rawType = (raw.type || raw.side || raw.category || raw.transactionType || '').toLowerCase();
+    const rawType = (t.rawType || '').toLowerCase();
     const sym     = (t.assetSymbol || '').toUpperCase();
     const notes   = (t.notes || '').toLowerCase();
     const amount  = t.amount || 0;
@@ -1089,6 +1163,7 @@ const TaxEngine = (() => {
     getAccounts, addAccount, removeAccount, updateAccount,
     getImportStatus, setImportStatus,
     // Transactions
+    loadTransactions,
     getTransactions, saveTransactions, addTransactions,
     deleteTransaction, updateTransaction,
     normalizeTransaction,

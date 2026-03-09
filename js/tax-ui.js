@@ -375,22 +375,32 @@ const TaxUI = (() => {
   }
 
   function renderAssetRow(h) {
-    const sym    = h.symbol;
+    // Resolve the best available display name for the symbol.
+    // Priority: (1) h.assetName set by async DexScreener lookup or static map,
+    //           (2) resolveTokenDisplay static lookup, (3) raw symbol as fallback.
+    const td         = TaxEngine.resolveTokenDisplay(h.symbol);
+    const displaySym = td.symbol || h.symbol;  // may be "JUP" instead of "JUPYIWRY"
+    const resolvedName = h.assetName && h.assetName !== h.symbol
+                         ? h.assetName      // already enriched (from engine or async lookup)
+                         : (td.name || null); // static map hit
+    const displayName  = resolvedName || displaySym; // fallback to symbol if truly unknown
+
     const price  = h.currentPriceSEK;
     const value  = h.currentValueSEK;
     const ugl    = h.unrealizedSEK;
     const uglPct = h.unrealizedPct;
     const ch24   = h.changePercent24Hr;
-    const icon   = `https://assets.coincap.io/assets/icons/${sym.toLowerCase()}@2x.png`;
+    // Use resolved (clean) symbol for the CoinCap icon URL
+    const icon   = `https://assets.coincap.io/assets/icons/${displaySym.toLowerCase()}@2x.png`;
     return `<tr>
       <td>
         <div class="tax-asset-cell">
           <img class="tax-alloc-icon" src="${icon}"
-               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="${sym}">
-          <span class="tax-asset-icon" style="display:none;font-size:9px">${sym.slice(0,3)}</span>
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="${displaySym}">
+          <span class="tax-asset-icon" style="display:none;font-size:9px">${displaySym.slice(0,3)}</span>
           <div>
-            <div class="tax-asset-sym">${sym}</div>
-            <div class="tax-asset-name">${h.assetName || sym}</div>
+            <div class="tax-asset-sym">${displayName}</div>
+            <div class="tax-asset-name">${displaySym}</div>
           </div>
         </div>
       </td>
@@ -398,7 +408,7 @@ const TaxUI = (() => {
       <td class="ta-r tax-mono">${TaxEngine.formatSEK(h.totalCostSEK)}</td>
       <td class="ta-r">
         <div class="tax-mono">${value !== null ? TaxEngine.formatSEK(value) : '<span class="tax-port-loading-val">—</span>'}</div>
-        <div class="tax-asset-qty">${TaxEngine.formatCrypto(h.quantity)} ${sym}</div>
+        <div class="tax-asset-qty">${TaxEngine.formatCrypto(h.quantity)} ${displaySym}</div>
       </td>
       <td class="ta-r">
         ${ugl !== null
@@ -475,6 +485,41 @@ const TaxUI = (() => {
     S.portfolioCharts.main  = _drawMainChart(canvasMain,  S.portfolioHist,  S.portfolioRange);
     S.portfolioCharts.alloc = _drawAllocChart(canvasAlloc, S.portfolioSnap);
     S.portfolioCharts.perf  = _drawPerfChart(canvasPerf,  S.portfolioSnap);
+
+    // Async: look up human-readable names for any holdings still showing
+    // raw mint-prefix symbols (e.g. "A2CAQTDE") via DexScreener (cached 7 days).
+    if (S.portfolioSnap) {
+      const unknownSyms = S.portfolioSnap.holdings
+        .filter(h => !h.assetName || h.assetName === h.symbol)
+        .map(h => h.symbol);
+      if (unknownSyms.length) {
+        TaxEngine.resolveUnknownTokenNames(unknownSyms).then(nameCache => {
+          if (S.page !== 'portfolio' || !S.portfolioSnap) return;
+          let changed = false;
+          S.portfolioSnap.holdings = S.portfolioSnap.holdings.map(h => {
+            const entry = nameCache[(h.symbol || '').toUpperCase()];
+            if (entry?.name && entry.name !== h.assetName) {
+              changed = true;
+              return { ...h,
+                symbol:    entry.symbol || h.symbol,
+                assetName: entry.name,
+              };
+            }
+            return h;
+          });
+          if (changed) {
+            // Re-render just the assets table (no chart flicker)
+            const tbody = document.getElementById('tax-assets-tbody');
+            if (tbody) {
+              const sorted = [...S.portfolioSnap.holdings].sort(
+                (a,b) => (b.currentValueSEK??b.totalCostSEK) - (a.currentValueSEK??a.totalCostSEK)
+              );
+              tbody.innerHTML = sorted.map(renderAssetRow).join('');
+            }
+          }
+        }).catch(() => {});
+      }
+    }
   }
 
   function _patchPortfolioDOM(snap, summary) {

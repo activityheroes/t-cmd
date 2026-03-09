@@ -1623,6 +1623,257 @@
   padding-top: 14px;
 }
 
+/* ══════════════════════════════════════════════════════════
+   Portfolio Dashboard v2
+   ══════════════════════════════════════════════════════════ */
+
+/* ── Top row: chart area + summary panel ─────────────────── */
+.tax-port-top {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+  align-items: stretch;
+}
+
+.tax-port-chart-card {
+  flex: 0 0 65%;
+  background: var(--bg-card, #111827);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  padding: 20px 24px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tax-port-summary-panel {
+  flex: 1;
+  background: var(--bg-card, #111827);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* value headline inside chart card */
+.tax-port-val-label {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  margin-bottom: 2px;
+}
+.tax-port-val-number {
+  font-size: 26px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary, #f1f5f9);
+}
+
+/* chart canvas wrapper */
+.tax-port-chart-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 180px;
+}
+.tax-port-chart-wrap canvas {
+  width: 100% !important;
+}
+.tax-port-chart-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+  background: rgba(17,24,39,0.7);
+  border-radius: 6px;
+}
+
+/* time range buttons */
+.tax-port-time-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tax-port-tb {
+  background: none;
+  border: none;
+  color: var(--text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.tax-port-tb:hover  { background: rgba(255,255,255,0.06); color: #f1f5f9; }
+.tax-port-tb.active { background: rgba(99,102,241,0.15); color: #818cf8; }
+.tax-port-legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 8px; }
+.tax-port-legend-lbl { font-size: 11px; color: var(--text-muted, #64748b); margin-right: 4px; }
+
+/* right summary panel */
+.tax-port-sum-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted, #64748b);
+  margin-bottom: 14px;
+}
+.tax-port-sum-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+}
+.tax-port-sum-lbl {
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+}
+.tax-port-sum-val {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary, #f1f5f9);
+  text-align: right;
+}
+.tax-port-sum-div { height: 1px; background: rgba(255,255,255,0.05); }
+
+/* positive / negative colour tokens */
+.tax-port-pos { color: #4ade80 !important; }
+.tax-port-neg { color: #f87171 !important; }
+
+/* loading placeholder value */
+.tax-port-loading-val { color: var(--text-muted, #64748b); font-size: 0.9em; }
+
+/* ── Charts row: donut + performance bar ──────────────────── */
+.tax-port-mid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.tax-chart-card {
+  background: var(--bg-card, #111827);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.tax-chart-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #f1f5f9);
+}
+
+/* Donut layout */
+.tax-alloc-inner {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.tax-alloc-donut-wrap {
+  position: relative;
+  width: 160px;
+  min-width: 160px;
+  height: 160px;
+  flex-shrink: 0;
+}
+.tax-alloc-donut-wrap canvas {
+  width: 160px !important;
+  height: 160px !important;
+}
+.tax-alloc-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.tax-alloc-center-lbl { font-size: 10px; color: var(--text-muted, #64748b); }
+.tax-alloc-center-val { font-size: 12px; font-weight: 700; font-family: var(--font-mono, monospace); color: var(--text-primary, #f1f5f9); text-align: center; margin-top: 2px; }
+
+/* Allocation legend list */
+.tax-alloc-legend { flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+.tax-alloc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 0;
+}
+.tax-alloc-icon { width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0; object-fit: contain; }
+.tax-alloc-sym { flex: 1; font-weight: 600; color: var(--text-primary, #f1f5f9); }
+.tax-alloc-pct { font-size: 11px; color: var(--text-muted, #64748b); min-width: 30px; text-align: right; }
+.tax-alloc-val { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-secondary, #94a3b8); min-width: 70px; text-align: right; }
+.tax-alloc-other .tax-alloc-sym { color: var(--text-muted, #64748b); }
+
+/* Winners/losers chart */
+.tax-perf-wrap { flex: 1; min-height: 160px; position: relative; }
+.tax-perf-wrap canvas { width: 100% !important; }
+.tax-port-accuracy-note {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ── Assets table enhancements ────────────────────────────── */
+.tax-asset-name {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  margin-top: 1px;
+}
+.tax-asset-qty {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  margin-top: 2px;
+  font-family: var(--font-mono, monospace);
+}
+.tax-24h-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 20px;
+  display: inline-block;
+}
+.tax-24h-badge.up   { background: rgba(74,222,128,0.12); color: #4ade80; }
+.tax-24h-badge.down { background: rgba(248,113,113,0.12); color: #f87171; }
+
+/* search input inside section header */
+.tax-search-input {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  color: var(--text-primary, #f1f5f9);
+  font-size: 13px;
+  padding: 6px 12px;
+  outline: none;
+  width: 180px;
+  transition: border 0.15s;
+}
+.tax-search-input:focus { border-color: rgba(99,102,241,0.5); }
+.tax-search-input::placeholder { color: var(--text-muted, #64748b); }
+
+/* ── Responsive ───────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .tax-port-top  { flex-direction: column; }
+  .tax-port-chart-card { flex: none; }
+  .tax-port-mid  { grid-template-columns: 1fr; }
+  .tax-alloc-inner { flex-direction: column; align-items: center; }
+}
+
 /* ── Print styles ────────────────────────────────────────── */
 @media print {
   .tax-sidebar,

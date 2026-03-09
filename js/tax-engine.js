@@ -17,21 +17,21 @@ const TaxEngine = (() => {
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
-  // ── CoinGecko symbol → ID mapping ────────────────────────
-  const CG_IDS = {
-    BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BNB:'binancecoin',
-    ADA:'cardano',DOT:'polkadot',AVAX:'avalanche-2',MATIC:'matic-network',
-    LINK:'chainlink',UNI:'uniswap',ATOM:'cosmos',NEAR:'near',
-    OP:'optimism',ARB:'arbitrum',INJ:'injective-protocol',APT:'aptos',
-    SUI:'sui',DOGE:'dogecoin',LTC:'litecoin',XRP:'ripple',
+  // ── CoinCap asset ID mapping (api.coincap.io) — CORS-friendly ───
+  const CC_IDS = {
+    BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BNB:'binance-coin',
+    ADA:'cardano',DOT:'polkadot',AVAX:'avalanche',MATIC:'polygon',
+    LINK:'chainlink',UNI:'uniswap',ATOM:'cosmos',NEAR:'near-protocol',
+    OP:'optimism',ARB:'arbitrum',INJ:'injective',APT:'aptos',
+    SUI:'sui',DOGE:'dogecoin',LTC:'litecoin',XRP:'xrp',
     SHIB:'shiba-inu',PEPE:'pepe',WIF:'dogwifhat',BONK:'bonk',
-    JUP:'jupiter',PYTH:'pyth-network',SEI:'sei-network',TIA:'celestia',
-    STRK:'starknet',TON:'the-open-network',TRUMP:'maga',FARTCOIN:'fartcoin',
+    JUP:'jupiter',PYTH:'pyth-network',SEI:'sei',TIA:'celestia',
+    STRK:'starknet',TON:'toncoin', // TRUMP/FARTCOIN not on CoinCap → manual price required
     USDT:'tether',USDC:'usd-coin',BUSD:'binance-usd',DAI:'dai',
-    WETH:'weth',WBTC:'wrapped-bitcoin',WSOL:'wrapped-solana',
+    WETH:'weth',WBTC:'wrapped-bitcoin',WSOL:'solana',
     ALGO:'algorand',FTM:'fantom',SAND:'the-sandbox',MANA:'decentraland',
-    CRV:'curve-dao-token',AAVE:'aave',COMP:'compound-governance-token',
-    SNX:'havven',MKR:'maker',LDO:'lido-dao',RPL:'rocket-pool',
+    CRV:'curve-dao-token',AAVE:'aave',COMP:'compound',
+    SNX:'synthetix-network-token',MKR:'maker',LDO:'lido-dao',RPL:'rocket-pool',
     RUNE:'thorchain',GRT:'the-graph',FIL:'filecoin',ICP:'internet-computer',
     VET:'vechain',HBAR:'hedera-hashgraph',ETC:'ethereum-classic',
     BCH:'bitcoin-cash',EOS:'eos',ZEC:'zcash',XMR:'monero',
@@ -207,7 +207,7 @@ const TaxEngine = (() => {
       isInternalTransfer: false,
       assetSymbol:    (raw.assetSymbol || raw.symbol || raw.asset || '').toUpperCase(),
       assetName:      raw.assetName || '',
-      coinGeckoId:    raw.coinGeckoId || CG_IDS[(raw.assetSymbol||'').toUpperCase()] || null,
+      coinGeckoId:    raw.coinGeckoId || CC_IDS[(raw.assetSymbol||'').toUpperCase()] || null,
       amount:         Math.abs(parseFloat(raw.amount || 0)),
       inAsset:        (raw.inAsset || '').toUpperCase(),
       inAmount:       Math.abs(parseFloat(raw.inAmount || 0)),
@@ -359,128 +359,183 @@ const TaxEngine = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
-  // SEK PRICE PIPELINE  (CoinGecko free API, rate-limited)
+  // SEK PRICE PIPELINE  (CoinCap + Frankfurter — CORS-friendly)
+  // CoinCap:     api.coincap.io  — daily USD prices, batch by date range
+  // Frankfurter: api.frankfurter.app — ECB FX rates USD→SEK, batch by year
+  // No API key required. ~5–10 total requests regardless of tx count.
   // ════════════════════════════════════════════════════════════
-  let _cgQueue = Promise.resolve();
-  const CG_DELAY_MS = 1500; // ~40 req/min on free tier
 
   function getPriceCache() { try { return JSON.parse(localStorage.getItem(LS.PRICES)||'{}'); } catch { return {}; } }
-  function savePriceCache(c) { localStorage.setItem(LS.PRICES, JSON.stringify(c)); }
-
-  function cgDateStr(isoDate) {
-    const d = new Date(isoDate);
-    const dd = String(d.getDate()).padStart(2,'0');
-    const mm = String(d.getMonth()+1).padStart(2,'0');
-    const yy = d.getFullYear();
-    return `${dd}-${mm}-${yy}`; // CoinGecko format
-  }
+  function savePriceCache(c) { try { localStorage.setItem(LS.PRICES, JSON.stringify(c)); } catch {} }
 
   function cacheKey(coinId, isoDate) {
     return `${coinId}_${isoDate.slice(0,10)}`;
   }
 
-  // Rate-limited single fetch
-  async function cgFetchOne(coinId, isoDate) {
-    const cache = getPriceCache();
-    const key   = cacheKey(coinId, isoDate);
-    if (cache[key] !== undefined) return cache[key];
-
-    return new Promise(resolve => {
-      _cgQueue = _cgQueue
-        .then(() => sleep(CG_DELAY_MS))
-        .then(async () => {
-          try {
-            const date = cgDateStr(isoDate);
-            const url  = `https://api.coingecko.com/api/v3/coins/${coinId}/history?date=${date}&localization=false`;
-            const r    = await fetch(url);
-            if (r.status === 429) { await sleep(60000); return null; }
-            if (!r.ok)            return null;
-            const data  = await r.json();
-            const price = data?.market_data?.current_price?.sek || null;
-            if (price !== null) {
-              const c = getPriceCache();
-              c[key] = price;
-              savePriceCache(c);
-            }
-            resolve(price);
-            return price;
-          } catch { resolve(null); return null; }
-        });
-    });
-  }
-
   function stableSEKPrice(sym) {
     const EUR = ['EUROC','EURC','EURT','EURS'];
     if (EUR.includes(sym)) return STABLE_SEK.EUR;
-    return STABLE_SEK.USD; // USDT, USDC, BUSD, DAI etc.
+    return STABLE_SEK.USD;
   }
 
-  // Fetch SEK prices for all transactions that are missing them
-  async function fetchAllSEKPrices(txns, onProgress) {
-    // Collect unique (coinId, date) pairs needed
-    const needed = [];
-    for (const t of txns) {
-      if (t.isInternalTransfer) continue;
-      if (!isTaxableCategory(t.category)) continue;
-      if (t.priceSEKPerUnit > 0) continue;     // Already have price
-      if (STABLES.has(t.assetSymbol)) continue; // Will use stable price
-
-      const cgId = t.coinGeckoId || CG_IDS[t.assetSymbol];
-      if (!cgId) continue;
-
-      const key = cacheKey(cgId, t.date);
-      const cache = getPriceCache();
-      if (cache[key] !== undefined) continue;
-
-      if (!needed.find(n => n.key === key)) {
-        needed.push({ key, cgId, date: t.date });
+  // Fetch one year of daily USD prices from CoinCap (single CORS-friendly request)
+  // Returns Map<YYYY-MM-DD, usdPrice>
+  async function fetchCoinCapYear(ccId, year) {
+    const startMs = Date.UTC(year, 0, 1);
+    const endMs   = Date.UTC(year, 11, 31, 23, 59, 59);
+    try {
+      const url = `https://api.coincap.io/v2/assets/${ccId}/history?interval=d1&start=${startMs}&end=${endMs}`;
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const data = await r.json();
+      const map = new Map();
+      for (const pt of (data.data || [])) {
+        const d = new Date(pt.time);
+        map.set(d.toISOString().slice(0,10), parseFloat(pt.priceUsd));
       }
-    }
+      return map;
+    } catch { return null; }
+  }
 
-    let fetched = 0;
-    for (const item of needed) {
-      await cgFetchOne(item.cgId, item.date);
-      fetched++;
-      if (onProgress) onProgress({
-        step: 'price',
-        pct:  Math.round((fetched / needed.length) * 100),
-        msg:  `Fetching prices… ${fetched}/${needed.length}`,
-      });
-    }
+  // Fetch one year of USD→SEK FX rates from Frankfurter (single CORS-friendly request)
+  // Returns Map<YYYY-MM-DD, sekPerUsd>
+  async function fetchFXYear(year) {
+    try {
+      const url = `https://api.frankfurter.app/${year}-01-01..${year}-12-31?from=USD&to=SEK`;
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const data = await r.json();
+      // data.rates = { "2024-01-02": { "SEK": 10.45 }, ... }
+      const map = new Map();
+      for (const [date, rates] of Object.entries(data.rates || {})) {
+        if (rates.SEK) map.set(date, rates.SEK);
+      }
+      return map;
+    } catch { return null; }
+  }
 
-    // Now stamp prices onto transactions
-    const cache = getPriceCache();
+  // Walk backwards up to N days to find closest available rate (covers weekends/holidays)
+  function nearestMapValue(map, dateStr, maxDays = 5) {
+    if (!map) return null;
+    if (map.has(dateStr)) return map.get(dateStr);
+    const d = new Date(dateStr);
+    for (let i = 1; i <= maxDays; i++) {
+      d.setUTCDate(d.getUTCDate() - 1);
+      const k = d.toISOString().slice(0,10);
+      if (map.has(k)) return map.get(k);
+    }
+    return null;
+  }
+
+  // Stamp cached SEK prices onto transactions (pure helper)
+  function stampPrices(txns, cache) {
     return txns.map(t => {
-      if (t.priceSEKPerUnit > 0) return t; // Already has price
-      if (t.isInternalTransfer) return t;
+      if (t.priceSEKPerUnit > 0) return t;
+      if (t.isInternalTransfer)  return t;
 
-      let price = null;
-      let priceSource = null;
+      let price = null, priceSource = null;
 
       if (STABLES.has(t.assetSymbol)) {
         price = stableSEKPrice(t.assetSymbol);
         priceSource = 'stable_approx';
       } else {
-        const cgId = t.coinGeckoId || CG_IDS[t.assetSymbol];
-        if (cgId) {
-          price       = cache[cacheKey(cgId, t.date)] || null;
-          priceSource = price ? 'coingecko' : null;
+        const ccId = t.coinGeckoId || CC_IDS[t.assetSymbol];
+        if (ccId) {
+          price       = cache[cacheKey(ccId, (t.date||'').slice(0,10))] || null;
+          priceSource = price ? 'coincap' : null;
         }
       }
 
       if (!price) return t; // Still missing — goes to review
 
-      const amount       = t.amount || 0;
-      const costBasisSEK = price * amount;
       return {
         ...t,
         priceSEKPerUnit: price,
-        costBasisSEK:    costBasisSEK,
+        costBasisSEK:    price * (t.amount || 0),
         priceSource,
         needsReview:  false,
         reviewReason: null,
       };
     });
+  }
+
+  // Fetch all missing SEK prices — batched by (coin × year) for minimal requests
+  async function fetchAllSEKPrices(txns, onProgress) {
+    const cache = getPriceCache();
+
+    // Collect unique (ccId, year) pairs that need fetching
+    const neededPairs = new Map(); // "ccId|year" → { ccId, year }
+    const neededYears = new Set();
+
+    for (const t of txns) {
+      if (t.isInternalTransfer) continue;
+      if (!isTaxableCategory(t.category)) continue;
+      if (t.priceSEKPerUnit > 0) continue;
+      if (STABLES.has(t.assetSymbol)) continue;
+
+      const ccId    = t.coinGeckoId || CC_IDS[t.assetSymbol];
+      if (!ccId) continue;
+
+      const dateStr = (t.date || '').slice(0,10);
+      if (!dateStr) continue;
+
+      // Skip if already cached
+      if (cache[cacheKey(ccId, dateStr)] !== undefined) continue;
+
+      const year    = parseInt(dateStr.slice(0,4));
+      const pairKey = `${ccId}|${year}`;
+      if (!neededPairs.has(pairKey)) {
+        neededPairs.set(pairKey, { ccId, year });
+        neededYears.add(year);
+      }
+    }
+
+    const totalSteps = neededYears.size + neededPairs.size;
+
+    if (totalSteps === 0) {
+      if (onProgress) onProgress({ step:'price', pct:100, msg:'Prices up to date' });
+      return stampPrices(txns, cache);
+    }
+
+    let stepsDone = 0;
+
+    // Step 1: Fetch FX rates per year (1 request/year — e.g. 2023, 2024, 2025)
+    const fxByYear = new Map();
+    for (const year of neededYears) {
+      const fxMap = await fetchFXYear(year);
+      fxByYear.set(year, fxMap);
+      stepsDone++;
+      if (onProgress) onProgress({
+        step: 'price',
+        pct:  Math.round((stepsDone / totalSteps) * 100),
+        msg:  `Fetching FX rates (${year})…`,
+      });
+    }
+
+    // Step 2: Fetch coin price history per (coin × year) (1 request/coin/year)
+    const updatedCache = { ...cache };
+    for (const [, { ccId, year }] of neededPairs) {
+      const priceMap = await fetchCoinCapYear(ccId, year);
+      const fxMap    = fxByYear.get(year);
+
+      if (priceMap) {
+        for (const [date, usdPrice] of priceMap) {
+          if (isNaN(usdPrice)) continue;
+          const fx = fxMap ? nearestMapValue(fxMap, date) : null;
+          if (fx) updatedCache[cacheKey(ccId, date)] = usdPrice * fx;
+        }
+      }
+
+      stepsDone++;
+      if (onProgress) onProgress({
+        step: 'price',
+        pct:  Math.round((stepsDone / totalSteps) * 100),
+        msg:  `Fetching prices (${ccId} ${year})…`,
+      });
+    }
+
+    savePriceCache(updatedCache);
+    return stampPrices(txns, updatedCache);
   }
 
   // ════════════════════════════════════════════════════════════

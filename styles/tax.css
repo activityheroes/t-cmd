@@ -1673,14 +1673,16 @@
   color: var(--text-primary, #f1f5f9);
 }
 
-/* chart canvas wrapper */
+/* chart canvas wrapper — explicit height required so Chart.js can measure the container.
+   Using height (not flex:1/min-height) avoids the flex "no-free-space" problem where
+   a column-flex child with flex:1 gets 0 height when the parent has no fixed height. */
 .tax-port-chart-wrap {
-  flex: 1;
   position: relative;
-  min-height: 180px;
+  height: 200px;
 }
 .tax-port-chart-wrap canvas {
   width: 100% !important;
+  height: 200px !important;  /* belt-and-suspenders for Chart.js responsive mode */
 }
 .tax-port-chart-overlay {
   position: absolute;

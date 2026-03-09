@@ -1883,9 +1883,9 @@
 .tax-alloc-val { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-secondary, #94a3b8); min-width: 70px; text-align: right; }
 .tax-alloc-other .tax-alloc-sym { color: var(--text-muted, #64748b); }
 
-/* Winners/losers chart */
-.tax-perf-wrap { flex: 1; min-height: 160px; position: relative; }
-.tax-perf-wrap canvas { width: 100% !important; }
+/* Winners/losers chart — explicit height (flex:1/min-height breaks Chart.js) */
+.tax-perf-wrap { height: 200px; position: relative; }
+.tax-perf-wrap canvas { width: 100% !important; height: 200px !important; }
 .tax-port-accuracy-note {
   font-size: 11px;
   color: var(--text-muted, #64748b);

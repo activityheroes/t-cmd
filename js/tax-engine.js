@@ -282,6 +282,7 @@ const TaxEngine = (() => {
 
   // Returns true only for genuine exceptions (review queue)
   function shouldReview(t, cat) {
+    if (t.userReviewed) return false;  // user explicitly dismissed — never re-flag
     if (cat === CAT.SPAM || cat === CAT.APPROVAL || cat === CAT.FEE) return false;
     if (t.isInternalTransfer) return false;
     // Missing SEK price on taxable event

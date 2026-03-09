@@ -870,12 +870,14 @@ const TaxUI = (() => {
     showTaxToast('✅','Transaction updated');
   }
 
-  function markReviewed(id)  { TaxEngine.updateTransaction(id,{needsReview:false,reviewReason:null}); S.taxResult=null; render(); }
+  function markReviewed(id)  { TaxEngine.updateTransaction(id,{needsReview:false,reviewReason:null,userReviewed:true}); S.taxResult=null; render(); }
   function markAllReviewed() {
     // Single map + single save — never call updateTransaction in a loop.
     // Calling it N times = N×map(8000 items) + N IDB batch-writes → instant crash.
+    // userReviewed:true tells shouldReview() never to re-flag on recalculate,
+    // even if the transaction still has a missing price or unknown asset.
     const updated = TaxEngine.getTransactions()
-      .map(t => t.needsReview ? {...t, needsReview:false, reviewReason:null} : t);
+      .map(t => t.needsReview ? {...t, needsReview:false, reviewReason:null, userReviewed:true} : t);
     TaxEngine.saveTransactions(updated);
     S.taxResult = null;
     render();

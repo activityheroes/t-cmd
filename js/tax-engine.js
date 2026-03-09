@@ -1,244 +1,845 @@
 /* ============================================================
-   T-CMD — Swedish Crypto Tax Engine
-   Implements Genomsnittsmetoden (average cost method)
-   as required by Skatteverket for crypto assets.
-   Produces K4-compatible gain/loss records.
+   T-CMD — Swedish Crypto Tax Engine v2
+   Full pipeline: import → classify → match transfers →
+     fetch SEK prices → compute tax → K4 export
+   Implements Genomsnittsmetoden per Skatteverket.
    ============================================================ */
 
 const TaxEngine = (() => {
 
-  // ── Constants ─────────────────────────────────────────────
-  const TAX_RATE_GAIN  = 0.30;   // 30% on capital gains
-  const LOSS_DEDUCTION = 0.70;   // 70% of losses deductible
-  const CRYPTO_BOX     = 'D';    // K4 box for crypto (Övriga tillgångar)
+  // ── Swedish Tax Rules ─────────────────────────────────────
+  const TAX_RATE          = 0.30;
+  const LOSS_DEDUCTION    = 0.70;
+  const ROWS_PER_K4_FORM  = 7;
 
-  // ── Transaction Categories ─────────────────────────────────
-  const CATEGORIES = {
-    BUY:          'buy',
-    SELL:         'sell',
-    TRADE:        'trade',       // crypto-to-crypto (treated as sell+buy)
-    RECEIVE:      'receive',     // gift / airdrop / mining income
-    SEND:         'send',        // gift / transfer out
-    INCOME:       'income',      // staking rewards, interest (income tax)
-    FEE:          'fee',
-    TRANSFER_IN:  'transfer_in',
-    TRANSFER_OUT: 'transfer_out',
+  // ── Stablecoins (treated as SEK-proxies at 1 USD ≈ current rate) ──
+  const STABLES = new Set(['USDT','USDC','BUSD','DAI','TUSD','USDP','EUROC','EURC','USDS']);
+  // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
+  const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
+
+  // ── CoinGecko symbol → ID mapping ────────────────────────
+  const CG_IDS = {
+    BTC:'bitcoin',ETH:'ethereum',SOL:'solana',BNB:'binancecoin',
+    ADA:'cardano',DOT:'polkadot',AVAX:'avalanche-2',MATIC:'matic-network',
+    LINK:'chainlink',UNI:'uniswap',ATOM:'cosmos',NEAR:'near',
+    OP:'optimism',ARB:'arbitrum',INJ:'injective-protocol',APT:'aptos',
+    SUI:'sui',DOGE:'dogecoin',LTC:'litecoin',XRP:'ripple',
+    SHIB:'shiba-inu',PEPE:'pepe',WIF:'dogwifhat',BONK:'bonk',
+    JUP:'jupiter',PYTH:'pyth-network',SEI:'sei-network',TIA:'celestia',
+    STRK:'starknet',TON:'the-open-network',TRUMP:'maga',FARTCOIN:'fartcoin',
+    USDT:'tether',USDC:'usd-coin',BUSD:'binance-usd',DAI:'dai',
+    WETH:'weth',WBTC:'wrapped-bitcoin',WSOL:'wrapped-solana',
+    ALGO:'algorand',FTM:'fantom',SAND:'the-sandbox',MANA:'decentraland',
+    CRV:'curve-dao-token',AAVE:'aave',COMP:'compound-governance-token',
+    SNX:'havven',MKR:'maker',LDO:'lido-dao',RPL:'rocket-pool',
+    RUNE:'thorchain',GRT:'the-graph',FIL:'filecoin',ICP:'internet-computer',
+    VET:'vechain',HBAR:'hedera-hashgraph',ETC:'ethereum-classic',
+    BCH:'bitcoin-cash',EOS:'eos',ZEC:'zcash',XMR:'monero',
   };
 
-  // ── State Storage Keys ────────────────────────────────────
-  const LS_ACCOUNTS     = 'tcmd_tax_accounts';
-  const LS_TRANSACTIONS = 'tcmd_tax_transactions';
-  const LS_SETTINGS     = 'tcmd_tax_settings';
-  const LS_PRICE_CACHE  = 'tcmd_tax_price_cache';
+  // ── Transaction Categories ────────────────────────────────
+  const CAT = {
+    BUY:'buy', SELL:'sell', TRADE:'trade',
+    RECEIVE:'receive', SEND:'send', INCOME:'income',
+    FEE:'fee', TRANSFER_IN:'transfer_in', TRANSFER_OUT:'transfer_out',
+    SPAM:'spam', APPROVAL:'approval',
+  };
+
+  // ── Storage Keys ──────────────────────────────────────────
+  const LS = {
+    ACCOUNTS:     'tcmd_tax_accounts',
+    TRANSACTIONS: 'tcmd_tax_txns',
+    SETTINGS:     'tcmd_tax_settings',
+    PRICES:       'tcmd_tax_prices',
+    IMPORT_STATUS:'tcmd_tax_import_status',
+  };
+
+  // ── Pipeline Event Emitter ────────────────────────────────
+  const _listeners = {};
+  const Events = {
+    on(ev, fn)   { (_listeners[ev] = _listeners[ev] || []).push(fn); },
+    off(ev, fn)  { _listeners[ev] = (_listeners[ev]||[]).filter(f=>f!==fn); },
+    emit(ev, d)  { (_listeners[ev]||[]).forEach(fn => { try { fn(d); } catch{} }); },
+  };
 
   // ── Settings ──────────────────────────────────────────────
   function getSettings() {
-    const defaults = {
-      currency: 'SEK',
-      taxYear:  new Date().getFullYear() - 1,
-      country:  'SE',
-      method:   'genomsnittsmetoden',
-    };
-    try {
-      const raw = localStorage.getItem(LS_SETTINGS);
-      return raw ? { ...defaults, ...JSON.parse(raw) } : defaults;
-    } catch { return defaults; }
+    const def = { currency:'SEK', taxYear: new Date().getFullYear()-1, country:'SE', method:'genomsnittsmetoden' };
+    try { return { ...def, ...JSON.parse(localStorage.getItem(LS.SETTINGS)||'{}') }; }
+    catch { return def; }
   }
-
-  function saveSettings(s) {
-    localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
-  }
+  function saveSettings(s) { localStorage.setItem(LS.SETTINGS, JSON.stringify(s)); }
 
   // ── Accounts ──────────────────────────────────────────────
-  function getAccounts() {
-    try {
-      return JSON.parse(localStorage.getItem(LS_ACCOUNTS) || '[]');
-    } catch { return []; }
-  }
-
-  function saveAccounts(accs) {
-    localStorage.setItem(LS_ACCOUNTS, JSON.stringify(accs));
-  }
-
-  function addAccount(account) {
+  function getAccounts()    { try { return JSON.parse(localStorage.getItem(LS.ACCOUNTS)||'[]'); } catch { return []; } }
+  function saveAccounts(a)  { localStorage.setItem(LS.ACCOUNTS, JSON.stringify(a)); }
+  function addAccount(acc)  {
     const accs = getAccounts();
-    const id = 'acc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-    const newAcc = { id, addedAt: new Date().toISOString(), ...account };
-    accs.push(newAcc);
-    saveAccounts(accs);
-    return newAcc;
+    const id = 'acc_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+    const n = { id, addedAt: new Date().toISOString(), syncStatus:'never_synced', ...acc };
+    accs.push(n); saveAccounts(accs); return n;
+  }
+  function removeAccount(id) {
+    saveAccounts(getAccounts().filter(a => a.id !== id));
+    saveTransactions(getTransactions().filter(t => t.accountId !== id));
+    setImportStatus(id, null);
+  }
+  function updateAccount(id, data) {
+    saveAccounts(getAccounts().map(a => a.id === id ? {...a, ...data} : a));
   }
 
-  function removeAccount(id) {
-    const accs = getAccounts().filter(a => a.id !== id);
-    saveAccounts(accs);
-    // Also remove its transactions
-    const txns = getTransactions().filter(t => t.accountId !== id);
-    saveTransactions(txns);
+  // ── Import Status ─────────────────────────────────────────
+  function getImportStatuses() { try { return JSON.parse(localStorage.getItem(LS.IMPORT_STATUS)||'{}'); } catch { return {}; } }
+  function setImportStatus(accountId, status) {
+    const all = getImportStatuses();
+    if (status === null) { delete all[accountId]; }
+    else { all[accountId] = { ...all[accountId], ...status, updatedAt: new Date().toISOString() }; }
+    localStorage.setItem(LS.IMPORT_STATUS, JSON.stringify(all));
   }
+  function getImportStatus(accountId) { return getImportStatuses()[accountId] || { status:'never_synced' }; }
 
   // ── Transactions ──────────────────────────────────────────
-  function getTransactions() {
-    try {
-      return JSON.parse(localStorage.getItem(LS_TRANSACTIONS) || '[]');
-    } catch { return []; }
-  }
-
-  function saveTransactions(txns) {
-    localStorage.setItem(LS_TRANSACTIONS, JSON.stringify(txns));
-  }
+  function getTransactions() { try { return JSON.parse(localStorage.getItem(LS.TRANSACTIONS)||'[]'); } catch { return []; } }
+  function saveTransactions(txns) { localStorage.setItem(LS.TRANSACTIONS, JSON.stringify(txns)); }
 
   function addTransactions(newTxns) {
     const existing = getTransactions();
-    // Deduplicate by txHash + accountId
     const seen = new Set(existing.map(t => `${t.txHash}|${t.accountId}`));
-    const added = [];
+    let added = 0;
     for (const t of newTxns) {
       const key = `${t.txHash}|${t.accountId}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        existing.push(t);
-        added.push(t);
-      }
+      if (!seen.has(key)) { seen.add(key); existing.push(t); added++; }
     }
     saveTransactions(existing);
-    return added.length;
+    return added;
   }
 
-  function deleteTransaction(id) {
-    saveTransactions(getTransactions().filter(t => t.id !== id));
-  }
+  function deleteTransaction(id)      { saveTransactions(getTransactions().filter(t => t.id !== id)); }
+  function updateTransaction(id, data) { saveTransactions(getTransactions().map(t => t.id===id ? {...t,...data} : t)); }
 
-  function updateTransaction(id, data) {
-    const txns = getTransactions().map(t => t.id === id ? { ...t, ...data } : t);
-    saveTransactions(txns);
-  }
+  function mkId()  { return 'txn_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
 
-  // ── Price Cache ───────────────────────────────────────────
-  function getPriceCache() {
-    try { return JSON.parse(localStorage.getItem(LS_PRICE_CACHE) || '{}'); }
-    catch { return {}; }
-  }
-
-  function savePriceCache(cache) {
-    localStorage.setItem(LS_PRICE_CACHE, JSON.stringify(cache));
-  }
-
-  // Fetch historical price from CoinGecko (SEK per coin on a specific date)
-  async function fetchHistoricalPrice(coinId, dateStr) {
-    // dateStr = 'YYYY-MM-DD'
-    const cache = getPriceCache();
-    const key = `${coinId}_${dateStr}`;
-    if (cache[key]) return cache[key];
-
-    try {
-      // CoinGecko expects DD-MM-YYYY
-      const [y, m, d] = dateStr.split('-');
-      const cgDate = `${d}-${m}-${y}`;
-      const url = `https://api.coingecko.com/api/v3/coins/${coinId}/history?date=${cgDate}&localization=false`;
-      const r = await fetch(url);
-      if (!r.ok) return null;
-      const data = await r.json();
-      const priceSEK = data?.market_data?.current_price?.sek;
-      if (priceSEK) {
-        cache[key] = priceSEK;
-        savePriceCache(cache);
-      }
-      return priceSEK || null;
-    } catch {
-      return null;
-    }
-  }
-
-  // ── Normalization ─────────────────────────────────────────
-  // Normalize a raw transaction from any source into our standard format
+  // ── Normalise raw → standard transaction ─────────────────
   function normalizeTransaction(raw, accountId, source) {
-    const base = {
-      id:          'txn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+    return {
+      id:             raw.id || mkId(),
       accountId,
       source,
-      txHash:      raw.txHash || raw.hash || raw.id || ('manual_' + Date.now()),
-      date:        raw.date || raw.timestamp || new Date().toISOString(),
-      category:    raw.category || inferCategory(raw),
-      assetSymbol: (raw.assetSymbol || raw.symbol || raw.asset || '').toUpperCase(),
-      assetName:   raw.assetName || raw.name || '',
-      coinGeckoId: raw.coinGeckoId || null,
-      amount:      parseFloat(raw.amount || raw.quantity || 0),
-      // Incoming side (for trades)
-      inAsset:     (raw.inAsset || '').toUpperCase(),
-      inAmount:    parseFloat(raw.inAmount || 0),
-      // Cost / value in SEK at time of transaction
-      costBasisSEK:   parseFloat(raw.costBasisSEK || raw.priceSEK * raw.amount || 0),
-      priceSEKPerUnit: parseFloat(raw.priceSEKPerUnit || raw.priceSEK || 0),
-      feeSEK:          parseFloat(raw.feeSEK || raw.fee || 0),
-      // Manual review flag
-      needsReview: raw.needsReview || (!raw.priceSEK && !raw.costBasisSEK),
-      notes:       raw.notes || '',
-      labels:      raw.labels || [],
-      // Raw source data for debugging
-      _raw: raw,
+      txHash:         raw.txHash || raw.hash || raw.id || ('manual_'+Date.now()),
+      date:           parseDate(raw.date || raw.timestamp) || new Date().toISOString(),
+      category:       raw.category || CAT.RECEIVE,
+      autoClassified: false,
+      isInternalTransfer: false,
+      assetSymbol:    (raw.assetSymbol || raw.symbol || raw.asset || '').toUpperCase(),
+      assetName:      raw.assetName || '',
+      coinGeckoId:    raw.coinGeckoId || CG_IDS[(raw.assetSymbol||'').toUpperCase()] || null,
+      amount:         Math.abs(parseFloat(raw.amount || 0)),
+      inAsset:        (raw.inAsset || '').toUpperCase(),
+      inAmount:       Math.abs(parseFloat(raw.inAmount || 0)),
+      priceSEKPerUnit: parseFloat(raw.priceSEKPerUnit || 0),
+      costBasisSEK:   parseFloat(raw.costBasisSEK || 0),
+      feeSEK:         parseFloat(raw.feeSEK || 0),
+      priceSource:    raw.priceSource || null,
+      needsReview:    raw.needsReview !== undefined ? raw.needsReview : true,
+      reviewReason:   raw.reviewReason || null,
+      notes:          raw.notes || '',
+      _raw:           raw,
     };
-    return base;
   }
 
-  function inferCategory(raw) {
-    const type = (raw.type || raw.category || '').toLowerCase();
-    if (type.includes('buy') || type.includes('purchase')) return CATEGORIES.BUY;
-    if (type.includes('sell')) return CATEGORIES.SELL;
-    if (type.includes('trade') || type.includes('swap') || type.includes('convert')) return CATEGORIES.TRADE;
-    if (type.includes('deposit') || type.includes('receive') || type.includes('credit')) return CATEGORIES.RECEIVE;
-    if (type.includes('withdraw') || type.includes('send') || type.includes('debit')) return CATEGORIES.SEND;
-    if (type.includes('staking') || type.includes('reward') || type.includes('interest') || type.includes('earn')) return CATEGORIES.INCOME;
-    if (type.includes('fee')) return CATEGORIES.FEE;
-    if (type.includes('transfer')) {
-      return (raw.direction === 'in' || raw.direction === 'credit') ? CATEGORIES.TRANSFER_IN : CATEGORIES.TRANSFER_OUT;
-    }
-    return CATEGORIES.BUY;
+  function parseDate(d) {
+    if (!d) return null;
+    const dt = new Date(d);
+    return isNaN(dt.getTime()) ? null : dt.toISOString();
   }
 
-  // ── CSV Parsers ───────────────────────────────────────────
-  function parseCSV(text) {
-    const lines = text.trim().split('\n');
-    const header = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-    return lines.slice(1).map(line => {
-      // Handle quoted commas
-      const cols = [];
-      let current = '';
-      let inQuote = false;
-      for (const ch of line) {
-        if (ch === '"') { inQuote = !inQuote; }
-        else if (ch === ',' && !inQuote) { cols.push(current.trim()); current = ''; }
-        else { current += ch; }
+  // ════════════════════════════════════════════════════════════
+  // AUTO-CLASSIFICATION ENGINE
+  // ════════════════════════════════════════════════════════════
+
+  const SPAM_PATTERNS = [/airdrop.*claim/i, /free.*token/i, /visit.*to.*claim/i, /reward.*claim/i];
+
+  function autoClassifyAll(txns) {
+    return txns.map(t => {
+      if (t.manualCategory) return t; // Never override user edits
+      const cat = detectCategory(t);
+      const needsReview = shouldReview(t, cat);
+      return {
+        ...t,
+        category:      cat,
+        autoClassified: true,
+        needsReview,
+        reviewReason:  needsReview ? getReviewReason(t, cat) : null,
+      };
+    });
+  }
+
+  function detectCategory(t) {
+    const raw     = t._raw || {};
+    const rawType = (raw.type || raw.side || raw.category || raw.transactionType || '').toLowerCase();
+    const sym     = (t.assetSymbol || '').toUpperCase();
+    const notes   = (t.notes || '').toLowerCase();
+    const amount  = t.amount || 0;
+
+    // ── Exchange-reported types (most reliable) ────────────
+    if (rawType.match(/^buy$/))          return CAT.BUY;
+    if (rawType.match(/^sell$/))         return CAT.SELL;
+    if (rawType.match(/swap|convert|exchange/))  return CAT.TRADE;
+    if (rawType.match(/staking|earn|reward|interest|cashback|referral/)) return CAT.INCOME;
+    if (rawType.match(/^deposit$/))      return CAT.TRANSFER_IN;   // May be reclassified as RECEIVE
+    if (rawType.match(/^withdrawal?$/))  return CAT.TRANSFER_OUT;
+    if (rawType.match(/airdrop/))        return CAT.RECEIVE;
+    if (rawType.match(/fee/))            return CAT.FEE;
+    if (rawType.match(/mining/))         return CAT.INCOME;
+    if (rawType.match(/approval/))       return CAT.APPROVAL;
+
+    // ── Blockchain heuristics ──────────────────────────────
+    if (t.inAsset && t.inAmount > 0)     return CAT.TRADE;
+
+    // Spam detection
+    if (SPAM_PATTERNS.some(p => p.test(notes))) return CAT.SPAM;
+    if (amount > 0 && amount < 0.000001 && !['BTC','ETH','SOL'].includes(sym)) return CAT.SPAM;
+
+    // Tiny amounts = likely fees
+    if (amount < 0.0001 && ['ETH','SOL','BNB'].includes(sym)) return CAT.FEE;
+
+    return t.category || CAT.RECEIVE;
+  }
+
+  // Returns true only for genuine exceptions (review queue)
+  function shouldReview(t, cat) {
+    if (cat === CAT.SPAM || cat === CAT.APPROVAL || cat === CAT.FEE) return false;
+    if (t.isInternalTransfer) return false;
+    // Missing SEK price on taxable event
+    if (isTaxableCategory(cat) && !t.priceSEKPerUnit && !t.costBasisSEK) return true;
+    // Unknown asset in taxable event
+    if (isTaxableCategory(cat) && !t.coinGeckoId && !STABLES.has(t.assetSymbol)) return true;
+    return false;
+  }
+
+  function isTaxableCategory(cat) {
+    return [CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY].includes(cat);
+  }
+
+  function getReviewReason(t, cat) {
+    if (!t.priceSEKPerUnit && !t.costBasisSEK) return 'missing_sek_price';
+    if (!t.coinGeckoId && !STABLES.has(t.assetSymbol)) return 'unknown_asset';
+    return 'unclassified';
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // TRANSFER MATCHING
+  // ════════════════════════════════════════════════════════════
+  const MATCH_WINDOW_MS  = 24 * 60 * 60 * 1000; // 24 h
+  const AMOUNT_TOLERANCE = 0.02;                  // 2%
+
+  function matchTransfers(txns) {
+    // Only try to match transactions across accounts the user owns
+    const byId = new Map(txns.map(t => [t.id, t]));
+    const outgoing = txns.filter(t =>
+      !t.isInternalTransfer &&
+      (t.category === CAT.TRANSFER_OUT || t.category === CAT.SEND)
+    );
+    const incoming = txns.filter(t =>
+      !t.isInternalTransfer &&
+      (t.category === CAT.TRANSFER_IN || t.category === CAT.RECEIVE)
+    );
+
+    const matched = new Set();
+
+    for (const out of outgoing) {
+      if (matched.has(out.id)) continue;
+      const outDate = new Date(out.date).getTime();
+
+      const candidates = incoming
+        .filter(inc => {
+          if (matched.has(inc.id)) return false;
+          if (inc.accountId === out.accountId) return false; // same account
+          if (inc.assetSymbol !== out.assetSymbol) return false;
+          const timeDiff = Math.abs(new Date(inc.date).getTime() - outDate);
+          if (timeDiff > MATCH_WINDOW_MS) return false;
+          const amtDiff = Math.abs(inc.amount - out.amount) / (out.amount || 1);
+          if (amtDiff > AMOUNT_TOLERANCE) return false;
+          return true;
+        })
+        .sort((a,b) => {
+          const ta = Math.abs(new Date(a.date).getTime() - outDate);
+          const tb = Math.abs(new Date(b.date).getTime() - outDate);
+          return ta - tb;
+        });
+
+      if (candidates.length > 0) {
+        const best = candidates[0];
+        out.isInternalTransfer = true;
+        out.matchedTxId        = best.id;
+        out.needsReview        = false;
+        best.isInternalTransfer = true;
+        best.matchedTxId        = out.id;
+        best.needsReview        = false;
+        matched.add(out.id);
+        matched.add(best.id);
       }
-      cols.push(current.trim());
+    }
+
+    return txns;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // SEK PRICE PIPELINE  (CoinGecko free API, rate-limited)
+  // ════════════════════════════════════════════════════════════
+  let _cgQueue = Promise.resolve();
+  const CG_DELAY_MS = 1500; // ~40 req/min on free tier
+
+  function getPriceCache() { try { return JSON.parse(localStorage.getItem(LS.PRICES)||'{}'); } catch { return {}; } }
+  function savePriceCache(c) { localStorage.setItem(LS.PRICES, JSON.stringify(c)); }
+
+  function cgDateStr(isoDate) {
+    const d = new Date(isoDate);
+    const dd = String(d.getDate()).padStart(2,'0');
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const yy = d.getFullYear();
+    return `${dd}-${mm}-${yy}`; // CoinGecko format
+  }
+
+  function cacheKey(coinId, isoDate) {
+    return `${coinId}_${isoDate.slice(0,10)}`;
+  }
+
+  // Rate-limited single fetch
+  async function cgFetchOne(coinId, isoDate) {
+    const cache = getPriceCache();
+    const key   = cacheKey(coinId, isoDate);
+    if (cache[key] !== undefined) return cache[key];
+
+    return new Promise(resolve => {
+      _cgQueue = _cgQueue
+        .then(() => sleep(CG_DELAY_MS))
+        .then(async () => {
+          try {
+            const date = cgDateStr(isoDate);
+            const url  = `https://api.coingecko.com/api/v3/coins/${coinId}/history?date=${date}&localization=false`;
+            const r    = await fetch(url);
+            if (r.status === 429) { await sleep(60000); return null; }
+            if (!r.ok)            return null;
+            const data  = await r.json();
+            const price = data?.market_data?.current_price?.sek || null;
+            if (price !== null) {
+              const c = getPriceCache();
+              c[key] = price;
+              savePriceCache(c);
+            }
+            resolve(price);
+            return price;
+          } catch { resolve(null); return null; }
+        });
+    });
+  }
+
+  function stableSEKPrice(sym) {
+    const EUR = ['EUROC','EURC','EURT','EURS'];
+    if (EUR.includes(sym)) return STABLE_SEK.EUR;
+    return STABLE_SEK.USD; // USDT, USDC, BUSD, DAI etc.
+  }
+
+  // Fetch SEK prices for all transactions that are missing them
+  async function fetchAllSEKPrices(txns, onProgress) {
+    // Collect unique (coinId, date) pairs needed
+    const needed = [];
+    for (const t of txns) {
+      if (t.isInternalTransfer) continue;
+      if (!isTaxableCategory(t.category)) continue;
+      if (t.priceSEKPerUnit > 0) continue;     // Already have price
+      if (STABLES.has(t.assetSymbol)) continue; // Will use stable price
+
+      const cgId = t.coinGeckoId || CG_IDS[t.assetSymbol];
+      if (!cgId) continue;
+
+      const key = cacheKey(cgId, t.date);
+      const cache = getPriceCache();
+      if (cache[key] !== undefined) continue;
+
+      if (!needed.find(n => n.key === key)) {
+        needed.push({ key, cgId, date: t.date });
+      }
+    }
+
+    let fetched = 0;
+    for (const item of needed) {
+      await cgFetchOne(item.cgId, item.date);
+      fetched++;
+      if (onProgress) onProgress({
+        step: 'price',
+        pct:  Math.round((fetched / needed.length) * 100),
+        msg:  `Fetching prices… ${fetched}/${needed.length}`,
+      });
+    }
+
+    // Now stamp prices onto transactions
+    const cache = getPriceCache();
+    return txns.map(t => {
+      if (t.priceSEKPerUnit > 0) return t; // Already has price
+      if (t.isInternalTransfer) return t;
+
+      let price = null;
+      let priceSource = null;
+
+      if (STABLES.has(t.assetSymbol)) {
+        price = stableSEKPrice(t.assetSymbol);
+        priceSource = 'stable_approx';
+      } else {
+        const cgId = t.coinGeckoId || CG_IDS[t.assetSymbol];
+        if (cgId) {
+          price       = cache[cacheKey(cgId, t.date)] || null;
+          priceSource = price ? 'coingecko' : null;
+        }
+      }
+
+      if (!price) return t; // Still missing — goes to review
+
+      const amount       = t.amount || 0;
+      const costBasisSEK = price * amount;
+      return {
+        ...t,
+        priceSEKPerUnit: price,
+        costBasisSEK:    costBasisSEK,
+        priceSource,
+        needsReview:  false,
+        reviewReason: null,
+      };
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // FULL IMPORT PIPELINE
+  // After every import: classify → match → price → recalculate
+  // ════════════════════════════════════════════════════════════
+  let _pipelineRunning = false;
+
+  async function runPipeline(opts = {}) {
+    if (_pipelineRunning) return;
+    _pipelineRunning = true;
+    Events.emit('pipeline:start', {});
+
+    try {
+      const emit = (step, pct, msg) => {
+        Events.emit('pipeline:step', { step, pct, msg });
+        if (opts.onProgress) opts.onProgress({ step, pct, msg });
+      };
+
+      // Step 1 – Auto-classify
+      emit('classify', 10, 'Classifying transactions…');
+      let txns = getTransactions();
+      txns = autoClassifyAll(txns);
+      await tick();
+
+      // Step 2 – Match internal transfers
+      emit('transfer', 25, 'Matching internal transfers…');
+      txns = matchTransfers(txns);
+      await tick();
+
+      // Step 3 – Fetch missing SEK prices
+      emit('price', 40, 'Fetching historical SEK prices…');
+      txns = await fetchAllSEKPrices(txns, (p) => {
+        emit('price', 40 + Math.round(p.pct * 0.3), p.msg);
+      });
+
+      // Step 4 – Save enriched transactions
+      emit('save', 72, 'Saving…');
+      saveTransactions(txns);
+      await tick();
+
+      // Step 5 – Compute tax for current year
+      emit('tax', 80, 'Computing Swedish tax (Genomsnittsmetoden)…');
+      const settings   = getSettings();
+      const taxResult  = computeTaxYear(settings.taxYear, txns);
+      const reviewIssues = getReviewIssues(txns);
+
+      emit('done', 100, 'Done!');
+
+      const result = {
+        totalTxns:    txns.length,
+        reviewIssues: reviewIssues.length,
+        taxResult,
+      };
+      Events.emit('pipeline:done', result);
+      return result;
+    } catch (err) {
+      Events.emit('pipeline:error', { message: err.message });
+      throw err;
+    } finally {
+      _pipelineRunning = false;
+    }
+  }
+
+  function tick() { return new Promise(r => setTimeout(r, 0)); }
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // ════════════════════════════════════════════════════════════
+  // REVIEW ISSUES — exceptions only
+  // ════════════════════════════════════════════════════════════
+  const REVIEW_DESCRIPTIONS = {
+    missing_sek_price:   { label:'Missing SEK price',   icon:'💰', why:'Cannot calculate gain/loss without SEK value at time of transaction.', fix:'Enter the market price in SEK on the transaction date.' },
+    unknown_asset:       { label:'Unknown asset',        icon:'❓', why:'No CoinGecko price feed found for this token.', fix:'Enter the price manually or mark as spam if worthless.' },
+    unmatched_transfer:  { label:'Unmatched transfer',   icon:'🔗', why:'This transfer could not be matched to an incoming/outgoing in your other accounts. May cause incorrect cost basis.', fix:'Connect the other account or mark as external.' },
+    negative_balance:    { label:'Negative balance',     icon:'⚠️', why:'More units sold than found in history — missing buy transactions.', fix:'Import the full history for this asset.' },
+    duplicate:           { label:'Possible duplicate',   icon:'📋', why:'Very similar transaction already exists.', fix:'Review and delete one if duplicate.' },
+    unclassified:        { label:'Unclassified',         icon:'🏷️', why:'Could not auto-classify this transaction type.', fix:'Select the correct category.' },
+    ambiguous_swap:      { label:'Ambiguous swap',       icon:'↔️', why:'Outgoing amount found but incoming asset/amount unknown.', fix:'Enter the received asset and amount.' },
+  };
+
+  function getReviewIssues(txns) {
+    if (!txns) txns = getTransactions();
+    return txns.filter(t => t.needsReview && t.reviewReason)
+      .map(t => ({
+        txnId:       t.id,
+        txn:         t,
+        reason:      t.reviewReason,
+        meta:        REVIEW_DESCRIPTIONS[t.reviewReason] || { label: t.reviewReason, icon:'⚠️', why:'', fix:'' },
+      }));
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // SWEDISH TAX ENGINE — Genomsnittsmetoden
+  // ════════════════════════════════════════════════════════════
+  function computeTaxYear(year, txns) {
+    if (!txns) txns = getTransactions();
+    year = parseInt(year);
+
+    // Process ALL history (including prior years) to get correct cost basis
+    const allSorted = [...txns]
+      .filter(t => new Date(t.date).getFullYear() <= year)
+      .sort((a,b) => new Date(a.date) - new Date(b.date));
+
+    const holdings  = {};   // sym → { totalQty, totalCostSEK }
+    const disposals = [];   // in target year
+    const income    = [];   // in target year
+
+    function ensure(sym) {
+      if (!holdings[sym]) holdings[sym] = { totalQty:0, totalCostSEK:0 };
+    }
+    function avg(sym) {
+      const h = holdings[sym];
+      return (h && h.totalQty > 0) ? h.totalCostSEK / h.totalQty : 0;
+    }
+
+    for (const t of allSorted) {
+      const sym   = t.assetSymbol;
+      if (!sym || t.isInternalTransfer) continue;
+      if (t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
+
+      ensure(sym);
+      const h          = holdings[sym];
+      const inYear     = new Date(t.date).getFullYear() === year;
+      const priceSEK   = t.priceSEKPerUnit || (t.costBasisSEK / (t.amount || 1)) || 0;
+      const proceedsSEK = t.costBasisSEK || (priceSEK * (t.amount || 0));
+      const feeSEK      = t.feeSEK || 0;
+
+      switch (t.category) {
+
+        case CAT.BUY:
+        case CAT.TRANSFER_IN:
+        case CAT.RECEIVE: {
+          const cost = proceedsSEK + feeSEK;
+          h.totalQty     += t.amount;
+          h.totalCostSEK += cost;
+          if (inYear && t.category === CAT.RECEIVE && t.source !== 'transfer') {
+            // Gifts, airdrops received = income event
+            income.push({ date:t.date, assetSymbol:sym, amount:t.amount, valueSEK:proceedsSEK, id:t.id, category:t.category });
+          }
+          break;
+        }
+
+        case CAT.INCOME: {
+          const cost = proceedsSEK;
+          h.totalQty     += t.amount;
+          h.totalCostSEK += cost;
+          if (inYear) income.push({ date:t.date, assetSymbol:sym, amount:t.amount, valueSEK:proceedsSEK, id:t.id, category:t.category });
+          break;
+        }
+
+        case CAT.SELL:
+        case CAT.SEND: {
+          if (t.category === CAT.SEND && t.isInternalTransfer) break;
+          const qty        = Math.min(t.amount, h.totalQty); // cap at available
+          const costBasis  = avg(sym) * qty;
+          const gainLoss   = proceedsSEK - feeSEK - costBasis;
+
+          if (inYear && t.category === CAT.SELL) {
+            disposals.push({
+              date: t.date, assetSymbol: sym, assetName: t.assetName||sym,
+              amountSold: qty, proceedsSEK, feeSEK, costBasisSEK: costBasis,
+              gainLossSEK: gainLoss, avgCostAtSale: avg(sym),
+              id: t.id, needsReview: t.needsReview,
+            });
+          }
+          h.totalQty      = Math.max(0, h.totalQty - qty);
+          h.totalCostSEK  = Math.max(0, h.totalCostSEK - costBasis);
+          break;
+        }
+
+        case CAT.TRADE: {
+          const outSym  = sym;
+          const inSym   = t.inAsset;
+          const outAmt  = t.amount;
+          const outProc = proceedsSEK;
+
+          ensure(outSym);
+          const hOut       = holdings[outSym];
+          const qty        = Math.min(outAmt, hOut.totalQty);
+          const costBasis  = avg(outSym) * qty;
+          const gainLoss   = outProc - feeSEK - costBasis;
+
+          if (inYear) {
+            disposals.push({
+              date: t.date, assetSymbol: outSym, assetName: t.assetName||outSym,
+              amountSold: qty, proceedsSEK: outProc, feeSEK, costBasisSEK: costBasis,
+              gainLossSEK: gainLoss, avgCostAtSale: avg(outSym),
+              id: t.id, isTrade: true, inAsset: inSym, inAmount: t.inAmount,
+              needsReview: t.needsReview,
+            });
+          }
+          hOut.totalQty     = Math.max(0, hOut.totalQty - qty);
+          hOut.totalCostSEK = Math.max(0, hOut.totalCostSEK - costBasis);
+
+          // Buy side of swap — cost basis = FMV of what was sold
+          if (inSym && t.inAmount > 0) {
+            ensure(inSym);
+            holdings[inSym].totalQty     += t.inAmount;
+            holdings[inSym].totalCostSEK += outProc;
+          }
+          break;
+        }
+
+        case CAT.TRANSFER_OUT:
+        case CAT.SEND: {
+          if (t.isInternalTransfer) break;
+          // Non-matched outgoing: reduce holdings (no taxable event for transfers)
+          const qty = Math.min(t.amount, h.totalQty);
+          const cb  = avg(sym) * qty;
+          h.totalQty      = Math.max(0, h.totalQty - qty);
+          h.totalCostSEK  = Math.max(0, h.totalCostSEK - cb);
+          break;
+        }
+
+        case CAT.FEE: {
+          // Fees paid in crypto = disposal at market value
+          if (!['ETH','SOL','BNB','MATIC','AVAX'].includes(sym)) break;
+          const qty       = Math.min(t.amount, h.totalQty);
+          const feeProc   = priceSEK * qty;
+          const feeCb     = avg(sym) * qty;
+          const feeGain   = feeProc - feeCb;
+          if (inYear && Math.abs(feeGain) > 0.01) {
+            disposals.push({
+              date: t.date, assetSymbol: sym,
+              amountSold: qty, proceedsSEK: feeProc, feeSEK: 0,
+              costBasisSEK: feeCb, gainLossSEK: feeGain,
+              id: t.id, isFee: true, needsReview: false,
+            });
+          }
+          h.totalQty      = Math.max(0, h.totalQty - qty);
+          h.totalCostSEK  = Math.max(0, h.totalCostSEK - feeCb);
+          break;
+        }
+      }
+    }
+
+    // Summary
+    const totalGains   = disposals.filter(d => d.gainLossSEK > 0).reduce((s,d) => s + d.gainLossSEK, 0);
+    const totalLosses  = disposals.filter(d => d.gainLossSEK < 0).reduce((s,d) => s + Math.abs(d.gainLossSEK), 0);
+    const netGainLoss  = totalGains - totalLosses;
+    const taxableGain  = netGainLoss > 0 ? netGainLoss : 0;
+    const deductLoss   = totalLosses * LOSS_DEDUCTION;
+    const estimatedTax = taxableGain * TAX_RATE;
+    const totalIncome  = income.reduce((s,i) => s + i.valueSEK, 0);
+
+    // Target-year transactions only (for stats)
+    const yearTxns = txns.filter(t => new Date(t.date).getFullYear() === year);
+
+    // Current holdings
+    const currentHoldings = Object.entries(holdings)
+      .filter(([,h]) => h.totalQty > 1e-9)
+      .map(([sym, h]) => ({
+        symbol:       sym,
+        quantity:     h.totalQty,
+        avgCostSEK:   h.totalQty > 0 ? h.totalCostSEK / h.totalQty : 0,
+        totalCostSEK: h.totalCostSEK,
+      }))
+      .sort((a,b) => b.totalCostSEK - a.totalCostSEK);
+
+    return {
+      year, disposals, income, currentHoldings,
+      summary: {
+        totalTransactions:  yearTxns.length,
+        totalDisposals:     disposals.length,
+        totalGains, totalLosses, netGainLoss,
+        taxableGain, deductibleLoss: deductLoss,
+        estimatedTax, totalIncome,
+      },
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // K4 SECTION D EXPORT — SKV 2104
+  // Simplified method: one row per asset per gain/loss side.
+  // Per Skatteverket guidelines for crypto.
+  // ════════════════════════════════════════════════════════════
+  function generateK4Report(result, userInfo = {}) {
+    const { disposals, year } = result;
+
+    // Group by asset, then by gain/loss side
+    const assetMap = {};
+    for (const d of disposals) {
+      if (!assetMap[d.assetSymbol]) assetMap[d.assetSymbol] = { gains:[], losses:[] };
+      if (d.gainLossSEK >= 0) assetMap[d.assetSymbol].gains.push(d);
+      else                    assetMap[d.assetSymbol].losses.push(d);
+    }
+
+    // Build K4 rows: max 2 per asset (gain row + loss row)
+    const k4Rows = [];
+    for (const [sym, { gains, losses }] of Object.entries(assetMap)) {
+      if (gains.length > 0) {
+        const qty  = gains.reduce((s,d) => s + d.amountSold, 0);
+        const proc = gains.reduce((s,d) => s + d.proceedsSEK, 0);
+        const cost = gains.reduce((s,d) => s + d.costBasisSEK, 0);
+        const gain = gains.reduce((s,d) => s + d.gainLossSEK, 0);
+        k4Rows.push({ sym, side:'gain', qty, proc, cost, gain, loss:0 });
+      }
+      if (losses.length > 0) {
+        const qty  = losses.reduce((s,d) => s + d.amountSold, 0);
+        const proc = losses.reduce((s,d) => s + d.proceedsSEK, 0);
+        const cost = losses.reduce((s,d) => s + d.costBasisSEK, 0);
+        const loss = Math.abs(losses.reduce((s,d) => s + d.gainLossSEK, 0));
+        k4Rows.push({ sym, side:'loss', qty, proc, cost, gain:0, loss });
+      }
+    }
+
+    // Total sums
+    const totalGains  = k4Rows.reduce((s,r) => s + r.gain, 0);
+    const totalLosses = k4Rows.reduce((s,r) => s + r.loss, 0);
+
+    return { k4Rows, totalGains, totalLosses, year, userInfo,
+      formsNeeded: Math.max(1, Math.ceil(k4Rows.length / ROWS_PER_K4_FORM)) };
+  }
+
+  function generateK4CSV(result, userInfo = {}) {
+    const k4 = generateK4Report(result, userInfo);
+    const today = new Date().toLocaleDateString('sv-SE');
+    const ROWS_PER_PAGE = ROWS_PER_K4_FORM;
+
+    const lines = [];
+
+    // ── Summary header ──────────────────────────────────────
+    lines.push(
+      `; ═══════════════════════════════════════════════════════════════`,
+      `; SKV 2104 — Bilaga K4 — Sektion D (Kryptovalutor)`,
+      `; Förenklad metod: en rad per tillgång och vinstsida`,
+      `; Inkomstår:,${k4.year}`,
+      `; Datum:,${today}`,
+      userInfo.name ? `; Namn:,${userInfo.name}` : '',
+      userInfo.personnummer ? `; Personnummer:,${userInfo.personnummer}` : '',
+      `; `,
+      `; TILL INKOMSTDEKLARATION 1:`,
+      `; Summa vinst (Sektion D) → ruta 7.5:,${Math.round(k4.totalGains)} kr`,
+      `; Summa förlust (Sektion D) → ruta 8.4:,${Math.round(k4.totalLosses)} kr`,
+      `; Avdragsgill förlust (70%) → ruta 8.4:,${Math.round(k4.totalLosses * LOSS_DEDUCTION)} kr`,
+      `; ═══════════════════════════════════════════════════════════════`,
+      ``,
+    );
+
+    // ── K4 pages (7 rows each) ────────────────────────────
+    for (let page = 0; page < k4.formsNeeded; page++) {
+      const pageRows = k4.k4Rows.slice(page * ROWS_PER_PAGE, (page+1) * ROWS_PER_PAGE);
+      lines.push(
+        `; ─────────────────────────────────────────────────────────────`,
+        `; K4 BLANKETT ${page+1} av ${k4.formsNeeded}  |  Inkomstår ${k4.year}`,
+        `; D. Övriga värdepapper / andra tillgångar (kryptovalutor)`,
+        `; ─────────────────────────────────────────────────────────────`,
+        `Rad,Antal/Belopp,Beteckning/Valutakod,Försäljningspris (SEK),Omkostnadsbelopp (SEK),Vinst,Förlust`,
+      );
+
+      for (let row = 1; row <= ROWS_PER_PAGE; row++) {
+        const r = pageRows[row-1];
+        if (r) {
+          const beteckning = r.side === 'gain'
+            ? `${r.sym} kryptovaluta (vinst)`
+            : `${r.sym} kryptovaluta (förlust)`;
+          lines.push([
+            row,
+            `"${r.qty.toFixed(8)}"`,
+            `"${beteckning}"`,
+            Math.round(r.proc),
+            Math.round(r.cost),
+            r.gain ? Math.round(r.gain) : '',
+            r.loss ? Math.round(r.loss) : '',
+          ].join(','));
+        } else {
+          lines.push(`${row},,,,,,`);
+        }
+      }
+
+      const pageGain = pageRows.reduce((s,r) => s+r.gain, 0);
+      const pageLoss = pageRows.reduce((s,r) => s+r.loss, 0);
+      lines.push(
+        ``,
+        `; Summa vinst blankett ${page+1}:,,,,,${Math.round(pageGain)},`,
+        `; Summa förlust blankett ${page+1}:,,,,,,${Math.round(pageLoss)}`,
+        ``,
+      );
+    }
+
+    lines.push(
+      `; OBS! Genomsnittsmetoden (SFS 1999:1229 44 kap. 7§) har använts.`,
+      `; Belopp avrundas till hela kronor per Skatteverkets anvisningar.`,
+    );
+
+    return lines.filter(l => l !== '').join('\n');
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // CSV PARSERS (enhanced — auto-classify output)
+  // ════════════════════════════════════════════════════════════
+  function parseCSV(text) {
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) return [];
+    const header = splitCSVLine(lines[0]);
+    return lines.slice(1).map(line => {
+      const cols = splitCSVLine(line);
       const obj = {};
-      header.forEach((h, i) => { obj[h] = cols[i] || ''; });
+      header.forEach((h, i) => { obj[h.trim().replace(/"/g,'')] = (cols[i]||'').trim().replace(/"/g,''); });
       return obj;
     }).filter(row => Object.values(row).some(v => v));
+  }
+
+  function splitCSVLine(line) {
+    const cols = []; let cur = ''; let inQ = false;
+    for (const ch of line) {
+      if (ch === '"')      { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { cols.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    cols.push(cur);
+    return cols;
   }
 
   function parseBinanceCSV(text, accountId) {
     const rows = parseCSV(text);
     return rows.map(r => {
-      const isBuy  = (r['Side'] || r['Type'] || '').toUpperCase() === 'BUY';
-      const isSell = (r['Side'] || r['Type'] || '').toUpperCase() === 'SELL';
-      const asset   = (r['Coin'] || r['Asset'] || '').replace('USDT', '').replace('BUSD', '');
-      const quoteAmt = parseFloat(r['Total'] || r['Executed Amount (Quote)'] || 0);
-      const price    = parseFloat(r['Price'] || r['Avg Trading Price'] || 0);
-      const qty      = parseFloat(r['Executed'] || r['Amount'] || r['Quantity'] || 0);
-      const fee      = parseFloat(r['Fee'] || 0);
-
+      const side   = (r['Side']||r['Type']||'').toUpperCase();
+      const pair   = r['Pair']||r['Symbol']||'';
+      const base   = pair.replace(/USDT$|BUSD$|EUR$|BTC$|ETH$|BNB$/, '').toUpperCase() || (r['Coin']||r['Asset']||'').toUpperCase();
+      const qty    = parseFloat(r['Executed']||r['Amount']||r['Quantity']||0);
+      const price  = parseFloat(r['Price']||r['Avg Trading Price']||0);
+      const total  = parseFloat(r['Total']||r['Executed Amount (Quote)']||0);
+      const fee    = parseFloat(r['Fee']||0);
+      const date   = r['Date(UTC)']||r['Date']||r['Time']||'';
       return normalizeTransaction({
-        txHash:      r['TxID'] || r['Order ID'] || '',
-        date:        r['Date(UTC)'] || r['Date'] || r['Time'],
-        category:    isBuy ? CATEGORIES.BUY : isSell ? CATEGORIES.SELL : CATEGORIES.TRADE,
-        assetSymbol: asset,
-        amount:      qty,
-        // Price in quote currency (usually USDT) — will need SEK conversion
-        priceSEKPerUnit: price, // placeholder, SEK fetch needed
-        feeSEK:      fee,
-        needsReview: true, // Binance prices are in USDT, need SEK conversion
-        notes:       `Binance import — price in ${r['Quote Asset'] || 'USDT'}, SEK conversion needed`,
+        txHash:   r['TxID']||r['Order ID']||r['OrderId']||`bnb_${date}_${base}_${qty}`,
+        date, type: side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : 'trade',
+        assetSymbol: base, amount: qty,
+        priceSEKPerUnit: 0, // Will be fetched
+        costBasisSEK: 0,
+        feeSEK: fee, needsReview: true,
+        notes: `Binance ${side} ${base} at ${price} (quote)`,
       }, accountId, 'binance_csv');
     });
   }
@@ -246,20 +847,17 @@ const TaxEngine = (() => {
   function parseKrakenCSV(text, accountId) {
     const rows = parseCSV(text);
     return rows.map(r => {
-      const type = (r['type'] || '').toLowerCase();
-      const asset = (r['asset'] || r['pair'] || '').replace(/^X/, '').replace(/Z?EUR$|Z?USD$/, '').toUpperCase();
+      const type  = (r['type']||'').toLowerCase();
+      const asset = (r['asset']||'').replace(/^X(?=[A-Z]{2,4}$)/,'').replace(/Z?EUR$|Z?USD$|\.S$/,'').toUpperCase();
       return normalizeTransaction({
-        txHash:      r['txid'] || r['refid'] || '',
+        txHash:      r['txid']||r['refid']||`krk_${r['time']}_${asset}`,
         date:        r['time'],
-        category:    type === 'buy' ? CATEGORIES.BUY : type === 'sell' ? CATEGORIES.SELL :
-                     type === 'deposit' ? CATEGORIES.RECEIVE : type === 'withdrawal' ? CATEGORIES.SEND :
-                     type === 'staking' ? CATEGORIES.INCOME : CATEGORIES.TRADE,
+        type,
         assetSymbol: asset,
-        amount:      parseFloat(r['vol'] || r['amount'] || 0),
-        priceSEKPerUnit: parseFloat(r['price'] || 0),
-        feeSEK:      parseFloat(r['fee'] || 0),
+        amount:      parseFloat(r['vol']||r['amount']||0),
+        feeSEK:      parseFloat(r['fee']||0),
         needsReview: true,
-        notes:       'Kraken import — verify SEK price',
+        notes:       `Kraken ${type} ${asset}`,
       }, accountId, 'kraken_csv');
     });
   }
@@ -267,17 +865,17 @@ const TaxEngine = (() => {
   function parseBybitCSV(text, accountId) {
     const rows = parseCSV(text);
     return rows.map(r => {
-      const side = (r['Side'] || '').toUpperCase();
+      const side = (r['Side']||'').toUpperCase();
+      const sym  = (r['Symbol']||r['Coin']||'').replace(/USDT$|USD$/,'').toUpperCase();
       return normalizeTransaction({
-        txHash:      r['Order ID'] || r['Trade ID'] || '',
-        date:        r['Date'] || r['Time'],
-        category:    side === 'BUY' ? CATEGORIES.BUY : side === 'SELL' ? CATEGORIES.SELL : CATEGORIES.TRADE,
-        assetSymbol: (r['Symbol'] || '').replace('USDT', ''),
-        amount:      parseFloat(r['Qty'] || r['Amount'] || 0),
-        priceSEKPerUnit: parseFloat(r['Price'] || 0),
-        feeSEK:      parseFloat(r['Trading Fee'] || 0),
+        txHash:      r['Order ID']||r['Trade ID']||`bybit_${r['Date']}_${sym}`,
+        date:        r['Date']||r['Time'],
+        type:        side === 'BUY' ? 'buy' : 'sell',
+        assetSymbol: sym,
+        amount:      parseFloat(r['Qty']||r['Amount']||0),
+        feeSEK:      parseFloat(r['Trading Fee']||0),
         needsReview: true,
-        notes:       'Bybit import — verify SEK price',
+        notes:       `Bybit ${side} ${sym}`,
       }, accountId, 'bybit_csv');
     });
   }
@@ -285,547 +883,198 @@ const TaxEngine = (() => {
   function parseCoinbaseCSV(text, accountId) {
     const rows = parseCSV(text);
     return rows.map(r => {
-      const type = (r['Transaction Type'] || '').toLowerCase();
-      const spotPrice = parseFloat(r['Spot Price at Transaction'] || 0);
-      const subtotal  = parseFloat(r['Subtotal'] || 0);
-      const total     = parseFloat(r['Total (inclusive of fees and/or spread)'] || 0);
-      const fees      = parseFloat(r['Fees and/or Spread'] || 0);
+      const type = (r['Transaction Type']||'').toLowerCase();
       return normalizeTransaction({
-        txHash:      r['ID'] || r['Notes'] || '',
+        txHash:      r['ID']||`cb_${r['Timestamp']}_${r['Asset']}`,
         date:        r['Timestamp'],
-        category:    type.includes('buy') ? CATEGORIES.BUY :
-                     type.includes('sell') ? CATEGORIES.SELL :
-                     type.includes('receive') || type.includes('reward') || type.includes('earn') ? CATEGORIES.INCOME :
-                     type.includes('send') || type.includes('convert') ? CATEGORIES.TRADE : CATEGORIES.RECEIVE,
-        assetSymbol: (r['Asset'] || r['Coin Type'] || '').toUpperCase(),
-        amount:      parseFloat(r['Quantity Transacted'] || 0),
-        priceSEKPerUnit: spotPrice, // USD, needs conversion
-        feeSEK:      fees,
+        type,
+        assetSymbol: (r['Asset']||r['Coin Type']||'').toUpperCase(),
+        amount:      parseFloat(r['Quantity Transacted']||0),
+        feeSEK:      parseFloat(r['Fees and/or Spread']||0),
         needsReview: true,
-        notes:       `Coinbase import — price in ${r['Spot Price Currency'] || 'USD'}`,
+        notes:       `Coinbase ${type}`,
       }, accountId, 'coinbase_csv');
     });
   }
 
   function parseGenericCSV(text, accountId) {
-    // Auto-detect column mapping from common headers
     const rows = parseCSV(text);
-    if (!rows.length) return [];
     return rows.map(r => {
-      const lc = Object.fromEntries(Object.entries(r).map(([k, v]) => [k.toLowerCase(), v]));
+      const lc = Object.fromEntries(Object.entries(r).map(([k,v]) => [k.toLowerCase().replace(/[\s/]/g,'_'), v]));
       return normalizeTransaction({
-        txHash:      lc['txhash'] || lc['hash'] || lc['id'] || lc['orderid'] || '',
-        date:        lc['date'] || lc['datetime'] || lc['timestamp'] || lc['time'] || '',
-        category:    lc['type'] || lc['category'] || lc['side'] || '',
-        assetSymbol: (lc['asset'] || lc['symbol'] || lc['coin'] || lc['currency'] || '').toUpperCase(),
-        amount:      parseFloat(lc['amount'] || lc['quantity'] || lc['qty'] || 0),
-        priceSEKPerUnit: parseFloat(lc['pricesek'] || lc['price_sek'] || lc['price'] || 0),
-        feeSEK:      parseFloat(lc['fee'] || lc['feesek'] || lc['fee_sek'] || 0),
-        costBasisSEK: parseFloat(lc['totalsek'] || lc['total_sek'] || 0),
-        needsReview: true,
-        notes:       'Generic CSV import',
+        txHash:         lc.txhash||lc.hash||lc.id||lc.order_id||`gen_${Date.now()}_${Math.random()}`,
+        date:           lc.date||lc.datetime||lc.timestamp||lc.time||'',
+        type:           lc.type||lc.category||lc.side||'',
+        assetSymbol:    (lc.asset||lc.symbol||lc.coin||lc.currency||'').toUpperCase(),
+        amount:         parseFloat(lc.amount||lc.quantity||lc.qty||0),
+        priceSEKPerUnit: parseFloat(lc.price_sek||lc.pricesek||lc.price||0),
+        costBasisSEK:   parseFloat(lc.total_sek||lc.totalsek||lc.total||0),
+        feeSEK:         parseFloat(lc.fee||lc.fee_sek||0),
+        needsReview:    true,
+        notes:          'Generic CSV import',
       }, accountId, 'generic_csv');
     });
   }
 
-  // ── Blockchain Import ─────────────────────────────────────
-  // Solana — uses Helius if available, falls back to public RPC
-  async function importSolanaWallet(address, accountId) {
-    const txns = [];
+  // ════════════════════════════════════════════════════════════
+  // BLOCKCHAIN IMPORT — full history pagination
+  // ════════════════════════════════════════════════════════════
+
+  // Solana via Helius — paginates through ALL transactions
+  async function importSolanaWallet(address, accountId, onProgress) {
+    const heliusKey = localStorage.getItem('tcmd_helius_key');
+    if (!heliusKey) return { txns:[], error:'No Helius API key configured', missingKey:true };
+
+    let allRaw = [], before = null, hasMore = true;
+    setImportStatus(accountId, { status:'syncing', source:'solana', address });
+
     try {
-      // Try Helius enhanced API
-      const heliusKey = localStorage.getItem('tcmd_helius_key');
-      if (heliusKey) {
-        const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${heliusKey}&limit=100&type=SWAP`;
-        const r = await fetch(url);
-        if (r.ok) {
-          const data = await r.json();
-          for (const tx of data) {
-            const t = normalizeSolanaTx(tx, address, accountId);
-            if (t) txns.push(t);
-          }
-        }
+      while (hasMore) {
+        const qs  = `api-key=${heliusKey}&limit=100${before?`&before=${before}`:''}`;
+        const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?${qs}`;
+        const r   = await fetch(url);
+
+        if (r.status === 429) { await sleep(5000); continue; }
+        if (!r.ok) break;
+
+        const page = await r.json();
+        if (!page.length) { hasMore = false; break; }
+
+        allRaw  = allRaw.concat(page);
+        before  = page[page.length-1].signature;
+        hasMore = page.length === 100;
+
+        if (onProgress) onProgress({ step:'import', msg:`Fetched ${allRaw.length} Solana transactions…` });
+        await sleep(250);
       }
+
+      const txns = allRaw.flatMap(tx => normalizeSolanaTx(tx, address, accountId)||[]).filter(Boolean);
+      const start = txns.length ? txns.reduce((a,b) => a.date < b.date ? a : b).date : null;
+      const end   = txns.length ? txns.reduce((a,b) => a.date > b.date ? a : b).date : null;
+
+      setImportStatus(accountId, { status:'synced', totalFetched:allRaw.length, totalTxns:txns.length, startDate:start, endDate:end });
+      return { txns, totalFetched:allRaw.length };
     } catch (e) {
-      console.warn('Helius import failed:', e.message);
+      setImportStatus(accountId, { status:'failed', error:e.message });
+      return { txns:[], error:e.message };
     }
-    return txns;
   }
 
   function normalizeSolanaTx(tx, walletAddr, accountId) {
     try {
-      const isSwap = tx.type === 'SWAP' || tx.type === 'UNKNOWN';
-      const ts = new Date((tx.timestamp || 0) * 1000).toISOString();
-      const tokenTransfers = tx.tokenTransfers || [];
-      if (!tokenTransfers.length) return null;
+      const ts  = new Date((tx.timestamp||0)*1000).toISOString();
+      const tt  = tx.tokenTransfers || [];
+      const nt  = tx.nativeTransfers || [];
+      const fee = (tx.fee||0) / 1e9; // lamports → SOL
 
-      // Find what went out and what came in
-      const outgoing = tokenTransfers.filter(t => t.fromUserAccount === walletAddr);
-      const incoming = tokenTransfers.filter(t => t.toUserAccount === walletAddr);
+      // Swap (SWAP type or has both in and out token transfers)
+      if (tx.type === 'SWAP' || (tt.length >= 2)) {
+        const out = tt.find(t => t.fromUserAccount === walletAddr);
+        const inc = tt.find(t => t.toUserAccount   === walletAddr);
+        if (out && inc) {
+          return normalizeTransaction({
+            txHash:  tx.signature, date: ts, type:'swap',
+            assetSymbol: mintToSym(out.mint) || out.mint?.slice(0,8),
+            amount:  out.tokenAmount || 0,
+            inAsset: mintToSym(inc.mint) || inc.mint?.slice(0,8),
+            inAmount: inc.tokenAmount || 0,
+            feeSEK:  fee * 150, // approx SOL price * fee SOL
+            needsReview: true, notes:'Solana swap',
+          }, accountId, 'solana_wallet');
+        }
+      }
 
-      if (isSwap && outgoing.length && incoming.length) {
-        const out = outgoing[0];
-        const inc = incoming[0];
+      // SOL transfer
+      if (nt.length > 0) {
+        const isOut = nt.some(n => n.fromUserAccount === walletAddr);
+        const amt   = nt.reduce((s,n) => s + (n.amount||0), 0) / 1e9;
         return normalizeTransaction({
-          txHash:      tx.signature,
-          date:        ts,
-          category:    CATEGORIES.TRADE,
-          assetSymbol: out.mint || 'SOL',
-          amount:      out.tokenAmount || 0,
-          inAsset:     inc.mint || 'SOL',
-          inAmount:    inc.tokenAmount || 0,
-          feeSEK:      (tx.fee || 0) / 1e9 * 150, // approx SOL fee in SEK
-          needsReview: true,
-          notes:       'Solana swap — verify SEK price',
+          txHash: tx.signature, date: ts,
+          type:   isOut ? 'transfer_out' : 'transfer_in',
+          assetSymbol:'SOL', amount:amt,
+          feeSEK: fee * 150, needsReview:true, notes:'SOL transfer',
         }, accountId, 'solana_wallet');
       }
 
-      // Simple transfer in/out
-      if (incoming.length) {
-        const inc = incoming[0];
-        return normalizeTransaction({
-          txHash:      tx.signature,
-          date:        ts,
-          category:    CATEGORIES.RECEIVE,
-          assetSymbol: inc.mint || 'SOL',
-          amount:      inc.tokenAmount || 0,
-          needsReview: true,
-        }, accountId, 'solana_wallet');
-      }
+      // Token transfer
+      const inc = tt.find(t => t.toUserAccount   === walletAddr);
+      const out = tt.find(t => t.fromUserAccount === walletAddr);
+      if (inc) return normalizeTransaction({
+        txHash:tx.signature, date:ts, type:'transfer_in',
+        assetSymbol: mintToSym(inc.mint)||inc.mint?.slice(0,8), amount: inc.tokenAmount||0,
+        feeSEK:fee*150, needsReview:true,
+      }, accountId, 'solana_wallet');
+      if (out) return normalizeTransaction({
+        txHash:tx.signature, date:ts, type:'transfer_out',
+        assetSymbol: mintToSym(out.mint)||out.mint?.slice(0,8), amount: out.tokenAmount||0,
+        feeSEK:fee*150, needsReview:true,
+      }, accountId, 'solana_wallet');
+
     } catch { return null; }
     return null;
   }
 
-  // Ethereum — uses Etherscan
-  async function importEthWallet(address, accountId) {
-    const txns = [];
+  const KNOWN_MINTS = {
+    'So11111111111111111111111111111111111111112':'SOL',
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1u':'USDC',
+    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB':'USDT',
+  };
+  function mintToSym(mint) { return KNOWN_MINTS[mint] || null; }
+
+  // Ethereum via Etherscan — paginate ALL token transfers
+  async function importEthWallet(address, accountId, onProgress) {
+    let allTxns = [], page = 1, hasMore = true;
+    setImportStatus(accountId, { status:'syncing', source:'ethereum', address });
+
     try {
-      const url = `https://api.etherscan.io/api?module=account&action=tokentx&address=${address}&sort=desc&apikey=YourApiKeyToken`;
-      const r = await fetch(url);
-      if (!r.ok) return txns;
-      const data = await r.json();
-      if (data.status !== '1') return txns;
-      for (const tx of (data.result || []).slice(0, 200)) {
+      while (hasMore) {
+        const url = `https://api.etherscan.io/api?module=account&action=tokentx&address=${address}&sort=desc&page=${page}&offset=100&apikey=YourApiKeyToken`;
+        const r   = await fetch(url);
+        if (!r.ok) break;
+        const data = await r.json();
+        if (data.status !== '1' || !data.result?.length) { hasMore = false; break; }
+        allTxns = allTxns.concat(data.result);
+        hasMore = data.result.length === 100;
+        page++;
+        if (onProgress) onProgress({ step:'import', msg:`Fetched ${allTxns.length} Ethereum transactions…` });
+        await sleep(250);
+      }
+
+      const txns = allTxns.map(tx => {
         const isIn = tx.to.toLowerCase() === address.toLowerCase();
-        txns.push(normalizeTransaction({
-          txHash:      tx.hash,
-          date:        new Date(parseInt(tx.timeStamp) * 1000).toISOString(),
-          category:    isIn ? CATEGORIES.RECEIVE : CATEGORIES.SEND,
-          assetSymbol: tx.tokenSymbol,
+        return normalizeTransaction({
+          txHash:  tx.hash, date: new Date(parseInt(tx.timeStamp)*1000).toISOString(),
+          type:    isIn ? 'transfer_in' : 'transfer_out',
+          assetSymbol: tx.tokenSymbol?.toUpperCase(),
           assetName:   tx.tokenName,
-          amount:      parseInt(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal)),
+          amount:  parseInt(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal)||18),
+          feeSEK:  (parseInt(tx.gasUsed) * parseInt(tx.gasPrice) / 1e18) * 110, // approx ETH→SEK
           needsReview: true,
-          notes:       'ETH wallet import',
-        }, accountId, 'eth_wallet'));
-      }
+        }, accountId, 'eth_wallet');
+      });
+
+      const start = txns.length ? txns.reduce((a,b) => a.date < b.date ? a : b).date : null;
+      setImportStatus(accountId, { status:'synced', totalFetched:allTxns.length, totalTxns:txns.length, startDate:start, endDate:new Date().toISOString() });
+      return { txns, totalFetched:allTxns.length };
     } catch (e) {
-      console.warn('ETH import failed:', e.message);
+      setImportStatus(accountId, { status:'failed', error:e.message });
+      return { txns:[], error:e.message };
     }
-    return txns;
   }
 
-  // ── Genomsnittsmetoden (Swedish Average Cost) ─────────────
-  /*
-   * For each asset, we track:
-   *   - totalQuantity: total units currently held
-   *   - totalCostSEK:  total cost basis in SEK (after fees)
-   *   - avgCostSEK:    totalCostSEK / totalQuantity
-   *
-   * On SELL:
-   *   gainLoss = (salePriceSEK - avgCostSEK) * quantitySold - feeSEK
-   *
-   * Fees on BUY increase cost basis.
-   * Fees on SELL reduce proceeds (thus increase loss or reduce gain).
-   */
-
-  function computeTaxYear(year) {
-    const allTxns = getTransactions()
-      .filter(t => {
-        const d = new Date(t.date);
-        return d.getFullYear() === parseInt(year);
-      })
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    // Holdings map: symbol → { totalQty, totalCostSEK }
-    // Carry over from previous years by processing all history
-    const allHistory = getTransactions()
-      .filter(t => new Date(t.date).getFullYear() <= parseInt(year))
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    const holdings = {};  // symbol → { totalQty, totalCostSEK }
-    const disposals = []; // All disposal events in target year
-    const income = [];    // Income events (staking etc.)
-
-    function ensureHolding(sym) {
-      if (!holdings[sym]) holdings[sym] = { totalQty: 0, totalCostSEK: 0 };
-    }
-
-    function avgCost(sym) {
-      const h = holdings[sym];
-      if (!h || h.totalQty === 0) return 0;
-      return h.totalCostSEK / h.totalQty;
-    }
-
-    // Process in chronological order
-    for (const t of allHistory) {
-      const sym = t.assetSymbol;
-      if (!sym) continue;
-      ensureHolding(sym);
-      const h = holdings[sym];
-      const inTargetYear = new Date(t.date).getFullYear() === parseInt(year);
-
-      switch (t.category) {
-        case CATEGORIES.BUY:
-        case CATEGORIES.RECEIVE:
-        case CATEGORIES.INCOME:
-        case CATEGORIES.TRANSFER_IN: {
-          const costSEK = t.costBasisSEK || (t.priceSEKPerUnit * t.amount) || 0;
-          const feeSEK  = t.feeSEK || 0;
-          h.totalQty     += t.amount;
-          h.totalCostSEK += costSEK + feeSEK; // fees are added to cost basis on buy
-
-          if (inTargetYear && t.category === CATEGORIES.INCOME) {
-            income.push({
-              date:        t.date,
-              assetSymbol: sym,
-              amount:      t.amount,
-              valueSEK:    costSEK,
-              category:    'income',
-              id:          t.id,
-              notes:       t.notes,
-            });
-          }
-          break;
-        }
-
-        case CATEGORIES.SELL:
-        case CATEGORIES.SEND: {
-          const proceedsSEK = t.costBasisSEK || (t.priceSEKPerUnit * t.amount) || 0;
-          const feeSEK      = t.feeSEK || 0;
-          const costBasis   = avgCost(sym) * t.amount;
-          const gainLoss    = proceedsSEK - feeSEK - costBasis;
-
-          if (inTargetYear && t.category === CATEGORIES.SELL) {
-            disposals.push({
-              date:          t.date,
-              assetSymbol:   sym,
-              assetName:     t.assetName || sym,
-              amountSold:    t.amount,
-              proceedsSEK:   proceedsSEK,
-              feeSEK:        feeSEK,
-              costBasisSEK:  costBasis,
-              gainLossSEK:   gainLoss,
-              avgCostAtSale: avgCost(sym),
-              id:            t.id,
-              needsReview:   t.needsReview,
-            });
-          }
-
-          // Update holdings
-          h.totalQty     = Math.max(0, h.totalQty - t.amount);
-          h.totalCostSEK = Math.max(0, h.totalCostSEK - costBasis);
-          break;
-        }
-
-        case CATEGORIES.TRADE: {
-          // Treated as: sell outgoing asset, buy incoming asset
-          const outSym  = sym;
-          const inSym   = t.inAsset;
-          const outAmt  = t.amount;
-          const inAmt   = t.inAmount;
-          const outProc = t.costBasisSEK || (t.priceSEKPerUnit * outAmt) || 0;
-          const feeSEK  = t.feeSEK || 0;
-
-          // Process sell side
-          ensureHolding(outSym);
-          const hOut = holdings[outSym];
-          const costBasisOut = avgCost(outSym) * outAmt;
-          const gainLossOut  = outProc - feeSEK - costBasisOut;
-
-          if (inTargetYear) {
-            disposals.push({
-              date:          t.date,
-              assetSymbol:   outSym,
-              assetName:     t.assetName || outSym,
-              amountSold:    outAmt,
-              proceedsSEK:   outProc,
-              feeSEK:        feeSEK,
-              costBasisSEK:  costBasisOut,
-              gainLossSEK:   gainLossOut,
-              avgCostAtSale: avgCost(outSym),
-              id:            t.id,
-              isTrade:       true,
-              inAsset:       inSym,
-              inAmount:      inAmt,
-              needsReview:   t.needsReview,
-            });
-          }
-
-          hOut.totalQty     = Math.max(0, hOut.totalQty - outAmt);
-          hOut.totalCostSEK = Math.max(0, hOut.totalCostSEK - costBasisOut);
-
-          // Process buy side
-          if (inSym && inAmt > 0) {
-            ensureHolding(inSym);
-            const hIn = holdings[inSym];
-            // Cost basis of incoming = fair market value (same as sale proceeds)
-            hIn.totalQty     += inAmt;
-            hIn.totalCostSEK += outProc;
-          }
-          break;
-        }
-
-        case CATEGORIES.TRANSFER_OUT: {
-          // No taxable event, just reduce holdings
-          ensureHolding(sym);
-          const h2 = holdings[sym];
-          const costToRemove = avgCost(sym) * t.amount;
-          h2.totalQty     = Math.max(0, h2.totalQty - t.amount);
-          h2.totalCostSEK = Math.max(0, h2.totalCostSEK - costToRemove);
-          break;
-        }
-      }
-    }
-
-    // ── Summary ────────────────────────────────────────────
-    const totalGains  = disposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
-    const totalLosses = disposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
-    const netGainLoss = totalGains - totalLosses;
-    const taxableGain = netGainLoss > 0 ? netGainLoss : 0;
-    const deductibleLoss = netGainLoss < 0 ? Math.abs(netGainLoss) * LOSS_DEDUCTION : 0;
-    const estimatedTax = taxableGain * TAX_RATE_GAIN;
-
-    const totalIncome = income.reduce((s, i) => s + i.valueSEK, 0);
-
-    // Current holdings snapshot
-    const currentHoldings = Object.entries(holdings)
-      .filter(([, h]) => h.totalQty > 0.0000001)
-      .map(([sym, h]) => ({
-        symbol:       sym,
-        quantity:     h.totalQty,
-        avgCostSEK:   h.totalQty > 0 ? h.totalCostSEK / h.totalQty : 0,
-        totalCostSEK: h.totalCostSEK,
-      }));
-
-    return {
-      year,
-      disposals,
-      income,
-      summary: {
-        totalTransactions: allTxns.length,
-        totalDisposals:    disposals.length,
-        totalGains,
-        totalLosses,
-        netGainLoss,
-        taxableGain,
-        deductibleLoss,
-        estimatedTax,
-        totalIncome,
-      },
-      currentHoldings,
-    };
+  // ── Utilities ─────────────────────────────────────────────
+  function formatSEK(amt, d=0) {
+    if (amt===null||amt===undefined||isNaN(amt)) return '—';
+    return new Intl.NumberFormat('sv-SE',{style:'currency',currency:'SEK',minimumFractionDigits:d,maximumFractionDigits:d}).format(amt);
   }
-
-  // ── K4 Export — SKV 2104 Section D (kryptovalutor) ───────
-  /*
-   * Generates a CSV that directly mirrors the K4 paper form (SKV 2104).
-   * Crypto assets belong in Section D:
-   *   "Övriga värdepapper, andra tillgångar — t.ex. råvaror, kryptovalutor"
-   *
-   * Each K4 form can hold 7 rows (Section D, rows 1–7).
-   * If more than 7 disposals, the output is split across multiple K4 pages
-   * (each with its own header, rows 1–7, and summary rows).
-   *
-   * Column order matches the printed form exactly:
-   *   Antal/Belopp | Beteckning/Valutakod | Försäljningspris (SEK) | Omkostnadsbelopp (SEK) | Vinst | Förlust
-   *
-   * Transfer to Inkomstdeklaration 1:
-   *   Summa vinst  → ruta 7.5
-   *   Summa förlust → ruta 8.4 (70% avdragsgill, dvs × 0,70)
-   */
-  function generateK4CSV(result, userInfo = {}) {
-    const { disposals, year } = result;
-    const today = new Date().toLocaleDateString('sv-SE');
-    const ROWS_PER_PAGE = 7;
-
-    // Split into pages of 7
-    const pages = [];
-    for (let i = 0; i < Math.max(disposals.length, 1); i += ROWS_PER_PAGE) {
-      pages.push(disposals.slice(i, i + ROWS_PER_PAGE));
-    }
-
-    const sections = [];
-
-    // ── Global summary block at top ─────────────────────────
-    const totalGains  = disposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
-    const totalLosses = disposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
-
-    sections.push([
-      `; ═══════════════════════════════════════════════════════════════`,
-      `; SKV 2104 — Försäljning Värdepapper m.m. — BILAGA K4`,
-      `; Sektion D: Övriga tillgångar (kryptovalutor)`,
-      `; Inkomstår:,${year}`,
-      `; Datum:,${today}`,
-      `; Framtagen av:,T-CMD Tax Calculator (Genomsnittsmetoden)`,
-      userInfo.name        ? `; Namn:,${userInfo.name}` : '',
-      userInfo.personnummer ? `; Personnummer:,${userInfo.personnummer}` : '',
-      `; `,
-      `; SAMMANFATTNING — för Inkomstdeklaration 1:`,
-      `; Summa vinst  → ruta 7.5 på Inkomstdeklaration 1:,${Math.round(totalGains)} kr`,
-      `; Summa förlust → ruta 8.4 (avdragsgill del 70%):,${Math.round(totalLosses * 0.70)} kr`,
-      `; `,
-      `; Antal avyttringar:,${disposals.length}`,
-      `; Antal K4-blanketter:,${pages.length}`,
-      `; ═══════════════════════════════════════════════════════════════`,
-      ``,
-    ].filter(l => l !== '').join('\n'));
-
-    // ── One K4 page per 7 disposals ─────────────────────────
-    pages.forEach((pageDisposals, pageIdx) => {
-      const pageNum = pageIdx + 1;
-      const isLastPage = pageIdx === pages.length - 1;
-
-      // Partial sums for this page
-      const pageGain  = pageDisposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
-      const pageLoss  = pageDisposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
-      const pageProc  = pageDisposals.reduce((s, d) => s + d.proceedsSEK, 0);
-      const pageCost  = pageDisposals.reduce((s, d) => s + d.costBasisSEK, 0);
-
-      const block = [];
-
-      // Page header
-      block.push(
-        `; ─────────────────────────────────────────────────────────────`,
-        `; K4 BLANKETT ${pageNum} av ${pages.length}  |  Inkomstår ${year}`,
-        `; Sektion D — Övriga värdepapper/andra tillgångar (kryptovalutor)`,
-        `; ─────────────────────────────────────────────────────────────`,
-        `;`,
-        `; D. Övriga värdepapper / andra tillgångar / kryptovalutor`,
-        `;`,
-      );
-
-      // Column headers — exact match to K4 form Section D
-      block.push(
-        `Rad,` +
-        `Antal/Belopp,` +
-        `Beteckning/Valutakod,` +
-        `Försäljningspris omräknat till svenska kronor,` +
-        `Omkostnadsbelopp omräknat till svenska kronor,` +
-        `Vinst,` +
-        `Förlust`
-      );
-
-      // Rows 1–7 (pad with empty rows if fewer than 7)
-      for (let row = 1; row <= ROWS_PER_PAGE; row++) {
-        const d = pageDisposals[row - 1];
-        if (d) {
-          const gain = d.gainLossSEK > 0 ? Math.round(d.gainLossSEK) : '';
-          const loss = d.gainLossSEK < 0 ? Math.round(Math.abs(d.gainLossSEK)) : '';
-          // Beteckning: e.g. "BTC (kryptovaluta)" or "ETH/BTC byta (kryptovaluta)"
-          const beteckning = d.isTrade
-            ? `${d.assetSymbol} → ${d.inAsset || '?'} (kryptovaluta byte)`
-            : `${d.assetSymbol} (kryptovaluta)`;
-          block.push(
-            `${row},` +
-            `"${parseFloat(d.amountSold).toFixed(8)}",` +
-            `"${beteckning}",` +
-            `${Math.round(d.proceedsSEK)},` +
-            `${Math.round(d.costBasisSEK)},` +
-            `${gain},` +
-            `${loss}`
-          );
-        } else {
-          // Empty row placeholder
-          block.push(`${row},,,,,,`);
-        }
-      }
-
-      // Summary rows for this page (required on each K4 form)
-      block.push(
-        ``,
-        `; SUMMERING (rad 1–7 på denna blankett):`,
-        `; Summa vinst (Sektion D),,,${Math.round(pageProc)},${Math.round(pageCost)},${Math.round(pageGain)},`,
-        `; Summa förlust (Sektion D),,,,,,${Math.round(pageLoss)}`,
-      );
-
-      // If last page, add the carry-forward instructions
-      if (isLastPage) {
-        block.push(
-          ``,
-          `; ─────────────────────────────────────────────────────────────`,
-          `; TOTALBELOPP ATT FÖR ÖVER TILL INKOMSTDEKLARATION 1:`,
-          `; ─────────────────────────────────────────────────────────────`,
-          `; Summa vinst alla blanketter → ruta 7.5 på Inkomstdeklaration 1:,${Math.round(totalGains)} kr`,
-          `; Summa förlust alla blanketter → ruta 8.4 på Inkomstdeklaration 1:,${Math.round(totalLosses)} kr`,
-          `; Avdragsgill förlust (70% av förlust) → ruta 8.4:,${Math.round(totalLosses * 0.70)} kr`,
-          `; ─────────────────────────────────────────────────────────────`,
-          `; OBS! Belopp avrundas till hela kronor enligt Skatteverkets regler.`,
-          `; Genomsnittsmetoden (SFS 1999:1229 44 kap. 7§) har använts.`,
-        );
-      }
-
-      block.push('');
-      sections.push(block.join('\n'));
-    });
-
-    return sections.join('\n');
+  function formatCrypto(amt, d=6) {
+    if (!amt && amt!==0) return '—';
+    return parseFloat(amt).toLocaleString('sv-SE',{minimumFractionDigits:0,maximumFractionDigits:d});
   }
-
-  function generateK4Summary(result) {
-    const { disposals } = result;
-
-    // Group: gains vs losses
-    const gains  = disposals.filter(d => d.gainLossSEK >= 0);
-    const losses = disposals.filter(d => d.gainLossSEK < 0);
-
-    const sumProc = (arr) => arr.reduce((s, d) => s + d.proceedsSEK, 0);
-    const sumCost = (arr) => arr.reduce((s, d) => s + d.costBasisSEK, 0);
-    const sumGL   = (arr) => arr.reduce((s, d) => s + d.gainLossSEK, 0);
-
-    return {
-      box_d_gains: {
-        proceeds:    sumProc(gains),
-        costBasis:   sumCost(gains),
-        gain:        sumGL(gains),
-      },
-      box_d_losses: {
-        proceeds:    sumProc(losses),
-        costBasis:   sumCost(losses),
-        loss:        Math.abs(sumGL(losses)),
-      },
-      deductibleLoss: result.summary.deductibleLoss,
-      // How many K4 forms needed
-      formsNeeded: Math.max(1, Math.ceil(disposals.length / 7)),
-    };
-  }
-
-  // ── Utility ───────────────────────────────────────────────
-  function formatSEK(amt, decimals = 0) {
-    if (amt === null || amt === undefined || isNaN(amt)) return '—';
-    return new Intl.NumberFormat('sv-SE', {
-      style: 'currency', currency: 'SEK',
-      minimumFractionDigits: decimals,
-      maximumFractionDigits: decimals,
-    }).format(amt);
-  }
-
-  function formatCrypto(amt, decimals = 6) {
-    if (!amt && amt !== 0) return '—';
-    return parseFloat(amt).toLocaleString('sv-SE', {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: decimals,
-    });
-  }
-
-  // ── Available tax years ────────────────────────────────────
   function getAvailableTaxYears() {
     const txns = getTransactions();
-    if (!txns.length) {
-      const y = new Date().getFullYear();
-      return [y - 1, y];
-    }
+    if (!txns.length) { const y=new Date().getFullYear(); return [y-1,y]; }
     const years = [...new Set(txns.map(t => new Date(t.date).getFullYear()))].sort();
-    // Add current year
     const cur = new Date().getFullYear();
     if (!years.includes(cur)) years.push(cur);
     return years;
@@ -833,21 +1082,34 @@ const TaxEngine = (() => {
 
   // ── Public API ────────────────────────────────────────────
   return {
+    CAT, REVIEW_DESCRIPTIONS,
     // Settings
     getSettings, saveSettings,
     // Accounts
-    getAccounts, saveAccounts, addAccount, removeAccount,
+    getAccounts, addAccount, removeAccount, updateAccount,
+    getImportStatus, setImportStatus,
     // Transactions
     getTransactions, saveTransactions, addTransactions,
     deleteTransaction, updateTransaction,
-    // Import
-    parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
-    importSolanaWallet, importEthWallet,
     normalizeTransaction,
-    // Tax calculation
-    computeTaxYear, generateK4CSV, generateK4Summary,
-    // Helpers
-    fetchHistoricalPrice, formatSEK, formatCrypto, getAvailableTaxYears,
-    CATEGORIES,
+    // Pipeline
+    runPipeline, Events,
+    // Classification
+    autoClassifyAll, matchTransfers,
+    // Prices
+    fetchAllSEKPrices, getPriceCache, savePriceCache,
+    // Tax engine
+    computeTaxYear,
+    // K4 export
+    generateK4Report, generateK4CSV,
+    // Review
+    getReviewIssues, isTaxableCategory,
+    // CSV parsers
+    parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
+    // Blockchain import
+    importSolanaWallet, importEthWallet,
+    // Utils
+    formatSEK, formatCrypto, getAvailableTaxYears,
+    isPipelineRunning: () => _pipelineRunning,
   };
 })();

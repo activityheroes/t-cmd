@@ -378,6 +378,20 @@ const TaxEngine = (() => {
     return STABLE_SEK.USD;
   }
 
+  // Fetch with a hard timeout — avoids hanging the tab if API is slow/rate-limiting
+  async function fetchWithTimeout(url, timeoutMs = 8000) {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(tid);
+      return r;
+    } catch (e) {
+      clearTimeout(tid);
+      return null; // timeout or network error → treat as missing price
+    }
+  }
+
   // Fetch one year of daily USD prices from CoinCap (single CORS-friendly request)
   // Returns Map<YYYY-MM-DD, usdPrice>
   async function fetchCoinCapYear(ccId, year) {
@@ -385,8 +399,8 @@ const TaxEngine = (() => {
     const endMs   = Date.UTC(year, 11, 31, 23, 59, 59);
     try {
       const url = `https://api.coincap.io/v2/assets/${ccId}/history?interval=d1&start=${startMs}&end=${endMs}`;
-      const r = await fetch(url);
-      if (!r.ok) return null;
+      const r = await fetchWithTimeout(url, 10000);
+      if (!r || !r.ok) return null;
       const data = await r.json();
       const map = new Map();
       for (const pt of (data.data || [])) {
@@ -402,8 +416,8 @@ const TaxEngine = (() => {
   async function fetchFXYear(year) {
     try {
       const url = `https://api.frankfurter.app/${year}-01-01..${year}-12-31?from=USD&to=SEK`;
-      const r = await fetch(url);
-      if (!r.ok) return null;
+      const r = await fetchWithTimeout(url, 10000);
+      if (!r || !r.ok) return null;
       const data = await r.json();
       // data.rates = { "2024-01-02": { "SEK": 10.45 }, ... }
       const map = new Map();
@@ -439,7 +453,7 @@ const TaxEngine = (() => {
         price = stableSEKPrice(t.assetSymbol);
         priceSource = 'stable_approx';
       } else {
-        const ccId = t.coinGeckoId || CC_IDS[t.assetSymbol];
+        const ccId = CC_IDS[t.assetSymbol]; // only valid CoinCap IDs
         if (ccId) {
           price       = cache[cacheKey(ccId, (t.date||'').slice(0,10))] || null;
           priceSource = price ? 'coincap' : null;
@@ -463,9 +477,12 @@ const TaxEngine = (() => {
   async function fetchAllSEKPrices(txns, onProgress) {
     const cache = getPriceCache();
 
-    // Collect unique (ccId, year) pairs that need fetching
+    // Collect unique (ccId, year) pairs that need fetching.
+    // IMPORTANT: Only use CC_IDS[symbol] — never t.coinGeckoId, which may hold stale
+    // CoinGecko IDs from old imports that are invalid CoinCap IDs (e.g. 'avalanche-2').
     const neededPairs = new Map(); // "ccId|year" → { ccId, year }
     const neededYears = new Set();
+    const MAX_PAIRS   = 80; // safety cap: prevents browser freeze on huge wallets
 
     for (const t of txns) {
       if (t.isInternalTransfer) continue;
@@ -473,13 +490,13 @@ const TaxEngine = (() => {
       if (t.priceSEKPerUnit > 0) continue;
       if (STABLES.has(t.assetSymbol)) continue;
 
-      const ccId    = t.coinGeckoId || CC_IDS[t.assetSymbol];
+      const ccId = CC_IDS[t.assetSymbol]; // only use known-valid CoinCap IDs
       if (!ccId) continue;
 
       const dateStr = (t.date || '').slice(0,10);
       if (!dateStr) continue;
 
-      // Skip if already cached
+      // Skip if already cached (keyed by CC ID + date)
       if (cache[cacheKey(ccId, dateStr)] !== undefined) continue;
 
       const year    = parseInt(dateStr.slice(0,4));
@@ -488,6 +505,7 @@ const TaxEngine = (() => {
         neededPairs.set(pairKey, { ccId, year });
         neededYears.add(year);
       }
+      if (neededPairs.size >= MAX_PAIRS) break; // process remaining on next pipeline run
     }
 
     const totalSteps = neededYears.size + neededPairs.size;

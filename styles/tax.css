@@ -299,39 +299,67 @@
   border-radius: 10px;
 }
 
-/* Portfolio assets table — scroll inside the section, not the whole page */
+/* ── Portfolio assets table: scrollable tbody, fixed thead ──
+   The reliable cross-browser approach is to make ONLY <tbody> scroll
+   (display:block). position:sticky on <th> fails when any ancestor
+   already has overflow:auto (.tax-main), so we avoid it entirely.   */
+
+/* Wrapper: no overflow here — tbody handles it */
 .tax-page--portfolio .tax-table-wrap {
-  max-height: 480px;
+  overflow: visible;
+  max-height: none;
+}
+
+/* Fixed column widths so thead + tbody stay aligned */
+.tax-page--portfolio .tax-table {
+  table-layout: fixed;
+  width: 100%;
+}
+.tax-page--portfolio .tax-table th:nth-child(1),
+.tax-page--portfolio .tax-table td:nth-child(1) { width: 30%; }
+.tax-page--portfolio .tax-table th:nth-child(2),
+.tax-page--portfolio .tax-table td:nth-child(2) { width: 13%; }
+.tax-page--portfolio .tax-table th:nth-child(3),
+.tax-page--portfolio .tax-table td:nth-child(3) { width: 13%; }
+.tax-page--portfolio .tax-table th:nth-child(4),
+.tax-page--portfolio .tax-table td:nth-child(4) { width: 20%; }
+.tax-page--portfolio .tax-table th:nth-child(5),
+.tax-page--portfolio .tax-table td:nth-child(5) { width: 16%; }
+.tax-page--portfolio .tax-table th:nth-child(6),
+.tax-page--portfolio .tax-table td:nth-child(6) { width: 8%; }
+
+/* thead stays in normal flow — always visible */
+.tax-page--portfolio .tax-table thead tr {
+  display: table;
+  width: calc(100% - 6px); /* subtract scrollbar gutter so columns align with tbody */
+  table-layout: fixed;
+  background: #0d1424;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.08);
+}
+
+/* tbody becomes a scrollable block — only this part scrolls */
+.tax-page--portfolio .tax-table tbody {
+  display: block;
+  max-height: 450px;
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.12) transparent;
 }
-.tax-page--portfolio .tax-table-wrap::-webkit-scrollbar {
-  width: 6px;
+.tax-page--portfolio .tax-table tbody::-webkit-scrollbar { width: 6px; }
+.tax-page--portfolio .tax-table tbody::-webkit-scrollbar-track { background: transparent; }
+.tax-page--portfolio .tax-table tbody::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.12); border-radius: 3px;
 }
-.tax-page--portfolio .tax-table-wrap::-webkit-scrollbar-track {
-  background: transparent;
-}
-.tax-page--portfolio .tax-table-wrap::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.12);
-  border-radius: 3px;
-}
-.tax-page--portfolio .tax-table-wrap::-webkit-scrollbar-thumb:hover {
+.tax-page--portfolio .tax-table tbody::-webkit-scrollbar-thumb:hover {
   background: rgba(255,255,255,0.22);
 }
-/* border-collapse:collapse breaks position:sticky in all browsers.
-   Switch to separate + border-spacing:0 (visually identical) so sticky works. */
-.tax-page--portfolio .tax-table {
-  border-collapse: separate;
-  border-spacing: 0;
-}
-/* Sticky column headers — applied to th, not thead */
-.tax-page--portfolio .tax-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: #0d1424;   /* slightly darker than card bg so rows don't bleed through */
-  box-shadow: 0 1px 0 rgba(255,255,255,0.08);
+
+/* Each body row must be rendered as a table row */
+.tax-page--portfolio .tax-table tbody tr {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
 }
 
 .tax-table {

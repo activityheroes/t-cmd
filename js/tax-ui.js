@@ -455,7 +455,7 @@ const TaxUI = (() => {
     const allTxns  = TaxEngine.getTransactions();
     const accounts = TaxEngine.getAccounts();
     const filtered = filterTxns(allTxns);
-    const sorted   = sortTxns(filtered);
+    const sorted   = sortTxnsArr(filtered);
     const paged    = sorted.slice(S.txPage * S.txPageSize, (S.txPage+1) * S.txPageSize);
 
     return `
@@ -1082,7 +1082,9 @@ const TaxUI = (() => {
   }
 
   // ── Init ──────────────────────────────────────────────────
-  function init() {
+  async function init() {
+    // Load transactions from IndexedDB into in-memory cache before first render
+    await TaxEngine.loadTransactions();
     S.taxYear = TaxEngine.getSettings().taxYear;
     S.taxResult = null;
     bindPipelineEvents();
@@ -1105,10 +1107,4 @@ const TaxUI = (() => {
     filterTxns, sortTxnsArr: txns => sortTxnsArr(txns),
   };
 
-  // ── internal only (not exported) but used in render closures
-  function sortTxns(field) {
-    S.txSort.dir = S.txSort.field===field ? (S.txSort.dir==='asc'?'desc':'asc') : 'desc';
-    S.txSort.field = field;
-    reRenderMain();
-  }
 })();

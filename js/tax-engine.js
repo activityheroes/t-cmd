@@ -803,15 +803,20 @@ const TaxEngine = (() => {
     // Target-year transactions only (for stats)
     const yearTxns = txns.filter(t => new Date(t.date).getFullYear() === year);
 
-    // Current holdings
+    // Current holdings — resolve display symbol/name so the UI always shows
+    // human-readable tokens (JUPYIWRY → JUP "Jupiter", EPJFWDD5 → USDC, etc.)
     const currentHoldings = Object.entries(holdings)
       .filter(([,h]) => h.totalQty > 1e-9)
-      .map(([sym, h]) => ({
-        symbol:       sym,
-        quantity:     h.totalQty,
-        avgCostSEK:   h.totalQty > 0 ? h.totalCostSEK / h.totalQty : 0,
-        totalCostSEK: h.totalCostSEK,
-      }))
+      .map(([sym, h]) => {
+        const td = resolveTokenDisplay(sym);
+        return {
+          symbol:       td.symbol || sym,
+          assetName:    td.name   || h.assetName || sym,
+          quantity:     h.totalQty,
+          avgCostSEK:   h.totalQty > 0 ? h.totalCostSEK / h.totalQty : 0,
+          totalCostSEK: h.totalCostSEK,
+        };
+      })
       .sort((a,b) => b.totalCostSEK - a.totalCostSEK);
 
     return {
@@ -1169,12 +1174,131 @@ const TaxEngine = (() => {
     return null;
   }
 
+  // Full mint address → symbol (Solana)
   const KNOWN_MINTS = {
-    'So11111111111111111111111111111111111111112':'SOL',
-    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1u':'USDC',
-    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB':'USDT',
+    // Native SOL
+    'So11111111111111111111111111111111111111112':  'SOL',
+    // Stablecoins
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v':'USDC',  // fixed: was 'u'
+    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+    'USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX':  'USDH',
+    // Major DeFi / ecosystem
+    'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN':  'JUP',
+    '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R': 'RAY',
+    'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So':  'MSOL',
+    'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE':   'ORCA',
+    'SRMuApVNdxXokk5GT7XD5cUUgXMBCoAz2LHeuAoKWRt':   'SRM',
+    'MangoCzJ36AjZyKwVj3VnYU4GTonjfVEnJmvvWaxLac':   'MNGO',
+    'StepAscQoEioFxxWGnh2sLBDFp9d8rvKz2Xjdsc8bnF':   'STEP',
+    'Saber2gLauYim4Mvftnrasomsv6NvAunSsNgQIkmjnK':   'SBR',
+    'SHDWyBxihqiCj6YekG2GUr7wqKLeLAMK1gHZck9pL6y':  'SHDW',
+    // Meme coins
+    'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+    'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',
+    'MEFNBXixkEbait3xn9bkm8WsJzXtVsaJEn4c8Sam21Y':   'MEME',
+    'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82':   'BOME',
+    '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU':  'SAMO',
+    // Oracles / infra
+    'HZ1JovNiVvGqWz8f9P7pVMKgBfQ5bHUi7t5RhHCRWRJo': 'PYTH',
+    'DriFtupJYLTosbwoN8koMbEYSx54aFAVLddWsbksjwg7':  'DRIFT',
+    'TNSRxcUxoT9xBG3de7NiJo5YBkNzMzMgaEgVgUt5PV':   'TNSR',
+    'WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk':   'WEN',
+    // Gaming / metaverse
+    'ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx':  'ATLAS',
+    'poLisWXnNRwC6oBu1vHiuKQzFjGL4XDSu4g9qjz9qVk':   'POLIS',
+    // Bridged assets
+    '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs':  'WETH',
+    '9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E':  'WBTC',
+    // Helium
+    'hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux':   'HNT',
+    'mb1eu7TzEc71KxDpsmsKoucSSuuoGLv1drys1oP2jh6':    'MOBILE',
+    'iotEVVZLEywoTn1QdwNPddxPWszn3zFhEot3MfL9fns':    'IOT',
   };
-  function mintToSym(mint) { return KNOWN_MINTS[mint] || null; }
+
+  // Human-readable full names for known symbols
+  const TOKEN_DISPLAY_NAMES = {
+    SOL:'Solana', ETH:'Ethereum', BTC:'Bitcoin', BNB:'BNB',
+    USDC:'USD Coin', USDT:'Tether USD', USDH:'USDH', DAI:'Dai', BUSD:'Binance USD',
+    JUP:'Jupiter', RAY:'Raydium', MSOL:'Marinade SOL', ORCA:'Orca',
+    SRM:'Serum', MNGO:'Mango', STEP:'Step Finance', SBR:'Saber', SHDW:'Shadow Token',
+    BONK:'Bonk', WIF:'dogwifhat', MEME:'Memecoin', BOME:'Book of Meme', SAMO:'Samoyed Coin',
+    PYTH:'Pyth Network', DRIFT:'Drift Protocol', TNSR:'Tensor', WEN:'Wen',
+    ATLAS:'Star Atlas', POLIS:'Star Atlas POLIS',
+    WETH:'Wrapped ETH', WBTC:'Wrapped BTC', WSOL:'Wrapped SOL',
+    HNT:'Helium', MOBILE:'Helium Mobile', IOT:'Helium IOT',
+    LINK:'Chainlink', UNI:'Uniswap', AAVE:'Aave', COMP:'Compound',
+    AVAX:'Avalanche', MATIC:'Polygon', DOT:'Polkadot', ADA:'Cardano',
+    DOGE:'Dogecoin', SHIB:'Shiba Inu', PEPE:'Pepe',
+    OP:'Optimism', ARB:'Arbitrum', INJ:'Injective', APT:'Aptos', SUI:'Sui',
+    SEI:'Sei', TIA:'Celestia', ATOM:'Cosmos', NEAR:'NEAR Protocol',
+    XRP:'XRP', LTC:'Litecoin', TON:'Toncoin',
+    JTO:'Jito', ZEUS:'Zeus Network', BNSOL:'Binance Staked SOL',
+    DSYNC:'Destra Network', PEPECOIN:'PepeCoin', MON:'Monad',
+  };
+
+  // Reverse lookup: first 8 chars of mint (uppercase) → symbol.
+  // Built automatically from KNOWN_MINTS so it's always in sync.
+  const MINT_PREFIX_TO_SYM = Object.fromEntries(
+    Object.entries(KNOWN_MINTS).map(([mint, sym]) => [mint.slice(0,8).toUpperCase(), sym])
+  );
+
+  // Resolve display {symbol, name} for any assetSymbol — handles both proper
+  // symbols (SOL, ETH) and 8-char truncated Solana mint prefixes (JUPYIWRY → JUP).
+  function resolveTokenDisplay(sym) {
+    if (!sym) return { symbol: sym, name: sym };
+    const upper = sym.toUpperCase().trim();
+    // 1. Direct symbol match
+    if (TOKEN_DISPLAY_NAMES[upper]) return { symbol: upper, name: TOKEN_DISPLAY_NAMES[upper] };
+    // 2. 8-char mint prefix reverse lookup (e.g. "JUPYIWRY" → "JUP")
+    const resolved = MINT_PREFIX_TO_SYM[upper];
+    if (resolved) return { symbol: resolved, name: TOKEN_DISPLAY_NAMES[resolved] || resolved };
+    // 3. Unknown
+    return { symbol: sym, name: null };
+  }
+
+  // Async: fetch human-readable names from DexScreener for truly unknown symbols.
+  // Results cached in localStorage under 'tcmd_token_names' (7-day TTL).
+  async function resolveUnknownTokenNames(symbols) {
+    const CACHE_KEY = 'tcmd_token_names';
+    const TTL_MS    = 7 * 24 * 60 * 60 * 1000; // 7 days
+    let cache = {};
+    try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch {}
+    // Evict stale entries
+    const now = Date.now();
+    for (const k of Object.keys(cache)) {
+      if (cache[k]._ts && now - cache[k]._ts > TTL_MS) delete cache[k];
+    }
+    // Only look up symbols we can't resolve statically
+    const needed = [...new Set(symbols)].filter(s => {
+      const upper = s.toUpperCase();
+      return !TOKEN_DISPLAY_NAMES[upper] && !MINT_PREFIX_TO_SYM[upper] && !cache[upper];
+    });
+    for (const sym of needed.slice(0, 8)) {  // limit to 8 API calls per session
+      try {
+        const url = `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(sym)}`;
+        const r   = await fetchWithTimeout(url, 8000);
+        if (!r || !r.ok) continue;
+        const data = await r.json();
+        // Find best match: prefer pair whose baseToken symbol exactly matches
+        const pair = (data.pairs || []).find(
+          p => p.baseToken?.symbol?.toUpperCase() === sym.toUpperCase()
+        );
+        if (pair?.baseToken?.name) {
+          cache[sym.toUpperCase()] = {
+            symbol: pair.baseToken.symbol,
+            name:   pair.baseToken.name,
+            _ts:    now,
+          };
+        }
+      } catch { /* ignore individual lookup failures */ }
+    }
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch {}
+    return cache;
+  }
+
+  function mintToSym(mint) {
+    return KNOWN_MINTS[mint] || null;
+  }
 
   // Ethereum via Etherscan — paginate ALL token transfers
   async function importEthWallet(address, accountId, onProgress) {
@@ -1464,6 +1588,8 @@ const TaxEngine = (() => {
     importSolanaWallet, importEthWallet,
     // Portfolio live data
     fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory, buildCostBasisHistory,
+    // Token name resolution
+    resolveTokenDisplay, resolveUnknownTokenNames,
     // Utils
     formatSEK, formatCrypto, getAvailableTaxYears,
     isPipelineRunning: () => _pipelineRunning,

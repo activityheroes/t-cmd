@@ -485,14 +485,23 @@ const TaxUI = (() => {
       el.innerHTML = fmt(v);
       el.className = 'tax-port-sum-val ' + (v >= 0 ? 'tax-port-pos' : 'tax-port-neg');
     };
+    // When live prices aren't available for the user's holdings (e.g. unknown tokens),
+    // totalValueSEK stays 0. Fall back to total cost basis so the headline isn't 0 kr.
+    const hasLivePrices   = snap.totalValueSEK > 0;
+    const displayTotalSEK = hasLivePrices ? snap.totalValueSEK : snap.totalCostSEK;
     const totalReturn = (snap.totalUnrealizedSEK || 0) + (summary.netGainLoss || 0);
-    set('tax-port-total-val', fmt(snap.totalValueSEK));
+
+    // Update the "TOTAL VALUE" label to indicate when we're showing cost basis
+    const valLabelEl = document.querySelector('.tax-port-val-label');
+    if (valLabelEl) valLabelEl.textContent = hasLivePrices ? 'TOTAL VALUE' : 'COST BASIS';
+
+    set('tax-port-total-val', fmt(displayTotalSEK));
     set('tax-ps-return',      fmt(totalReturn));
     fmtClass(snap.totalUnrealizedSEK, 'tax-ps-unrealized');
     set('tax-ps-fiatin',  fmt(snap.fiatInvestedSEK));
     set('tax-ps-fiatout', fmt(snap.fiatProceedsSEK));
     set('tax-ps-fees',    fmt(snap.totalFeesSEK));
-    set('tax-alloc-total', fmt(snap.totalValueSEK));
+    set('tax-alloc-total', fmt(displayTotalSEK));
     // Update assets table rows
     const tbody = document.getElementById('tax-assets-tbody');
     if (tbody) {

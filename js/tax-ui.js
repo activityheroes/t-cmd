@@ -1326,10 +1326,11 @@ const TaxUI = (() => {
   // REPORTS PAGE — K4 Section D, per-asset grouping
   // ════════════════════════════════════════════════════════════
   function renderReports() {
-    const result  = getOrComputeTaxResult();
+    const result         = getOrComputeTaxResult();
     const { summary, disposals } = result;
-    const k4      = TaxEngine.generateK4Report(result);
-    const issues  = TaxEngine.getReviewIssues().length;
+    const k4             = TaxEngine.generateK4Report(result);
+    const issues         = TaxEngine.getReviewIssues().length;
+    const deductibleLoss = summary.deductibleLoss || (summary.totalLosses * 0.70);
 
     return `
       <div class="tax-page">
@@ -1346,13 +1347,39 @@ const TaxUI = (() => {
 
         <div class="tax-report-hero">
           <div class="tax-rh-year">${S.taxYear}</div>
-          <div class="tax-rh-title">Sammanfattning — K4 Sektion D</div>
+          <div class="tax-rh-title">Sammanfattning — Inkomstdeklaration 1</div>
           <div class="tax-rh-grid">
-            <div class="tax-rh-item"><div class="tax-rh-label">Summa vinst → ruta 7.5</div><div class="tax-rh-val tax-green">${TaxEngine.formatSEK(k4.totalGains)}</div></div>
-            <div class="tax-rh-item"><div class="tax-rh-label">Summa förlust → ruta 8.4</div><div class="tax-rh-val tax-red">${TaxEngine.formatSEK(k4.totalLosses)}</div></div>
-            <div class="tax-rh-item"><div class="tax-rh-label">Avdragsgill förlust (70%)</div><div class="tax-rh-val tax-amber">${TaxEngine.formatSEK(k4.totalLosses * 0.70)}</div></div>
-            <div class="tax-rh-item tax-rh-highlight"><div class="tax-rh-label">Uppskattad skatt 30%</div><div class="tax-rh-val">${TaxEngine.formatSEK(summary.estimatedTax)}</div></div>
+            <div class="tax-rh-item">
+              <div class="tax-rh-label">Summa vinst (K4 Sektion D)</div>
+              <div class="tax-rh-label-sub">→ Ruta 7.5 i deklarationen</div>
+              <div class="tax-rh-val tax-green">${TaxEngine.formatSEK(k4.totalGains)}</div>
+            </div>
+            <div class="tax-rh-item">
+              <div class="tax-rh-label">Summa förlust (K4 Sektion D)</div>
+              <div class="tax-rh-label-sub">→ Ruta 8.4 i deklarationen</div>
+              <div class="tax-rh-val tax-red">${TaxEngine.formatSEK(k4.totalLosses)}</div>
+            </div>
+            <div class="tax-rh-item">
+              <div class="tax-rh-label">Avdragsgill förlust (70%)</div>
+              <div class="tax-rh-label-sub">Skrivs in i ruta 8.4</div>
+              <div class="tax-rh-val tax-amber">${TaxEngine.formatSEK(deductibleLoss)}</div>
+            </div>
+            <div class="tax-rh-item tax-rh-highlight">
+              <div class="tax-rh-label">Skattepliktig vinst (netto)</div>
+              <div class="tax-rh-label-sub">Vinst − avdragsgill förlust</div>
+              <div class="tax-rh-val">${TaxEngine.formatSEK(summary.taxableGain)}</div>
+            </div>
           </div>
+          <div class="tax-rh-tax-est">
+            <span class="tax-rh-tax-label">Beräknad skatt (30%)</span>
+            <span class="tax-rh-tax-val">${TaxEngine.formatSEK(summary.estimatedTax)}</span>
+          </div>
+          ${(summary.totalProceeds||0) > 0 ? `
+          <div class="tax-rh-detail-row">
+            <span>Totalt försäljningspris: <strong>${TaxEngine.formatSEK(summary.totalProceeds)}</strong></span>
+            <span>Totalt omkostnadsbelopp: <strong>${TaxEngine.formatSEK(summary.totalCostBasis||0)}</strong></span>
+            <span>Antal avyttringar: <strong>${disposals.length}</strong></span>
+          </div>` : ''}
         </div>
 
         <!-- K4 Preview Table -->
@@ -1360,14 +1387,16 @@ const TaxUI = (() => {
           <div class="tax-section-header">
             <h2>K4 Sektion D — Kryptovalutor</h2>
             ${k4.formsNeeded>1?`<span class="tax-badge" style="background:rgba(99,102,241,.15);color:#818cf8">${k4.formsNeeded} blanketter</span>`:''}
-            <div style="margin-left:auto;display:flex;gap:8px">
+            <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
               <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4CSV()">⬇ K4 CSV (SKV 2104-D)</button>
+              <button class="tax-btn tax-btn-sm tax-btn-secondary" onclick="TaxUI.downloadAuditCSV()">⬇ Transaktionslogg</button>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.printReport()">🖨 Skriv ut</button>
             </div>
           </div>
 
           <div class="tax-k4-explainer">
-            Förenklad metod: en rad per tillgång och vinstsida. Fyll in värdena i K4-blankettens Sektion D.
+            Förenklad metod: en rad per tillgång och vinstsida. Fyll i värdena i K4-blankettens Sektion D.
+            Genomsnittsmetoden (SFS 1999:1229 44 kap. 7§) har använts.
           </div>
 
           ${k4.k4Rows.length === 0
@@ -1386,7 +1415,7 @@ const TaxUI = (() => {
                     <tr class="${(i+1)%ROWS_PER_K4_FORM===0 && i!==k4.k4Rows.length-1 ? 'tax-k4-page-break':''}">
                       <td>
                         <div class="tax-asset-cell">
-                          <span class="tax-asset-sym">${r.sym}</span>
+                          <span class="tax-asset-name">${r.displayName || r.sym}</span>
                           <span class="tax-badge" style="margin-left:6px;${r.side==='gain'?'background:rgba(34,197,94,.1);color:#4ade80':'background:rgba(239,68,68,.1);color:#f87171'}">${r.side==='gain'?'Vinst':'Förlust'}</span>
                         </div>
                       </td>
@@ -1397,10 +1426,17 @@ const TaxUI = (() => {
                       <td class="ta-r tax-mono ${r.loss>0?'tax-red':''}">${r.loss?TaxEngine.formatSEK(r.loss):''}</td>
                     </tr>`).join('')}
                   <tr class="tax-k4-sum-row">
-                    <td><strong>Summa</strong></td>
-                    <td></td><td></td><td></td>
+                    <td colspan="4"><strong>Summa</strong></td>
                     <td class="ta-r tax-green"><strong>${TaxEngine.formatSEK(k4.totalGains)}</strong></td>
                     <td class="ta-r tax-red"><strong>${TaxEngine.formatSEK(k4.totalLosses)}</strong></td>
+                  </tr>
+                  <tr class="tax-k4-net-row">
+                    <td colspan="4" style="font-size:11px;color:var(--tax-muted)">
+                      Skattepliktig vinst = ${TaxEngine.formatSEK(k4.totalGains)} − (${TaxEngine.formatSEK(k4.totalLosses)} × 70%)
+                    </td>
+                    <td colspan="2" class="ta-r" style="font-size:12px;font-weight:600;color:#e2e8f0">
+                      = ${TaxEngine.formatSEK(summary.taxableGain)}
+                    </td>
                   </tr>
                 </tbody>
               </table></div>`
@@ -1591,6 +1627,15 @@ const TaxUI = (() => {
     a.href=url; a.download=`SKV2104_K4_D_krypto_${S.taxYear}.csv`;
     a.click(); URL.revokeObjectURL(url);
   }
+  function downloadAuditCSV() {
+    const result = getOrComputeTaxResult();
+    const csv    = TaxEngine.generateAuditCSV(result);
+    const blob   = new Blob(['\ufeff'+csv], { type:'text/csv;charset=utf-8' });
+    const url    = URL.createObjectURL(blob);
+    const a      = document.createElement('a');
+    a.href=url; a.download=`TCMD_transaktionslogg_${S.taxYear}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  }
   function printReport() { window.print(); }
 
   // ── Helpers ───────────────────────────────────────────────
@@ -1711,7 +1756,7 @@ const TaxUI = (() => {
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
     markReviewed, markAllReviewed, removeAccount,
-    downloadK4CSV, printReport,
+    downloadK4CSV, downloadAuditCSV, printReport,
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns

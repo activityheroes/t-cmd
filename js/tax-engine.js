@@ -795,8 +795,9 @@ const TaxEngine = (() => {
     const totalGains   = disposals.filter(d => d.gainLossSEK > 0).reduce((s,d) => s + d.gainLossSEK, 0);
     const totalLosses  = disposals.filter(d => d.gainLossSEK < 0).reduce((s,d) => s + Math.abs(d.gainLossSEK), 0);
     const netGainLoss  = totalGains - totalLosses;
-    const taxableGain  = netGainLoss > 0 ? netGainLoss : 0;
+    // Per Skatteverket: only 70% of losses are deductible against gains (SFL 42 kap. 26§)
     const deductLoss   = totalLosses * LOSS_DEDUCTION;
+    const taxableGain  = Math.max(0, totalGains - deductLoss);
     const estimatedTax = taxableGain * TAX_RATE;
     const totalIncome  = income.reduce((s,i) => s + i.valueSEK, 0);
 
@@ -819,11 +820,16 @@ const TaxEngine = (() => {
       })
       .sort((a,b) => b.totalCostSEK - a.totalCostSEK);
 
+    // Aggregate proceeds / cost for declaration reference
+    const totalProceeds   = disposals.reduce((s,d) => s + d.proceedsSEK, 0);
+    const totalCostBasis  = disposals.reduce((s,d) => s + d.costBasisSEK, 0);
+
     return {
       year, disposals, income, currentHoldings,
       summary: {
         totalTransactions:  yearTxns.length,
         totalDisposals:     disposals.length,
+        totalProceeds, totalCostBasis,
         totalGains, totalLosses, netGainLoss,
         taxableGain, deductibleLoss: deductLoss,
         estimatedTax, totalIncome,
@@ -850,19 +856,24 @@ const TaxEngine = (() => {
     // Build K4 rows: max 2 per asset (gain row + loss row)
     const k4Rows = [];
     for (const [sym, { gains, losses }] of Object.entries(assetMap)) {
+      // Resolve human-readable name for beteckning field
+      const td          = resolveTokenDisplay(sym);
+      const displayName = td.name
+        ? `${td.name} (${td.symbol || sym})`
+        : (td.symbol || sym);
       if (gains.length > 0) {
         const qty  = gains.reduce((s,d) => s + d.amountSold, 0);
         const proc = gains.reduce((s,d) => s + d.proceedsSEK, 0);
         const cost = gains.reduce((s,d) => s + d.costBasisSEK, 0);
         const gain = gains.reduce((s,d) => s + d.gainLossSEK, 0);
-        k4Rows.push({ sym, side:'gain', qty, proc, cost, gain, loss:0 });
+        k4Rows.push({ sym, displayName, side:'gain', qty, proc, cost, gain, loss:0 });
       }
       if (losses.length > 0) {
         const qty  = losses.reduce((s,d) => s + d.amountSold, 0);
         const proc = losses.reduce((s,d) => s + d.proceedsSEK, 0);
         const cost = losses.reduce((s,d) => s + d.costBasisSEK, 0);
         const loss = Math.abs(losses.reduce((s,d) => s + d.gainLossSEK, 0));
-        k4Rows.push({ sym, side:'loss', qty, proc, cost, gain:0, loss });
+        k4Rows.push({ sym, displayName, side:'loss', qty, proc, cost, gain:0, loss });
       }
     }
 
@@ -913,9 +924,10 @@ const TaxEngine = (() => {
       for (let row = 1; row <= ROWS_PER_PAGE; row++) {
         const r = pageRows[row-1];
         if (r) {
+          const label      = r.displayName || r.sym;
           const beteckning = r.side === 'gain'
-            ? `${r.sym} kryptovaluta (vinst)`
-            : `${r.sym} kryptovaluta (förlust)`;
+            ? `${label} kryptovaluta (vinst)`
+            : `${label} kryptovaluta (förlust)`;
           lines.push([
             row,
             `"${r.qty.toFixed(8)}"`,
@@ -946,6 +958,93 @@ const TaxEngine = (() => {
     );
 
     return lines.filter(l => l !== '').join('\n');
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // AUDIT / TRANSACTION LEDGER CSV EXPORT
+  // Full transaction-level export for accountant review.
+  // Sorted by date; includes all disposals + income events.
+  // ════════════════════════════════════════════════════════════
+  function generateAuditCSV(result) {
+    const { disposals, income, year, summary } = result;
+    const today = new Date().toLocaleDateString('sv-SE');
+    const lines = [];
+
+    lines.push(
+      `; ════════════════════════════════════════════════════════════════`,
+      `; T-CMD — Transaktionslogg (revision / audit trail)`,
+      `; Inkomstår: ${year}  |  Skapad: ${today}`,
+      `; Genomsnittsmetoden per SFS 1999:1229 44 kap. 7§`,
+      `; ════════════════════════════════════════════════════════════════`,
+      ``,
+    );
+
+    // ── Disposals ────────────────────────────────────────────
+    lines.push(
+      `; AVYTTRINGAR`,
+      `Datum,Tillgång,Visningsnamn,Antal,Försäljningspris (SEK),Omkostnadsbelopp (SEK),Vinst/Förlust (SEK),Typ,Transaktions-ID`,
+    );
+    const sortedDisposals = [...disposals].sort((a,b) => a.date.localeCompare(b.date));
+    for (const d of sortedDisposals) {
+      const td = resolveTokenDisplay(d.assetSymbol);
+      lines.push([
+        new Date(d.date).toLocaleDateString('sv-SE'),
+        `"${td.symbol || d.assetSymbol}"`,
+        `"${td.name   || td.symbol || d.assetSymbol}"`,
+        `"${(d.amountSold || 0).toFixed(8)}"`,
+        Math.round(d.proceedsSEK),
+        Math.round(d.costBasisSEK),
+        Math.round(d.gainLossSEK),
+        d.isFee ? 'avgift' : 'avyttring',
+        `"${d.id || ''}"`,
+      ].join(','));
+    }
+
+    // ── Income events ─────────────────────────────────────────
+    if (income.length > 0) {
+      lines.push(
+        ``,
+        `; INKOMSTER (staking / mining / airdrops / övrigt)`,
+        `Datum,Tillgång,Visningsnamn,Antal,Värde (SEK),Typ,Transaktions-ID`,
+      );
+      const sortedIncome = [...income].sort((a,b) => a.date.localeCompare(b.date));
+      for (const inc of sortedIncome) {
+        const td = resolveTokenDisplay(inc.assetSymbol);
+        lines.push([
+          new Date(inc.date).toLocaleDateString('sv-SE'),
+          `"${td.symbol || inc.assetSymbol}"`,
+          `"${td.name   || td.symbol || inc.assetSymbol}"`,
+          `"${(inc.amount || 0).toFixed(8)}"`,
+          Math.round(inc.valueSEK || 0),
+          `"${inc.type || 'inkomst'}"`,
+          `"${inc.id || ''}"`,
+        ].join(','));
+      }
+    }
+
+    // ── Summary footer ────────────────────────────────────────
+    lines.push(
+      ``,
+      `; ════════════════════════════════════════════════════════════════`,
+      `; SUMMERING ${year}`,
+      `; ════════════════════════════════════════════════════════════════`,
+      `; Antal avyttringar:,${disposals.length}`,
+      `; Totalt försäljningspris:,${Math.round(summary.totalProceeds || 0)} kr`,
+      `; Totalt omkostnadsbelopp:,${Math.round(summary.totalCostBasis || 0)} kr`,
+      `; `,
+      `; Summa vinst → K4 Sektion D → ruta 7.5:,${Math.round(summary.totalGains)} kr`,
+      `; Summa förlust → K4 Sektion D → ruta 8.4:,${Math.round(summary.totalLosses)} kr`,
+      `; Avdragsgill förlust (70%) → ruta 8.4:,${Math.round(summary.deductibleLoss)} kr`,
+      `; Skattepliktig vinst (netto):,${Math.round(summary.taxableGain)} kr`,
+      `; Beräknad skatt (30%):,${Math.round(summary.estimatedTax)} kr`,
+      summary.totalIncome > 0
+        ? `; Inkomst (staking/mining):,${Math.round(summary.totalIncome)} kr`
+        : '',
+      `; ════════════════════════════════════════════════════════════════`,
+      `; OBS! Genomsnittsmetoden har använts. Kontrollera med revisor.`,
+    );
+
+    return lines.filter(l => l !== undefined).join('\n');
   }
 
   // ════════════════════════════════════════════════════════════
@@ -1579,7 +1678,7 @@ const TaxEngine = (() => {
     // Tax engine
     computeTaxYear,
     // K4 export
-    generateK4Report, generateK4CSV,
+    generateK4Report, generateK4CSV, generateAuditCSV,
     // Review
     getReviewIssues, isTaxableCategory,
     // CSV parsers

@@ -53,13 +53,13 @@ const SupabaseDB = (() => {
         {
             id: 'admin-001', email: 'admin@t-cmd.app', name: 'Admin', password: 'admin123',
             role: 'admin', status: 'active',
-            features: { coinSignals: true, memeScanner: true, tradingLog: true },
+            features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: true, taxCalculator: true },
             created_at: '2025-01-01T00:00:00Z'
         },
         {
             id: 'user-001', email: 'demo@t-cmd.app', name: 'Demo Trader', password: 'demo123',
             role: 'user', status: 'active',
-            features: { coinSignals: true, memeScanner: true, tradingLog: true },
+            features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false },
             created_at: '2025-02-01T00:00:00Z'
         }
     ];

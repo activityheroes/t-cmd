@@ -554,6 +554,16 @@
   color: var(--text-primary, #f1f5f9);
 }
 
+.tax-btn-secondary {
+  background: rgba(45, 212, 191, 0.15);
+  color: #2dd4bf;
+  border: 1px solid rgba(45, 212, 191, 0.25);
+}
+.tax-btn-secondary:hover:not(:disabled) {
+  background: rgba(45, 212, 191, 0.25);
+  color: #5eead4;
+}
+
 .tax-btn-sm {
   padding: 5px 12px;
   font-size: 12px;
@@ -1223,6 +1233,68 @@
   font-size: 18px;
   font-weight: 700;
   font-family: var(--font-mono, monospace);
+  color: var(--text-primary, #f1f5f9);
+}
+
+/* Sub-label below rh-label (declaration ruta reference) */
+.tax-rh-label-sub {
+  font-size: 10px;
+  color: #6366f1;
+  font-weight: 500;
+  margin-top: -4px;
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+}
+
+/* Estimated tax row below the hero grid */
+.tax-rh-tax-est {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(99, 102, 241, 0.08);
+  border-radius: 8px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+.tax-rh-tax-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tax-rh-tax-val {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary, #f1f5f9);
+}
+
+/* Detail row (proceeds / cost / count) */
+.tax-rh-detail-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+}
+.tax-rh-detail-row strong {
+  color: var(--text-secondary, #94a3b8);
+}
+
+/* K4 net-taxable calculation row */
+.tax-k4-net-row td {
+  padding: 6px 12px 10px;
+  border-top: 1px dashed rgba(255,255,255,0.06);
+  background: rgba(99, 102, 241, 0.04);
+}
+
+/* K4 beteckning: name as primary text */
+.tax-k4-preview .tax-asset-name {
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary, #f1f5f9);
 }
 

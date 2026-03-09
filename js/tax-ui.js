@@ -872,9 +872,13 @@ const TaxUI = (() => {
 
   function markReviewed(id)  { TaxEngine.updateTransaction(id,{needsReview:false,reviewReason:null}); S.taxResult=null; render(); }
   function markAllReviewed() {
-    TaxEngine.getTransactions().filter(t=>t.needsReview).forEach(t =>
-      TaxEngine.updateTransaction(t.id,{needsReview:false,reviewReason:null}));
-    S.taxResult=null; render();
+    // Single map + single save — never call updateTransaction in a loop.
+    // Calling it N times = N×map(8000 items) + N IDB batch-writes → instant crash.
+    const updated = TaxEngine.getTransactions()
+      .map(t => t.needsReview ? {...t, needsReview:false, reviewReason:null} : t);
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    render();
   }
   function removeAccount(id) {
     if (!confirm('Remove account? All its transactions will also be deleted.')) return;

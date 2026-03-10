@@ -1436,52 +1436,68 @@ const TaxEngine = (() => {
       } catch { /* use fallback */ }
 
       // ── Etherscan paginator ──────────────────────────────────
+      // Free tier: 3 req/s hard limit. We run txlist then tokentx
+      // sequentially (never concurrent) and sleep 400ms between pages.
+      // Rate-limit responses (status!='1', message contains "rate") are
+      // retried once after a 1.2s back-off before throwing.
       async function paginate(action, label) {
         const rows = [];
         let page = 1, hasMore = true;
         while (hasMore) {
-          // V2 endpoint: https://docs.etherscan.io/v2-migration
-          // Use lowercase address — Etherscan V2 rejects mixed-case EIP-55 checksummed addresses
+          // V2 endpoint — lowercase address required for V2
           const url = `https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}` +
             `&address=${addrLow}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
-          let data;
-          try {
-            const r = await fetch(url);
-            if (!r.ok) break;
-            data = await r.json();
-          } catch { break; }
 
-          // ① Check for API-level errors FIRST (bad key, rate limit, invalid address…)
-          //    data.result is a string when there's an error, e.g. "Invalid API Key"
+          let data;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const r = await fetch(url);
+              if (!r.ok) { hasMore = false; break; }
+              data = await r.json();
+            } catch { hasMore = false; break; }
+
+            // Rate-limit hit → back off and retry once
+            if (data.status !== '1' &&
+                (data.message || '').toLowerCase().includes('rate')) {
+              await sleep(1200);
+              data = null; // force retry
+              continue;
+            }
+            break; // success or non-rate-limit error — stop retrying
+          }
+
+          if (!data) break; // network failure or exhausted retries
+
+          // ① Check for API-level errors (bad key, invalid address, etc.)
           if (data.status !== '1') {
             const msg = typeof data.result === 'string' ? data.result : (data.message || 'Etherscan error');
-            // "No transactions found" is normal end-of-history — stop pagination cleanly
             if (data.message === 'No transactions found') { hasMore = false; break; }
             throw new Error(`Etherscan ${action}: ${msg}`);
           }
-          // ② Empty result array = reached end of paginated history
+          // ② Empty array = end of history
           if (!Array.isArray(data.result) || !data.result.length) { hasMore = false; break; }
 
           rows.push(...data.result);
           hasMore = data.result.length === 100;
           page++;
           if (onProgress) onProgress({ step:'import', msg:`Fetching ${label}… ${rows.length} found` });
-          await sleep(200); // Etherscan free tier: 5 req/s
+          if (hasMore) await sleep(400); // stay safely under 3 req/s
         }
         return rows;
       }
 
-      // Fetch both in parallel (Etherscan allows concurrent requests)
-      // Re-throw Etherscan API-level errors (e.g. invalid key, rate limit).
-      // Only swallow genuine network/fetch errors to stay resilient offline.
-      const rethrowEtherscan = e => {
+      // Run sequentially — never fire two Etherscan requests simultaneously
+      if (onProgress) onProgress({ step:'import', msg:'Fetching ETH transactions…' });
+      const nativeTxs = await paginate('txlist',  'ETH transactions').catch(e => {
         if (e?.message?.startsWith('Etherscan')) throw e;
         return [];
-      };
-      const [nativeTxs, tokenTxs] = await Promise.all([
-        paginate('txlist',  'ETH transactions').catch(rethrowEtherscan),
-        paginate('tokentx', 'token transfers').catch(rethrowEtherscan),
-      ]);
+      });
+      await sleep(450); // gap between the two endpoint types
+      if (onProgress) onProgress({ step:'import', msg:'Fetching token transfers…' });
+      const tokenTxs = await paginate('tokentx', 'token transfers').catch(e => {
+        if (e?.message?.startsWith('Etherscan')) throw e;
+        return [];
+      });
 
       if (onProgress) onProgress({
         step: 'import',

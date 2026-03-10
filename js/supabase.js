@@ -127,6 +127,15 @@ const SupabaseDB = (() => {
             return sbPatch('users', `id=eq.${id}`, data);
         },
 
+        async deleteUser(id) {
+            if (!SUPABASE_READY) {
+                const users = lsUsers().filter(u => u.id !== id);
+                lsSaveUsers(users);
+                return;
+            }
+            await sbDelete('users', `id=eq.${id}`);
+        },
+
         // ── Invites ───────────────────────────────────
         async createInvite({ email = null, name = null, createdBy = null }) {
             const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();

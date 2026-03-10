@@ -989,11 +989,12 @@ const TaxUI = (() => {
           ${chain==='sol' && !localStorage.getItem('tcmd_helius_key') ? `
           <div class="tax-warn-box">⚠️ No Helius API key found. Add it in the Admin panel to enable full Solana history import.</div>` : ''}
           ${chain==='eth' && !localStorage.getItem('tcmd_etherscan_key') && !window.TCMD_KEYS?.etherscan ? `
-          <div class="tax-warn-box">
-            ⚠️ No Etherscan API key found.
-            <strong>MetaMask import will not work without it.</strong><br>
-            Get a free key at <a href="https://etherscan.io/myapikey" target="_blank" style="color:#6366f1">etherscan.io/myapikey</a>
-            then add it in <strong>Admin → API Keys → Etherscan</strong>.
+          <div class="tax-warn-box" style="flex-direction:column;gap:4px">
+            <div><strong>⚠️ Etherscan API key required for MetaMask import.</strong></div>
+            <div style="color:#fde68a;font-weight:400">${typeof AuthManager !== 'undefined' && AuthManager.isAdmin()
+              ? `Go to <strong>Admin → API Keys → 🦊 Etherscan</strong> to add your key. Get a free key at <a href="https://etherscan.io/myapikey" target="_blank" style="color:#818cf8;text-decoration:underline">etherscan.io/myapikey</a>`
+              : `Contact your administrator to configure the Etherscan API key.`
+            }</div>
           </div>` : ''}
           <div id="tax-import-status"></div>
         </div>

@@ -77,6 +77,14 @@ const AuthManager = (() => {
     async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false } }); },
     async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
     async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
+    async deleteUser(id) { return SupabaseDB.deleteUser(id); },
+    async createUserDirect({ name, email, password, role = 'user' }) {
+      return SupabaseDB.createUser({
+        name, email, password, role, status: 'active',
+        features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false },
+      });
+    },
+    async updateUser(id, data) { return SupabaseDB.updateUser(id, data); },
 
     // ── Invite helpers ────────────────────────────────────
     async generateInvite(email = null, name = null) {
@@ -395,14 +403,51 @@ async function renderAdminPanel() {
 
     panel.innerHTML = `
         <div class="admin-section">
-            <div class="admin-section-title">👥 Users (${users.length})</div>
+            <div class="admin-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>👥 Users (${users.length})</span>
+                <button class="admin-btn approve" style="font-size:11px;" onclick="adminToggleCreateForm()">＋ Create User</button>
+            </div>
+
+            <!-- Create User Form (hidden by default) -->
+            <div id="admin-create-form" style="display:none;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:14px;margin-bottom:14px;">
+                <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px;">New User</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+                    <input id="cu-name"  class="auth-input" style="height:32px;font-size:12px;" type="text"     placeholder="Full name">
+                    <input id="cu-email" class="auth-input" style="height:32px;font-size:12px;" type="email"    placeholder="Email address">
+                    <input id="cu-pass"  class="auth-input" style="height:32px;font-size:12px;" type="password" placeholder="Temporary password">
+                    <select id="cu-role" class="auth-input" style="height:32px;font-size:12px;cursor:pointer;">
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button class="admin-btn approve" onclick="adminCreateUser()" style="font-size:11px;padding:5px 14px;">✓ Create</button>
+                    <button class="admin-btn" onclick="adminToggleCreateForm()" style="font-size:11px;padding:5px 12px;">Cancel</button>
+                    <span id="admin-create-status" style="font-size:11px;color:var(--text-muted);"></span>
+                </div>
+            </div>
+
             <table class="admin-user-table">
                 <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Features</th><th>Actions</th></tr></thead>
                 <tbody>${users.map(u => `
-                <tr class="${u.status === 'pending' ? 'admin-row-pending' : ''}">
-                    <td><strong>${u.name}</strong></td>
-                    <td style="font-size:11.5px;color:var(--text-muted);">${u.email}</td>
-                    <td><span class="role-badge role-${u.role}">${u.role}</span></td>
+                <tr id="urow-${u.id}" class="${u.status === 'pending' ? 'admin-row-pending' : ''}">
+                    <td>
+                        <div style="display:flex;flex-direction:column;gap:2px;">
+                            <span id="uname-${u.id}"><strong>${u.name}</strong></span>
+                            <input id="uname-input-${u.id}" class="auth-input" style="display:none;height:26px;font-size:11px;padding:0 6px;" value="${u.name}">
+                        </div>
+                    </td>
+                    <td style="font-size:11.5px;color:var(--text-muted);">
+                        <span id="uemail-${u.id}">${u.email}</span>
+                        <input id="uemail-input-${u.id}" class="auth-input" style="display:none;height:26px;font-size:11px;padding:0 6px;" value="${u.email}">
+                    </td>
+                    <td>
+                        <span id="urole-${u.id}"><span class="role-badge role-${u.role}">${u.role}</span></span>
+                        <select id="urole-input-${u.id}" style="display:none;height:26px;font-size:11px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:5px;color:var(--text-primary);cursor:pointer;">
+                            <option value="user"  ${u.role==='user'  ? 'selected':''}>user</option>
+                            <option value="admin" ${u.role==='admin' ? 'selected':''}>admin</option>
+                        </select>
+                    </td>
                     <td><span class="status-badge status-${u.status}">${u.status}</span></td>
                     <td>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
@@ -414,10 +459,20 @@ async function renderAdminPanel() {
                         </div>
                     </td>
                     <td>
-                        <div style="display:flex;gap:4px;">
-                            ${u.status !== 'active' && u.id !== currentUser?.userId ? `<button class="admin-btn approve" onclick="adminApprove('${u.id}')">✓ Approve</button>` : ''}
-                            ${u.status !== 'disabled' && u.id !== currentUser?.userId ? `<button class="admin-btn disable" onclick="adminDisable('${u.id}')">⊘ Disable</button>` : ''}
-                            ${u.id === currentUser?.userId ? `<span style="color:var(--text-muted);font-size:11px;">You</span>` : ''}
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                            ${u.id === currentUser?.userId
+                              ? `<span style="color:var(--text-muted);font-size:11px;">You</span>`
+                              : `
+                            <span id="uactions-${u.id}" style="display:flex;gap:4px;">
+                                ${u.status !== 'active'   ? `<button class="admin-btn approve" onclick="adminApprove('${u.id}')">✓</button>` : ''}
+                                ${u.status !== 'disabled' ? `<button class="admin-btn disable" onclick="adminDisable('${u.id}')">⊘</button>` : ''}
+                                <button class="admin-btn" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="adminStartEdit('${u.id}')">✏️</button>
+                                <button class="admin-btn disable" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.25)" onclick="adminDeleteUser('${u.id}','${u.name.replace(/'/g,'')}')">🗑</button>
+                            </span>
+                            <span id="usave-${u.id}" style="display:none;gap:4px;">
+                                <button class="admin-btn approve" onclick="adminSaveEdit('${u.id}')">✓ Save</button>
+                                <button class="admin-btn" onclick="adminCancelEdit('${u.id}')">✕</button>
+                            </span>`}
                         </div>
                     </td>
                 </tr>`).join('')}
@@ -543,6 +598,80 @@ window.adminApprove = async function (id) {
 window.adminDisable = async function (id) {
   await AuthManager.disableUser(id);
   renderAdminPanel();
+};
+
+// ── Create user ───────────────────────────────────────────────
+window.adminToggleCreateForm = function () {
+  const f = document.getElementById('admin-create-form');
+  if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none';
+};
+window.adminCreateUser = async function () {
+  const name   = document.getElementById('cu-name')?.value.trim();
+  const email  = document.getElementById('cu-email')?.value.trim();
+  const pass   = document.getElementById('cu-pass')?.value.trim();
+  const role   = document.getElementById('cu-role')?.value || 'user';
+  const status = document.getElementById('admin-create-status');
+  if (!name || !email || !pass) {
+    if (status) { status.textContent = '⚠️ Name, email and password are required'; status.style.color = '#f59e0b'; }
+    return;
+  }
+  if (status) { status.textContent = 'Creating…'; status.style.color = 'var(--text-muted)'; }
+  try {
+    await AuthManager.createUserDirect({ name, email, password: pass, role });
+    renderAdminPanel();
+  } catch (e) {
+    if (status) { status.textContent = '✗ ' + (e.message || 'Failed'); status.style.color = '#f87171'; }
+  }
+};
+
+// ── Delete user ───────────────────────────────────────────────
+window.adminDeleteUser = async function (id, name) {
+  if (!confirm(`Delete user "${name}"? This cannot be undone.`)) return;
+  try {
+    await AuthManager.deleteUser(id);
+    renderAdminPanel();
+  } catch (e) {
+    alert('Delete failed: ' + (e.message || 'Unknown error'));
+  }
+};
+
+// ── Inline edit ───────────────────────────────────────────────
+window.adminStartEdit = function (id) {
+  // Show inputs, hide display spans
+  ['uname', 'uemail', 'urole'].forEach(f => {
+    const display = document.getElementById(`${f}-${id}`);
+    const input   = document.getElementById(`${f}-input-${id}`);
+    if (display) display.style.display = 'none';
+    if (input)   input.style.display   = 'inline-block';
+  });
+  const actions = document.getElementById(`uactions-${id}`);
+  const save    = document.getElementById(`usave-${id}`);
+  if (actions) actions.style.display = 'none';
+  if (save)    save.style.display    = 'flex';
+};
+window.adminCancelEdit = function (id) {
+  ['uname', 'uemail', 'urole'].forEach(f => {
+    const display = document.getElementById(`${f}-${id}`);
+    const input   = document.getElementById(`${f}-input-${id}`);
+    if (display) display.style.display = '';
+    if (input)   input.style.display   = 'none';
+  });
+  const actions = document.getElementById(`uactions-${id}`);
+  const save    = document.getElementById(`usave-${id}`);
+  if (actions) actions.style.display = 'flex';
+  if (save)    save.style.display    = 'none';
+};
+window.adminSaveEdit = async function (id) {
+  const name  = document.getElementById(`uname-input-${id}`)?.value.trim();
+  const email = document.getElementById(`uemail-input-${id}`)?.value.trim();
+  const role  = document.getElementById(`urole-input-${id}`)?.value;
+  if (!name || !email) { alert('Name and email cannot be empty'); return; }
+  try {
+    await AuthManager.updateUser(id, { name, email, role });
+    renderAdminPanel();
+  } catch (e) {
+    alert('Update failed: ' + (e.message || 'Unknown error'));
+  }
 };
 window.toggleFeature = async function (id, feature, enabled) {
   const users = await AuthManager.getAllUsers();

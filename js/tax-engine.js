@@ -1441,8 +1441,9 @@ const TaxEngine = (() => {
         let page = 1, hasMore = true;
         while (hasMore) {
           // V2 endpoint: https://docs.etherscan.io/v2-migration
+          // Use lowercase address — Etherscan V2 rejects mixed-case EIP-55 checksummed addresses
           const url = `https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}` +
-            `&address=${address}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
+            `&address=${addrLow}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
           let data;
           try {
             const r = await fetch(url);

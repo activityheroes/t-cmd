@@ -91,6 +91,11 @@ function switchTab(tab) {
   AppState.activeTab = tab;
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
+  // Persist active tab in URL hash so refresh restores the right tab.
+  // Only overwrite #tax/subpage if we're actually leaving the tax tab.
+  if (tab !== 'tax' || !window.location.hash.startsWith('#tax/')) {
+    history.replaceState(null, '', '#' + tab);
+  }
 }
 
 // ── Format helpers ─────────────────────────────────────

@@ -1470,9 +1470,15 @@ const TaxEngine = (() => {
       }
 
       // Fetch both in parallel (Etherscan allows concurrent requests)
+      // Re-throw Etherscan API-level errors (e.g. invalid key, rate limit).
+      // Only swallow genuine network/fetch errors to stay resilient offline.
+      const rethrowEtherscan = e => {
+        if (e?.message?.startsWith('Etherscan')) throw e;
+        return [];
+      };
       const [nativeTxs, tokenTxs] = await Promise.all([
-        paginate('txlist',  'ETH transactions').catch(() => []),
-        paginate('tokentx', 'token transfers').catch(() => []),
+        paginate('txlist',  'ETH transactions').catch(rethrowEtherscan),
+        paginate('tokentx', 'token transfers').catch(rethrowEtherscan),
       ]);
 
       if (onProgress) onProgress({

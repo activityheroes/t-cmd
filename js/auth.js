@@ -461,10 +461,12 @@ async function renderAdminPanel() {
         <div class="admin-section" style="margin-top:20px;">
             <div class="admin-section-title">🔑 API Keys — Rug Checker</div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-                Keys are stored locally in your browser only. Required for the 12-signal rug checker and cluster detector.
+                Keys are stored locally in your browser only. Required for the 12-signal rug checker, cluster detector, and wallet imports.
                 Get keys: <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
                 &nbsp;·&nbsp;
                 <a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
+                &nbsp;·&nbsp;
+                <a href="https://etherscan.io/myapikey" target="_blank" style="color:var(--accent-cyan);">Etherscan →</a>
             </div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <!-- Birdeye key -->
@@ -484,6 +486,14 @@ async function renderAdminPanel() {
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('helius')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                     <button onclick="adminTestKey('helius')" id="helius-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                </div>
+                <!-- Etherscan key (MetaMask / EVM wallet import) -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦊 Etherscan</label>
+                    <input id="admin-etherscan-key" type="password" placeholder="Paste Etherscan API key (MetaMask / EVM)…"
+                        value="${localStorage.getItem('tcmd_etherscan_key')||''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('etherscan')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                 </div>
                 <div id="admin-key-status" style="font-size:11px;color:var(--text-muted);min-height:16px;"></div>
             </div>

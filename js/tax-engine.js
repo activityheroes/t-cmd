@@ -1399,41 +1399,190 @@ const TaxEngine = (() => {
     return KNOWN_MINTS[mint] || null;
   }
 
-  // Ethereum via Etherscan — paginate ALL token transfers
+  // ════════════════════════════════════════════════════════════
+  // ETHEREUM / EVM IMPORT — Etherscan API
+  // Fetches both native ETH transactions (txlist) AND ERC-20
+  // token transfers (tokentx), deduplicates, detects DEX swaps.
+  // Requires tcmd_etherscan_key in localStorage (Admin panel).
+  // ════════════════════════════════════════════════════════════
   async function importEthWallet(address, accountId, onProgress) {
-    let allTxns = [], page = 1, hasMore = true;
+    const etherscanKey = localStorage.getItem('tcmd_etherscan_key') || '';
+    if (!etherscanKey) {
+      return {
+        txns: [], error: 'No Etherscan API key configured. Add it in the Admin panel → API Keys.',
+        missingKey: true,
+      };
+    }
+
+    const addrLow = address.toLowerCase();
     setImportStatus(accountId, { status:'syncing', source:'ethereum', address });
 
     try {
-      while (hasMore) {
-        const url = `https://api.etherscan.io/api?module=account&action=tokentx&address=${address}&sort=desc&page=${page}&offset=100&apikey=YourApiKeyToken`;
-        const r   = await fetch(url);
-        if (!r.ok) break;
-        const data = await r.json();
-        if (data.status !== '1' || !data.result?.length) { hasMore = false; break; }
-        allTxns = allTxns.concat(data.result);
-        hasMore = data.result.length === 100;
-        page++;
-        if (onProgress) onProgress({ step:'import', msg:`Fetched ${allTxns.length} Ethereum transactions…` });
-        await sleep(250);
+      // Live ETH price in SEK for accurate fee calculation
+      let ethSEK = 28000; // safe fallback (≈ ETH $2700 × SEK 10.4)
+      try {
+        const [sekRate, ethResp] = await Promise.all([
+          fetchLiveSEKRate(),
+          fetch('https://api.coincap.io/v2/assets/ethereum'),
+        ]);
+        if (sekRate && ethResp?.ok) {
+          const ethData = await ethResp.json();
+          const ethUSD  = parseFloat(ethData.data?.priceUsd || 0);
+          if (ethUSD > 0) ethSEK = ethUSD * sekRate;
+        }
+      } catch { /* use fallback */ }
+
+      // ── Etherscan paginator ──────────────────────────────────
+      async function paginate(action, label) {
+        const rows = [];
+        let page = 1, hasMore = true;
+        while (hasMore) {
+          const url = `https://api.etherscan.io/api?module=account&action=${action}` +
+            `&address=${address}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
+          let data;
+          try {
+            const r = await fetch(url);
+            if (!r.ok) break;
+            data = await r.json();
+          } catch { break; }
+
+          // status '0' with empty result = end of history (not an error)
+          if (!Array.isArray(data.result) || !data.result.length) { hasMore = false; break; }
+          // status '0' with string result = API error (bad key, rate limit etc.)
+          if (data.status !== '1') {
+            const msg = typeof data.result === 'string' ? data.result : data.message || 'Etherscan error';
+            throw new Error(`Etherscan ${action}: ${msg}`);
+          }
+
+          rows.push(...data.result);
+          hasMore = data.result.length === 100;
+          page++;
+          if (onProgress) onProgress({ step:'import', msg:`Fetching ${label}… ${rows.length} found` });
+          await sleep(200); // Etherscan free tier: 5 req/s
+        }
+        return rows;
       }
 
-      const txns = allTxns.map(tx => {
-        const isIn = tx.to.toLowerCase() === address.toLowerCase();
-        return normalizeTransaction({
-          txHash:  tx.hash, date: new Date(parseInt(tx.timeStamp)*1000).toISOString(),
-          type:    isIn ? 'transfer_in' : 'transfer_out',
-          assetSymbol: tx.tokenSymbol?.toUpperCase(),
-          assetName:   tx.tokenName,
-          amount:  parseInt(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal)||18),
-          feeSEK:  (parseInt(tx.gasUsed) * parseInt(tx.gasPrice) / 1e18) * 110, // approx ETH→SEK
-          needsReview: true,
-        }, accountId, 'eth_wallet');
+      // Fetch both in parallel (Etherscan allows concurrent requests)
+      const [nativeTxs, tokenTxs] = await Promise.all([
+        paginate('txlist',  'ETH transactions').catch(() => []),
+        paginate('tokentx', 'token transfers').catch(() => []),
+      ]);
+
+      if (onProgress) onProgress({
+        step: 'import',
+        msg: `Processing ${nativeTxs.length} ETH txns + ${tokenTxs.length} token transfers…`,
       });
 
+      // ── Build lookups ────────────────────────────────────────
+      // nativeMap: hash → native tx (for gas cost + ETH-value pairing)
+      const nativeMap = {};
+      for (const tx of nativeTxs) {
+        if (tx.isError === '1') continue; // skip failed txns
+        nativeMap[tx.hash] = tx;
+      }
+
+      // tokenGroups: hash → { ins: [], outs: [] }
+      const tokenGroups = {};
+      for (const tx of tokenTxs) {
+        if (!tokenGroups[tx.hash]) tokenGroups[tx.hash] = { ins:[], outs:[] };
+        if      (tx.to?.toLowerCase()   === addrLow) tokenGroups[tx.hash].ins.push(tx);
+        else if (tx.from?.toLowerCase() === addrLow) tokenGroups[tx.hash].outs.push(tx);
+      }
+
+      const txns = [];
+      const seenHashes = new Set();
+
+      // ── Process grouped token transfers ─────────────────────
+      for (const [hash, { ins, outs }] of Object.entries(tokenGroups)) {
+        seenHashes.add(hash);
+        const native = nativeMap[hash];
+        const gasSEK = native
+          ? (parseInt(native.gasUsed||0) * parseInt(native.gasPrice||0) / 1e18) * ethSEK
+          : 0;
+        const ts   = ins[0]?.timeStamp || outs[0]?.timeStamp || '0';
+        const date = new Date(parseInt(ts) * 1000).toISOString();
+
+        const parseAmt = tx => parseFloat(tx.value) / Math.pow(10, parseInt(tx.tokenDecimal) || 18);
+
+        if (ins.length > 0 && outs.length > 0) {
+          // ── DEX Swap: token-out → token-in ───────────────────
+          // Multiple outs/ins (e.g. multi-hop): collapse to totals
+          const outSym  = outs[0].tokenSymbol?.toUpperCase();
+          const outAmt  = outs.reduce((s,t) => s + parseAmt(t), 0);
+          const inSym   = ins[ins.length-1].tokenSymbol?.toUpperCase(); // last in = final token
+          const inAmt   = ins.reduce((s,t) => s + parseAmt(t), 0);
+          txns.push(normalizeTransaction({
+            txHash: hash, date, type: 'swap',
+            assetSymbol: outSym,   assetName: outs[0].tokenName,
+            amount:      outAmt,
+            inAsset:     inSym,    inAmount: inAmt,
+            feeSEK:      gasSEK,
+            needsReview: false,
+          }, accountId, 'eth_wallet'));
+
+        } else if (ins.length > 0) {
+          // ── Token received ────────────────────────────────────
+          // If the same tx also sent ETH out → it was a buy (ETH→token)
+          const nativeEthOut = native?.from?.toLowerCase() === addrLow
+            && parseInt(native.value||0) > 0;
+          const inTx = ins[0];
+          txns.push(normalizeTransaction({
+            txHash: hash, date,
+            type:        nativeEthOut ? 'buy' : 'receive',
+            assetSymbol: inTx.tokenSymbol?.toUpperCase(),
+            assetName:   inTx.tokenName,
+            amount:      ins.reduce((s,t) => s + parseAmt(t), 0),
+            feeSEK:      gasSEK,
+            needsReview: !nativeEthOut,
+          }, accountId, 'eth_wallet'));
+
+        } else if (outs.length > 0) {
+          // ── Token sent ────────────────────────────────────────
+          // If same tx received ETH in → it was a sell (token→ETH)
+          const nativeEthIn = native?.to?.toLowerCase() === addrLow
+            && parseInt(native.value||0) > 0;
+          const outTx = outs[0];
+          txns.push(normalizeTransaction({
+            txHash: hash, date,
+            type:        nativeEthIn ? 'sell' : 'send',
+            assetSymbol: outTx.tokenSymbol?.toUpperCase(),
+            assetName:   outTx.tokenName,
+            amount:      outs.reduce((s,t) => s + parseAmt(t), 0),
+            feeSEK:      gasSEK,
+            needsReview: !nativeEthIn,
+          }, accountId, 'eth_wallet'));
+        }
+      }
+
+      // ── Native ETH-only transactions ─────────────────────────
+      // (not already covered by token transfer grouping above)
+      for (const tx of nativeTxs) {
+        if (tx.isError === '1') continue;
+        if (seenHashes.has(tx.hash))    continue; // already processed as a token group
+        if (parseInt(tx.value||0) === 0) continue; // contract calls with no ETH value (approvals etc.)
+
+        const isIn   = tx.to?.toLowerCase() === addrLow;
+        const gasSEK = isIn ? 0  // receiver doesn't pay gas
+          : (parseInt(tx.gasUsed||0) * parseInt(tx.gasPrice||0) / 1e18) * ethSEK;
+        const date   = new Date(parseInt(tx.timeStamp) * 1000).toISOString();
+        txns.push(normalizeTransaction({
+          txHash:      tx.hash, date,
+          type:        isIn ? 'receive' : 'send',
+          assetSymbol: 'ETH',
+          assetName:   'Ethereum',
+          amount:      parseInt(tx.value) / 1e18,
+          feeSEK:      gasSEK,
+          needsReview: true,
+        }, accountId, 'eth_wallet'));
+      }
+
+      const totalFetched = nativeTxs.length + tokenTxs.length;
       const start = txns.length ? txns.reduce((a,b) => a.date < b.date ? a : b).date : null;
-      setImportStatus(accountId, { status:'synced', totalFetched:allTxns.length, totalTxns:txns.length, startDate:start, endDate:new Date().toISOString() });
-      return { txns, totalFetched:allTxns.length };
+      const end   = txns.length ? txns.reduce((a,b) => a.date > b.date ? a : b).date : null;
+      setImportStatus(accountId, { status:'synced', totalFetched, totalTxns:txns.length, startDate:start, endDate:end });
+      return { txns, totalFetched };
+
     } catch (e) {
       setImportStatus(accountId, { status:'failed', error:e.message });
       return { txns:[], error:e.message };

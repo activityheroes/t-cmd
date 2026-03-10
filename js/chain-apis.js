@@ -49,8 +49,9 @@ const ChainAPIs = (() => {
   function getKeys() {
     const K = window.TCMD_KEYS || {};
     return {
-      birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
-      helius:  localStorage.getItem('tcmd_helius_key')  || K.helius  || ''
+      birdeye:    localStorage.getItem('tcmd_birdeye_key')    || K.birdeye    || '',
+      helius:     localStorage.getItem('tcmd_helius_key')     || K.helius     || '',
+      etherscan:  localStorage.getItem('tcmd_etherscan_key')  || K.etherscan  || '',
     };
   }
   function setKey(name, value) {

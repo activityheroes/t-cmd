@@ -988,7 +988,7 @@ const TaxUI = (() => {
           </div>
           ${chain==='sol' && !localStorage.getItem('tcmd_helius_key') ? `
           <div class="tax-warn-box">⚠️ No Helius API key found. Add it in the Admin panel to enable full Solana history import.</div>` : ''}
-          ${chain==='eth' && !localStorage.getItem('tcmd_etherscan_key') ? `
+          ${chain==='eth' && !localStorage.getItem('tcmd_etherscan_key') && !window.TCMD_KEYS?.etherscan ? `
           <div class="tax-warn-box">
             ⚠️ No Etherscan API key found.
             <strong>MetaMask import will not work without it.</strong><br>

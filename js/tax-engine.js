@@ -1403,10 +1403,13 @@ const TaxEngine = (() => {
   // ETHEREUM / EVM IMPORT — Etherscan API
   // Fetches both native ETH transactions (txlist) AND ERC-20
   // token transfers (tokentx), deduplicates, detects DEX swaps.
-  // Requires tcmd_etherscan_key in localStorage (Admin panel).
+  // Key priority: localStorage → window.TCMD_KEYS → error
   // ════════════════════════════════════════════════════════════
   async function importEthWallet(address, accountId, onProgress) {
-    const etherscanKey = localStorage.getItem('tcmd_etherscan_key') || '';
+    // Priority: Admin panel (localStorage) → config.js/keys.js (TCMD_KEYS)
+    const etherscanKey = localStorage.getItem('tcmd_etherscan_key')
+      || (typeof window !== 'undefined' && window.TCMD_KEYS?.etherscan)
+      || '';
     if (!etherscanKey) {
       return {
         txns: [], error: 'No Etherscan API key configured. Add it in the Admin panel → API Keys.',

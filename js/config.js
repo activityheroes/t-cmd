@@ -24,11 +24,12 @@ const SUPABASE_READY = (
 );
 
 // Default API keys — used when js/keys.js (gitignored) is absent,
-// e.g. on GitHub Pages. These are free-tier keys.
-// If keys.js loaded first it already set window.TCMD_KEYS, so we skip.
-if (!window.TCMD_KEYS || !window.TCMD_KEYS.birdeye) {
-    window.TCMD_KEYS = Object.assign({
-        helius:  '742cfd02-85ba-48c9-b6b8-3fe3e3aa70b3',
-        birdeye: '6ad6eba8bf594e1681764f5fb0b17ed8'
-    }, window.TCMD_KEYS || {});
-}
+// e.g. on GitHub Pages. These are free-tier keys shared across all users.
+// If keys.js loaded first it already set window.TCMD_KEYS, so we merge.
+// ⚠️  etherscan key is required for MetaMask / EVM wallet imports.
+//     Get a free key at https://etherscan.io/myapikey and paste it below.
+window.TCMD_KEYS = Object.assign({
+    helius:     '742cfd02-85ba-48c9-b6b8-3fe3e3aa70b3',
+    birdeye:    '6ad6eba8bf594e1681764f5fb0b17ed8',
+    etherscan:  '',   // ← paste your Etherscan key here (free at etherscan.io/myapikey)
+}, window.TCMD_KEYS || {});

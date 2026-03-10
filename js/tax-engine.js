@@ -1449,13 +1449,16 @@ const TaxEngine = (() => {
             data = await r.json();
           } catch { break; }
 
-          // status '0' with empty result = end of history (not an error)
-          if (!Array.isArray(data.result) || !data.result.length) { hasMore = false; break; }
-          // status '0' with string result = API error (bad key, rate limit etc.)
+          // ① Check for API-level errors FIRST (bad key, rate limit, invalid address…)
+          //    data.result is a string when there's an error, e.g. "Invalid API Key"
           if (data.status !== '1') {
-            const msg = typeof data.result === 'string' ? data.result : data.message || 'Etherscan error';
+            const msg = typeof data.result === 'string' ? data.result : (data.message || 'Etherscan error');
+            // "No transactions found" is normal end-of-history — stop pagination cleanly
+            if (data.message === 'No transactions found') { hasMore = false; break; }
             throw new Error(`Etherscan ${action}: ${msg}`);
           }
+          // ② Empty result array = reached end of paginated history
+          if (!Array.isArray(data.result) || !data.result.length) { hasMore = false; break; }
 
           rows.push(...data.result);
           hasMore = data.result.length === 100;

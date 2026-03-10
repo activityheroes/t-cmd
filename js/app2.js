@@ -1766,7 +1766,22 @@ const App = {
     }
 
     this.gateFeatures();
-    switchTab('signals');
+
+    // ── Restore tab from URL hash (e.g. refresh preserves current tab) ──
+    const VALID_TABS = ['signals', 'scanner', 'log', 'whales', 'tax'];
+    const hashParts  = window.location.hash.replace('#', '').split('/');
+    const hashTab    = VALID_TABS.includes(hashParts[0]) ? hashParts[0] : 'signals';
+    switchTab(hashTab);
+    if (hashTab === 'scanner')  { if (!AppState.scannerTokens.length) loadScanner(); renderScannerCards(); }
+    if (hashTab === 'log')      renderTradingLog();
+    if (hashTab === 'whales')   { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
+    if (hashTab === 'tax') {
+      const u = AuthManager.getUser();
+      if (u?.role === 'admin' || u?.features?.taxCalculator) {
+        if (typeof TaxUI !== 'undefined') TaxUI.init();
+      }
+    }
+
     loadSignals();
     loadFearGreed();
     loadTicker();

@@ -1714,6 +1714,7 @@ const TaxUI = (() => {
       btn.addEventListener('click', () => {
         if (btn.dataset.page !== 'portfolio') destroyPortfolioCharts();
         S.page = btn.dataset.page;
+        history.replaceState(null, '', '#tax/' + btn.dataset.page);
         render();
       });
     });
@@ -1746,12 +1747,21 @@ const TaxUI = (() => {
     S.taxYear = TaxEngine.getSettings().taxYear;
     S.taxResult = null;
     bindPipelineEvents();
+
+    // Restore tax sub-page from URL hash (e.g. #tax/reports → reports page)
+    const VALID_PAGES = ['portfolio', 'accounts', 'transactions', 'reports', 'review'];
+    const hashParts   = window.location.hash.replace('#', '').split('/');
+    if (hashParts[0] === 'tax' && VALID_PAGES.includes(hashParts[1])) {
+      S.page = hashParts[1];
+    }
+
     render();
   }
 
   function navigate(page) {
     if (page !== 'portfolio') destroyPortfolioCharts();
     S.page = page;
+    history.replaceState(null, '', '#tax/' + page);
     render();
   }
 

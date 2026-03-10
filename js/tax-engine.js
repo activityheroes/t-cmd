@@ -1440,7 +1440,8 @@ const TaxEngine = (() => {
         const rows = [];
         let page = 1, hasMore = true;
         while (hasMore) {
-          const url = `https://api.etherscan.io/api?module=account&action=${action}` +
+          // V2 endpoint: https://docs.etherscan.io/v2-migration
+          const url = `https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}` +
             `&address=${address}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
           let data;
           try {

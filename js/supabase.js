@@ -31,6 +31,18 @@ const SupabaseDB = (() => {
         return Array.isArray(data) ? data[0] : data;
     }
 
+    // Upsert — POST with on-conflict merge
+    async function sbUpsert(table, body, onConflict = '') {
+        const h = { ...headers(), 'Prefer': 'return=representation,resolution=merge-duplicates' };
+        const q = onConflict ? `on_conflict=${onConflict}` : '';
+        const r = await fetch(url(table, q), {
+            method: 'POST', headers: h, body: JSON.stringify(body)
+        });
+        if (!r.ok) { const e = await r.text(); throw new Error(e); }
+        const data = await r.json();
+        return Array.isArray(data) ? data[0] : data;
+    }
+
     async function sbPatch(table, query, body) {
         const r = await fetch(url(table, query), {
             method: 'PATCH', headers: headers(), body: JSON.stringify(body)
@@ -76,6 +88,11 @@ const SupabaseDB = (() => {
     function lsGenToken() {
         return Array.from(crypto.getRandomValues(new Uint8Array(16)))
             .map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // ── Helper: get current user ID ──────────────────────────
+    function _uid() {
+        try { return AuthManager.getUser()?.id || 'anon'; } catch { return 'anon'; }
     }
 
     // ── Public API ────────────────────────────────────────────
@@ -184,19 +201,276 @@ const SupabaseDB = (() => {
             return sbGet('invites', q);
         },
 
-        // ── Watched Wallets (shared across all users) ─────────
-        // Required Supabase table:
-        //   CREATE TABLE watched_wallets (
-        //     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-        //     chain text NOT NULL,
-        //     address text NOT NULL,
-        //     label text,
-        //     created_at timestamptz DEFAULT now()
-        //   );
-        //   ALTER TABLE watched_wallets ENABLE ROW LEVEL SECURITY;
-        //   CREATE POLICY "public read"  ON watched_wallets FOR SELECT USING (true);
-        //   CREATE POLICY "public write" ON watched_wallets FOR INSERT WITH CHECK (true);
-        //   CREATE POLICY "public delete" ON watched_wallets FOR DELETE USING (true);
+        // ══════════════════════════════════════════════════════
+        // PER-USER DATA (key-value store)
+        // ══════════════════════════════════════════════════════
+
+        async getUserData(key, fallback = null) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                try { return JSON.parse(localStorage.getItem(`tcmd_${userId}_${key}`) || 'null') ?? fallback; }
+                catch { return fallback; }
+            }
+            try {
+                const rows = await sbGet('user_data', `user_id=eq.${userId}&key=eq.${encodeURIComponent(key)}&limit=1`);
+                return rows[0]?.value ?? fallback;
+            } catch { return fallback; }
+        },
+
+        async setUserData(key, value) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                localStorage.setItem(`tcmd_${userId}_${key}`, JSON.stringify(value));
+                return;
+            }
+            try {
+                await sbUpsert('user_data', {
+                    user_id: userId, key, value,
+                    updated_at: new Date().toISOString()
+                }, 'user_id,key');
+            } catch (e) {
+                console.warn('[SupabaseDB] setUserData failed, falling back to localStorage:', e.message);
+                localStorage.setItem(`tcmd_${userId}_${key}`, JSON.stringify(value));
+            }
+        },
+
+        // ══════════════════════════════════════════════════════
+        // TRADING POSITIONS
+        // ══════════════════════════════════════════════════════
+
+        async getPositions() {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                try { return JSON.parse(localStorage.getItem(`tcmd_pos_${userId}`) || '[]'); } catch { return []; }
+            }
+            try {
+                const rows = await sbGet('user_positions', `user_id=eq.${userId}&order=opened_at.desc`);
+                return rows.map(r => ({
+                    id: r.id, symbol: r.symbol, direction: r.direction,
+                    entry: r.entry, stopLoss: r.stop_loss, takeProfit: r.take_profit,
+                    size: r.size, rr: r.rr, fromSignalId: r.from_signal,
+                    openedAt: r.opened_at, currentPrice: r.current_price
+                }));
+            } catch { return []; }
+        },
+
+        async savePositions(positions) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                localStorage.setItem(`tcmd_pos_${userId}`, JSON.stringify(positions));
+                return;
+            }
+            try {
+                // Delete all then re-insert (simple sync)
+                await sbDelete('user_positions', `user_id=eq.${userId}`);
+                if (positions.length) {
+                    for (const p of positions) {
+                        await sbPost('user_positions', {
+                            id: p.id, user_id: userId, symbol: p.symbol,
+                            direction: p.direction, entry: p.entry,
+                            stop_loss: p.stopLoss, take_profit: p.takeProfit,
+                            size: p.size, rr: p.rr, from_signal: p.fromSignalId,
+                            opened_at: p.openedAt, current_price: p.currentPrice
+                        });
+                    }
+                }
+            } catch (e) {
+                console.warn('[SupabaseDB] savePositions failed:', e.message);
+                localStorage.setItem(`tcmd_pos_${userId}`, JSON.stringify(positions));
+            }
+        },
+
+        async getClosedPositions() {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                try { return JSON.parse(localStorage.getItem(`tcmd_closed_${userId}`) || '[]'); } catch { return []; }
+            }
+            try {
+                const rows = await sbGet('user_closed_positions', `user_id=eq.${userId}&order=closed_at.desc&limit=200`);
+                return rows.map(r => ({
+                    id: r.id, symbol: r.symbol, direction: r.direction,
+                    entry: r.entry, stopLoss: r.stop_loss, takeProfit: r.take_profit,
+                    size: r.size, rr: r.rr, fromSignalId: r.from_signal,
+                    openedAt: r.opened_at, closePrice: r.close_price,
+                    pnlPct: r.pnl_pct, closedAt: r.closed_at
+                }));
+            } catch { return []; }
+        },
+
+        async saveClosedPosition(pos) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const closed = JSON.parse(localStorage.getItem(`tcmd_closed_${userId}`) || '[]');
+                closed.unshift(pos);
+                if (closed.length > 200) closed.splice(200);
+                localStorage.setItem(`tcmd_closed_${userId}`, JSON.stringify(closed));
+                return;
+            }
+            try {
+                await sbPost('user_closed_positions', {
+                    id: pos.id, user_id: userId, symbol: pos.symbol,
+                    direction: pos.direction, entry: pos.entry,
+                    stop_loss: pos.stopLoss, take_profit: pos.takeProfit,
+                    size: pos.size, rr: pos.rr, from_signal: pos.fromSignalId,
+                    opened_at: pos.openedAt, close_price: pos.closePrice,
+                    pnl_pct: pos.pnlPct, closed_at: pos.closedAt
+                });
+            } catch (e) {
+                console.warn('[SupabaseDB] saveClosedPosition failed:', e.message);
+            }
+        },
+
+        // ══════════════════════════════════════════════════════
+        // TAX ACCOUNTS
+        // ══════════════════════════════════════════════════════
+
+        async getTaxAccounts() {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                try { return JSON.parse(localStorage.getItem(`tcmd_tax_acc_${userId}`) || '[]'); } catch { return []; }
+            }
+            try {
+                const rows = await sbGet('user_tax_accounts', `user_id=eq.${userId}&order=created_at.asc`);
+                return rows.map(r => ({ id: r.id, type: r.type, label: r.label, address: r.address, chain: r.chain, ...r.data }));
+            } catch { return []; }
+        },
+
+        async saveTaxAccount(acc) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const accs = JSON.parse(localStorage.getItem(`tcmd_tax_acc_${userId}`) || '[]');
+                accs.push(acc);
+                localStorage.setItem(`tcmd_tax_acc_${userId}`, JSON.stringify(accs));
+                return;
+            }
+            try {
+                const { id, type, label, address, chain, ...rest } = acc;
+                await sbPost('user_tax_accounts', { id, user_id: userId, type, label, address, chain, data: rest });
+            } catch (e) {
+                console.warn('[SupabaseDB] saveTaxAccount failed:', e.message);
+            }
+        },
+
+        async deleteTaxAccount(accountId) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const accs = JSON.parse(localStorage.getItem(`tcmd_tax_acc_${userId}`) || '[]')
+                    .filter(a => a.id !== accountId);
+                localStorage.setItem(`tcmd_tax_acc_${userId}`, JSON.stringify(accs));
+                return;
+            }
+            try {
+                await sbDelete('user_tax_accounts', `user_id=eq.${userId}&id=eq.${accountId}`);
+            } catch (e) { console.warn('[SupabaseDB] deleteTaxAccount failed:', e.message); }
+        },
+
+        // ══════════════════════════════════════════════════════
+        // TAX TRANSACTIONS (bulk)
+        // ══════════════════════════════════════════════════════
+
+        async getTaxTransactions() {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                try { return JSON.parse(localStorage.getItem(`tcmd_tax_txns_${userId}`) || '[]'); } catch { return []; }
+            }
+            try {
+                const rows = await sbGet('user_tax_transactions', `user_id=eq.${userId}&order=created_at.asc`);
+                return rows.map(r => ({ ...r.data, id: r.id, accountId: r.account_id }));
+            } catch { return []; }
+        },
+
+        async saveTaxTransactions(txns) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                localStorage.setItem(`tcmd_tax_txns_${userId}`, JSON.stringify(txns));
+                return;
+            }
+            try {
+                // Delete existing, then bulk insert
+                await sbDelete('user_tax_transactions', `user_id=eq.${userId}`);
+                // Batch insert in chunks of 50
+                for (let i = 0; i < txns.length; i += 50) {
+                    const chunk = txns.slice(i, i + 50).map(t => ({
+                        id: t.id, user_id: userId, account_id: t.accountId,
+                        data: t
+                    }));
+                    const r = await fetch(url('user_tax_transactions'), {
+                        method: 'POST', headers: headers(),
+                        body: JSON.stringify(chunk)
+                    });
+                    if (!r.ok) throw new Error(`Bulk insert failed: ${r.status}`);
+                }
+            } catch (e) {
+                console.warn('[SupabaseDB] saveTaxTransactions failed:', e.message);
+                localStorage.setItem(`tcmd_tax_txns_${userId}`, JSON.stringify(txns));
+            }
+        },
+
+        async deleteTaxTransactionsByAccount(accountId) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const txns = JSON.parse(localStorage.getItem(`tcmd_tax_txns_${userId}`) || '[]')
+                    .filter(t => t.accountId !== accountId);
+                localStorage.setItem(`tcmd_tax_txns_${userId}`, JSON.stringify(txns));
+                return;
+            }
+            try {
+                await sbDelete('user_tax_transactions', `user_id=eq.${userId}&account_id=eq.${accountId}`);
+            } catch (e) { console.warn('[SupabaseDB] deleteTaxTransactionsByAccount:', e.message); }
+        },
+
+        // ══════════════════════════════════════════════════════
+        // CENTRALIZED API KEYS
+        // ══════════════════════════════════════════════════════
+
+        async getApiKeys() {
+            if (!SUPABASE_READY) {
+                // Fall back to localStorage keys
+                const K = window.TCMD_KEYS || {};
+                return {
+                    helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
+                    birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
+                    etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
+                };
+            }
+            try {
+                const rows = await sbGet('api_keys');
+                const keys = {};
+                for (const r of rows) keys[r.name] = r.value || '';
+                // Merge with defaults from keys.js
+                const K = window.TCMD_KEYS || {};
+                return {
+                    helius: keys.helius || K.helius || '',
+                    birdeye: keys.birdeye || K.birdeye || '',
+                    etherscan: keys.etherscan || K.etherscan || '',
+                };
+            } catch {
+                const K = window.TCMD_KEYS || {};
+                return {
+                    helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
+                    birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
+                    etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
+                };
+            }
+        },
+
+        async setApiKey(name, value) {
+            const val = (value || '').trim();
+            if (!SUPABASE_READY) {
+                localStorage.setItem(`tcmd_${name}_key`, val);
+                return;
+            }
+            try {
+                await sbUpsert('api_keys', { name, value: val, updated_at: new Date().toISOString() }, 'name');
+            } catch (e) {
+                console.warn('[SupabaseDB] setApiKey failed, saving to localStorage:', e.message);
+                localStorage.setItem(`tcmd_${name}_key`, val);
+            }
+        },
+
+        // ══════════════════════════════════════════════════════
+        // WATCHED WALLETS (with user_id)
+        // ══════════════════════════════════════════════════════
 
         async getWallets() {
             if (!SUPABASE_READY) return null;
@@ -206,9 +480,10 @@ const SupabaseDB = (() => {
         },
 
         async addWallet({ chain, address, label }) {
+            const userId = _uid();
             if (!SUPABASE_READY) return null;
             try {
-                return await sbPost('watched_wallets', { chain, address, label });
+                return await sbPost('watched_wallets', { chain, address, label, user_id: userId });
             } catch { return null; }
         },
 

@@ -1,28 +1,39 @@
 /* ============================================================
    T-CMD — Trading Log (Position Management)
+   Per-user persistence via SupabaseDB
    ============================================================ */
 
 const TradeLog = (() => {
-    const STORAGE_KEY = 'tcmd_positions';
-    const CLOSED_KEY = 'tcmd_closed';
+    // In-memory cache (loaded from Supabase on init)
+    let _positions = [];
+    let _closed = [];
+    let _loaded = false;
 
-    function getPositions() {
-        try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; }
+    function getPositions() { return _positions; }
+    function getClosedPositions() { return _closed; }
+
+    async function _persist() {
+        try { await SupabaseDB.savePositions(_positions); } catch (e) {
+            console.warn('[TradeLog] persist positions failed:', e.message);
+        }
     }
-
-    function savePositions(p) { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }
-
-    function getClosedPositions() {
-        try { return JSON.parse(localStorage.getItem(CLOSED_KEY)) || []; } catch { return []; }
-    }
-
-    function saveClosedPositions(p) { localStorage.setItem(CLOSED_KEY, JSON.stringify(p)); }
 
     return {
+        // Load from Supabase into memory (call once on app init)
+        async init() {
+            try {
+                _positions = await SupabaseDB.getPositions();
+                _closed = await SupabaseDB.getClosedPositions();
+                _loaded = true;
+            } catch (e) {
+                console.warn('[TradeLog] init failed:', e.message);
+                _positions = []; _closed = []; _loaded = true;
+            }
+        },
+
         getPositions,
 
         addPosition({ symbol, direction, entry, stopLoss, takeProfit, size, rr, fromSignalId }) {
-            const positions = getPositions();
             const pos = {
                 id: `pos-${Date.now()}`,
                 symbol,
@@ -36,36 +47,34 @@ const TradeLog = (() => {
                 openedAt: Date.now(),
                 currentPrice: parseFloat(entry)
             };
-            positions.push(pos);
-            savePositions(positions);
+            _positions.push(pos);
+            _persist();
             return pos;
         },
 
         updatePrice(symbol, price) {
-            const positions = getPositions();
             let changed = false;
-            for (const p of positions) {
+            for (const p of _positions) {
                 if (p.symbol === symbol) { p.currentPrice = price; changed = true; }
             }
-            if (changed) savePositions(positions);
+            if (changed) _persist();
         },
 
         closePosition(id, currentPrice) {
-            const positions = getPositions();
-            const idx = positions.findIndex(p => p.id === id);
+            const idx = _positions.findIndex(p => p.id === id);
             if (idx === -1) return null;
-            const pos = positions[idx];
+            const pos = _positions[idx];
             const price = currentPrice || pos.currentPrice || pos.entry;
             const pnlPct = pos.direction === 'LONG'
                 ? ((price - pos.entry) / pos.entry) * 100
                 : ((pos.entry - price) / pos.entry) * 100;
             const closedPos = { ...pos, closePrice: price, pnlPct: parseFloat(pnlPct.toFixed(2)), closedAt: Date.now() };
-            positions.splice(idx, 1);
-            savePositions(positions);
-            const closed = getClosedPositions();
-            closed.unshift(closedPos);
-            if (closed.length > 200) closed.splice(200);
-            saveClosedPositions(closed);
+            _positions.splice(idx, 1);
+            _persist();
+            _closed.unshift(closedPos);
+            if (_closed.length > 200) _closed.splice(200);
+            SupabaseDB.saveClosedPosition(closedPos).catch(e =>
+                console.warn('[TradeLog] saveClosedPosition failed:', e.message));
             return closedPos;
         },
 
@@ -79,15 +88,14 @@ const TradeLog = (() => {
         },
 
         getStats() {
-            const closed = getClosedPositions();
-            if (!closed.length) return { winRate: 0, totalPnl: 0, avgRR: 0, count: 0, wins: 0, losses: 0 };
-            const wins = closed.filter(p => p.pnlPct > 0).length;
-            const losses = closed.filter(p => p.pnlPct <= 0).length;
-            const total = closed.reduce((sum, p) => sum + (p.pnlPct || 0), 0);
+            if (!_closed.length) return { winRate: 0, totalPnl: 0, avgRR: 0, count: 0, wins: 0, losses: 0 };
+            const wins = _closed.filter(p => p.pnlPct > 0).length;
+            const losses = _closed.filter(p => p.pnlPct <= 0).length;
+            const total = _closed.reduce((sum, p) => sum + (p.pnlPct || 0), 0);
             return {
-                winRate: Math.round((wins / closed.length) * 100),
+                winRate: Math.round((wins / _closed.length) * 100),
                 totalPnl: parseFloat(total.toFixed(2)),
-                count: closed.length,
+                count: _closed.length,
                 wins, losses
             };
         },

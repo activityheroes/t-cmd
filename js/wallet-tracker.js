@@ -1,54 +1,34 @@
 /* ============================================================
    T-CMD — Wallet Tracker
    Track smart money wallets across SOL, ETH, BASE, BSC
+   Per-user persistence via SupabaseDB
    ============================================================ */
 
 const WalletTracker = (() => {
-    const LS_KEY = 'tcmd_watched_wallets';
-
-    // ── Storage helpers ─────────────────────────────────────────
-    function _loadLocal() {
-        try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
-    }
-    function _saveLocal(wallets) {
-        localStorage.setItem(LS_KEY, JSON.stringify(wallets));
-    }
 
     // ── CRUD ─────────────────────────────────────────────────────
     async function getWallets() {
-        // Try Supabase first — wallets are admin-curated and shared across all users
         if (typeof SupabaseDB !== 'undefined' && SUPABASE_READY) {
             const data = await SupabaseDB.getWallets();
             if (Array.isArray(data)) return data;
-            // null means Supabase call failed (table may not exist yet) — fall through
         }
-        return _loadLocal();
+        return [];
     }
 
     async function addWallet(chain, address, label) {
         const trimmed = address.trim();
         const lbl = label || trimmed.slice(0, 8) + '…';
-        // Try Supabase — persists across all users/devices
         if (typeof SupabaseDB !== 'undefined' && SUPABASE_READY) {
             const result = await SupabaseDB.addWallet({ chain, address: trimmed, label: lbl });
             if (result) return true;
-            // Supabase failed (table not set up) — fall through to localStorage
         }
-        const entry = { id: Date.now().toString(), chain, address: trimmed, label: lbl, created_at: new Date().toISOString() };
-        const wallets = _loadLocal();
-        if (!wallets.find(w => w.address === trimmed && w.chain === chain)) {
-            wallets.unshift(entry); _saveLocal(wallets);
-        }
-        return true;
+        return false;
     }
 
     async function removeWallet(id, address) {
         if (typeof SupabaseDB !== 'undefined' && SUPABASE_READY) {
             await SupabaseDB.deleteWallet(id);
         }
-        // Also clean local cache
-        const wallets = _loadLocal().filter(w => w.id !== id && w.address !== address);
-        _saveLocal(wallets);
     }
 
     // ── Chain configs ─────────────────────────────────────────────
@@ -63,7 +43,6 @@ const WalletTracker = (() => {
     async function fetchSolanaActivity(address, limit = 5) {
         try {
             const rpc = 'https://api.mainnet-beta.solana.com';
-            // Get recent transaction signatures
             const sigRes = await fetch(rpc, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -89,7 +68,6 @@ const WalletTracker = (() => {
         }
     }
 
-    // Fetch tokens held by a Solana wallet via Helius/DexScreener approach
     async function fetchSolanaTokenHoldings(address) {
         try {
             const rpc = 'https://api.mainnet-beta.solana.com';
@@ -114,37 +92,26 @@ const WalletTracker = (() => {
         } catch { return []; }
     }
 
-    // ── EVM activity (Etherscan/Basescan/BSCScan — free tier) ─────
+    // ── EVM activity (Etherscan/Basescan/BSCScan) ─────────────────
+    // API key now comes from centralized ChainAPIs.getKeys().etherscan
     const EVM_API = {
-        ETH: { base: 'https://api.etherscan.io/api', key: '' },
-        BASE: { base: 'https://api.basescan.org/api', key: '' },
-        BSC: { base: 'https://api.bscscan.com/api', key: '' }
+        ETH: { base: 'https://api.etherscan.io/api' },
+        BASE: { base: 'https://api.basescan.org/api' },
+        BSC: { base: 'https://api.bscscan.com/api' }
     };
 
-    // Call this from admin panel once user provides keys
-    function setApiKey(chain, key) {
-        if (EVM_API[chain]) EVM_API[chain].key = key;
-        const keys = JSON.parse(localStorage.getItem('tcmd_evm_keys') || '{}');
-        keys[chain] = key;
-        localStorage.setItem('tcmd_evm_keys', JSON.stringify(keys));
+    function _getEvmKey() {
+        // Use centralized key from Supabase/ChainAPIs
+        return (typeof ChainAPIs !== 'undefined') ? (ChainAPIs.getKeys().etherscan || '') : '';
     }
-
-    function _loadEvmKeys() {
-        try {
-            const k = JSON.parse(localStorage.getItem('tcmd_evm_keys') || '{}');
-            for (const chain of ['ETH', 'BASE', 'BSC']) {
-                if (k[chain]) EVM_API[chain].key = k[chain];
-            }
-        } catch { }
-    }
-    _loadEvmKeys();
 
     async function fetchEvmActivity(address, chain) {
         const cfg = EVM_API[chain];
         if (!cfg) return { txCount: 0, recent: [], error: 'Unknown chain' };
-        if (!cfg.key) return { txCount: 0, recent: [], error: 'No API key — add one in Admin → Wallet Tracker' };
+        const evmKey = _getEvmKey();
+        if (!evmKey) return { txCount: 0, recent: [], error: 'No API key — admin must add one in Admin → API Keys' };
         try {
-            const url = `${cfg.base}?module=account&action=tokentx&address=${address}&sort=desc&offset=5&page=1&apikey=${cfg.key}`;
+            const url = `${cfg.base}?module=account&action=tokentx&address=${address}&sort=desc&offset=5&page=1&apikey=${evmKey}`;
             const res = await fetch(url);
             const data = await res.json();
             if (data.status !== '1') return { txCount: 0, recent: [] };
@@ -208,6 +175,6 @@ const WalletTracker = (() => {
         getWallets, addWallet, removeWallet,
         fetchSolanaActivity, fetchEvmActivity, fetchSolanaTokenHoldings,
         fetchTokenTopHolders, checkWalletHoldings,
-        setApiKey, CHAIN_CONFIG
+        CHAIN_CONFIG
     };
 })();

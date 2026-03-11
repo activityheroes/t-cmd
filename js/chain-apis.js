@@ -3,14 +3,14 @@
  * T-CMD Rug Checker & Cluster Detector
  *
  * DexScreener : free, no auth
- * Birdeye     : requires API key (tcmd_birdeye_key in localStorage)
- * Helius      : Solana only, requires API key (tcmd_helius_key in localStorage)
+ * Birdeye     : requires API key (centralized in Supabase api_keys table)
+ * Helius      : Solana only, requires API key (centralized in Supabase)
  */
 const ChainAPIs = (() => {
   const DS_BASE = 'https://api.dexscreener.com';
   const BE_BASE = 'https://public-api.birdeye.so';
   const HL_BASE = 'https://api.helius.xyz/v0';
-  const HL_RPC  = 'https://mainnet.helius-rpc.com';
+  const HL_RPC = 'https://mainnet.helius-rpc.com';
 
   // Birdeye chain identifiers
   const BE_CHAIN_MAP = {
@@ -45,17 +45,37 @@ const ChainAPIs = (() => {
   ].map(a => a.toLowerCase()));
 
   // ── Key management ───────────────────────────────────────────
-  // Priority: localStorage (admin panel) > js/keys.js (local config) > empty
+  // In-memory cache loaded from Supabase api_keys table.
+  // loadKeys() pre-fetches on app init; getKeys() returns cached values synchronously.
+  let _keysCache = null;
+
   function getKeys() {
+    // Return cached keys if loaded, else fall back to localStorage/keys.js
+    if (_keysCache) return { ..._keysCache };
     const K = window.TCMD_KEYS || {};
     return {
-      birdeye:    localStorage.getItem('tcmd_birdeye_key')    || K.birdeye    || '',
-      helius:     localStorage.getItem('tcmd_helius_key')     || K.helius     || '',
-      etherscan:  localStorage.getItem('tcmd_etherscan_key')  || K.etherscan  || '',
+      birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
+      helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
+      etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
     };
   }
-  function setKey(name, value) {
-    localStorage.setItem(`tcmd_${name}_key`, (value || '').trim());
+
+  async function loadKeys() {
+    try {
+      _keysCache = await SupabaseDB.getApiKeys();
+    } catch (e) {
+      console.warn('[ChainAPIs] loadKeys from Supabase failed:', e.message);
+      _keysCache = getKeys(); // fall back to localStorage
+    }
+    return _keysCache;
+  }
+
+  async function setKey(name, value) {
+    const val = (value || '').trim();
+    await SupabaseDB.setApiKey(name, val);
+    // Update local cache immediately
+    if (!_keysCache) _keysCache = getKeys();
+    _keysCache[name] = val;
   }
 
   // ── Generic fetch with timeout ───────────────────────────────
@@ -109,8 +129,8 @@ const ChainAPIs = (() => {
     const { birdeye } = getKeys();
     return {
       'X-API-KEY': birdeye,
-      'X-Chain':   beChainStr(chain),
-      'accept':    'application/json'
+      'X-Chain': beChainStr(chain),
+      'accept': 'application/json'
     };
   }
 
@@ -178,9 +198,9 @@ const ChainAPIs = (() => {
     const key = hlKey();
     if (!key || !signatures?.length) return null;
     return apiFetch(`${HL_BASE}/transactions?api-key=${key}`, {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ transactions: signatures.slice(0, 100) })
+      body: JSON.stringify({ transactions: signatures.slice(0, 100) })
     });
   }
 
@@ -189,9 +209,9 @@ const ChainAPIs = (() => {
     const key = hlKey();
     if (!key || !mintAddresses?.length) return null;
     return apiFetch(`${HL_BASE}/token-metadata?api-key=${key}`, {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ mintAccounts: mintAddresses, includeOffChain: true, disableCache: false })
+      body: JSON.stringify({ mintAccounts: mintAddresses, includeOffChain: true, disableCache: false })
     });
   }
 
@@ -200,9 +220,9 @@ const ChainAPIs = (() => {
     const key = hlKey();
     if (!key) return null;
     return apiFetch(`${HL_RPC}/?api-key=${key}`, {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
     });
   }
 
@@ -249,16 +269,16 @@ const ChainAPIs = (() => {
 
   async function testHeliusKey(key) {
     const res = await apiFetch(`${HL_RPC}/?api-key=${key}`, {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] })
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] })
     }, 8000);
     return res?.result === 'ok';
   }
 
   return {
     // Config
-    getKeys, setKey,
+    getKeys, setKey, loadKeys,
     // DexScreener
     dsToken, dsPair, dsSearch, getMainPair,
     // Birdeye

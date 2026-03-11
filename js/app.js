@@ -49,7 +49,7 @@ const AppState = {
   signalCoinFilter: 'ALL',
   signalView: 'live',
   signals: [],
-  customCoins: JSON.parse(localStorage.getItem('tcmd_custom_coins') || '[]'),
+  customCoins: [],  // loaded from Supabase in initApp()
   scannerFilter: 'all',
   scannerChain: 'all',
   scannerScore: 0,
@@ -217,7 +217,7 @@ async function doAddCoin(sym, overlay) {
     if (!AppState.customCoins) AppState.customCoins = [];
     if (!AppState.customCoins.find(c => c.sym === sym)) {
       AppState.customCoins.push({ sym, icon: sym.slice(0, 2), name: sym });
-      localStorage.setItem('tcmd_custom_coins', JSON.stringify(AppState.customCoins));
+      SupabaseDB.setUserData('custom_coins', AppState.customCoins).catch(e => console.warn('[App] save custom coins:', e.message));
     }
     overlay.remove();
     renderSignalCards();
@@ -277,7 +277,7 @@ function renderAltcoinsPanel(grid) {
 window.removeCustomCoin = function (sym) {
   AppState.customCoins = (AppState.customCoins || []).filter(c => c.sym !== sym);
   AppState.signals = AppState.signals.filter(s => s.symbol !== sym || !s.isCustom);
-  localStorage.setItem('tcmd_custom_coins', JSON.stringify(AppState.customCoins));
+  SupabaseDB.setUserData('custom_coins', AppState.customCoins).catch(e => console.warn('[App] save custom coins:', e.message));
   renderAltcoinsPanel(document.getElementById('signals-grid'));
   showToast('🗑️', `${sym} Removed`, 'Altcoin removed from tracking', 'info');
 };
@@ -299,7 +299,7 @@ window.addCoinInline = async function () {
     if (!cgId || !priceData[cgId]?.usd) throw new Error(`"${sym}" not found. Try another symbol.`);
     if (!AppState.customCoins) AppState.customCoins = [];
     AppState.customCoins.push({ sym, icon: sym.slice(0, 2), name: sym });
-    localStorage.setItem('tcmd_custom_coins', JSON.stringify(AppState.customCoins));
+    SupabaseDB.setUserData('custom_coins', AppState.customCoins).catch(e => console.warn('[App] save custom coins:', e.message));
     input.value = '';
     errEl.style.display = 'none';
     renderAltcoinsPanel(document.getElementById('signals-grid'));

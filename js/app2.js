@@ -67,12 +67,12 @@ function recordSigData(addr, ts, price, mc) {
   if (!addr || !ts) return;
   const key = _sigHistKey(addr);
   let hist = [];
-  try { hist = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+  try { hist = JSON.parse(localStorage.getItem(key) || '[]'); } catch { }
   // Normalise legacy plain-timestamp entries
   hist = hist.map(e => (typeof e === 'number' ? { ts: e, price: 0, mc: 0 } : e));
   if (hist.length && Math.abs(hist[0].ts - ts) < 300000) return; // dedup within 5 min
   hist.unshift({ ts, price: price || 0, mc: mc || 0 });
-  try { localStorage.setItem(key, JSON.stringify(hist.slice(0, 10))); } catch {}
+  try { localStorage.setItem(key, JSON.stringify(hist.slice(0, 10))); } catch { }
 }
 
 // Returns [{ts, price, mc}] newest-first; normalises legacy format automatically
@@ -93,46 +93,46 @@ function ordSuffix(n) {
 
 function sparklineChart(token, frame) {
   frame = frame || '24h';
-  const addr  = token.address || '';
+  const addr = token.address || '';
   const history = getSigHistory(addr); // [{ts, price, mc}]
 
   // ── Price change data ──────────────────────────────────────────
-  const ch24  = parseFloat(token.priceChange?.h24 || 0);
-  const ch6   = parseFloat(token.priceChange?.h6  || 0);
-  const ch1   = parseFloat(token.priceChange?.h1  || 0);
-  const ch5m  = parseFloat(token.priceChange?.m5  || 0);
-  const safe  = x => (Math.abs(1 + x / 100) > 0.01 ? 1 + x / 100 : 1);
+  const ch24 = parseFloat(token.priceChange?.h24 || 0);
+  const ch6 = parseFloat(token.priceChange?.h6 || 0);
+  const ch1 = parseFloat(token.priceChange?.h1 || 0);
+  const ch5m = parseFloat(token.priceChange?.m5 || 0);
+  const safe = x => (Math.abs(1 + x / 100) > 0.01 ? 1 + x / 100 : 1);
   const p_now = 1.0;
-  const p_5m  = p_now / safe(ch5m);
-  const p_1h  = p_now / safe(ch1);
-  const p_6h  = p_now / safe(ch6);
+  const p_5m = p_now / safe(ch5m);
+  const p_1h = p_now / safe(ch1);
+  const p_6h = p_now / safe(ch6);
   const p_24h = p_now / safe(ch24);
 
   // ── Build points + labels for chosen frame ─────────────────────
   let pts, windowMs, timeLabels;
   const _tfmt = ms => new Date(Date.now() - ms).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: true });
-  const _dfmt = ts  => { const d = new Date(ts); return `${d.getMonth()+1}/${d.getDate()}`; };
+  const _dfmt = ts => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}`; };
 
   if (frame === '1h') {
-    pts       = [p_1h, p_1h * 0.5 + p_5m * 0.5, p_5m, p_now];
-    windowMs  = 3600000;
+    pts = [p_1h, p_1h * 0.5 + p_5m * 0.5, p_5m, p_now];
+    windowMs = 3600000;
     timeLabels = [_tfmt(3600000), _tfmt(1800000), _tfmt(600000), 'Now'];
 
   } else if (frame === '4h') {
     const p_3h = p_6h * 0.5 + p_1h * 0.5;
-    pts       = [p_6h, p_3h, p_1h, p_5m, p_now];
-    windowMs  = 4 * 3600000;
-    timeLabels = [_tfmt(4*3600000), _tfmt(3*3600000), _tfmt(2*3600000), _tfmt(3600000), 'Now'];
+    pts = [p_6h, p_3h, p_1h, p_5m, p_now];
+    windowMs = 4 * 3600000;
+    timeLabels = [_tfmt(4 * 3600000), _tfmt(3 * 3600000), _tfmt(2 * 3600000), _tfmt(3600000), 'Now'];
 
   } else if ((frame === '7d' || frame === 'all') && history.length >= 1) {
     // Build chart from stored signal history prices
     const curPrice = token.priceUSD || 1;
-    const cutoff   = frame === '7d' ? Date.now() - 7 * 86400000 : 0;
+    const cutoff = frame === '7d' ? Date.now() - 7 * 86400000 : 0;
     const filtered = history.filter(e => e.ts >= cutoff).slice().reverse(); // oldest→newest
     if (filtered.length >= 1) {
       const sigPts = filtered.map(e => ({ ts: e.ts, p: e.price > 0 ? e.price / curPrice : 1 }));
       sigPts.push({ ts: Date.now(), p: 1.0 });
-      pts      = sigPts.map(e => e.p);
+      pts = sigPts.map(e => e.p);
       windowMs = Date.now() - sigPts[0].ts;
       const span = windowMs;
       timeLabels = [
@@ -146,14 +146,14 @@ function sparklineChart(token, frame) {
   }
 
   if (!pts) { // default 24h
-    pts        = [p_24h, p_24h*0.6+p_6h*0.4, p_24h*0.2+p_6h*0.8, p_6h, p_6h*0.4+p_1h*0.6, p_1h, p_now];
-    windowMs   = 86400000;
+    pts = [p_24h, p_24h * 0.6 + p_6h * 0.4, p_24h * 0.2 + p_6h * 0.8, p_6h, p_6h * 0.4 + p_1h * 0.6, p_1h, p_now];
+    windowMs = 86400000;
     timeLabels = [_tfmt(86400000), _tfmt(21600000), _tfmt(3600000), 'Now'];
   }
 
   // ── Build SVG geometry ─────────────────────────────────────────
   const minP = Math.min(...pts), maxP = Math.max(...pts);
-  const rng  = (maxP - minP) || 0.001;
+  const rng = (maxP - minP) || 0.001;
   const norm = pts.map(p => (p - minP) / rng);
   const W = 300, H = 58, px = 4, py = 6;
   const svgPts = norm.map((v, i) => [
@@ -162,18 +162,18 @@ function sparklineChart(token, frame) {
   ]);
   let d = `M ${svgPts[0][0].toFixed(1)} ${svgPts[0][1].toFixed(1)}`;
   for (let i = 1; i < svgPts.length; i++) {
-    const [ax, ay] = svgPts[i-1], [bx, by] = svgPts[i];
+    const [ax, ay] = svgPts[i - 1], [bx, by] = svgPts[i];
     const cpx = ax + (bx - ax) * 0.5;
     d += ` C ${cpx.toFixed(1)} ${ay.toFixed(1)} ${cpx.toFixed(1)} ${by.toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}`;
   }
   const [lastX] = svgPts[svgPts.length - 1];
-  const fillD  = `${d} L ${lastX.toFixed(1)} ${H} L ${px} ${H} Z`;
-  const isUp   = ch24 >= 0;
-  const lc     = isUp ? '#22c55e' : '#ef4444';
+  const fillD = `${d} L ${lastX.toFixed(1)} ${H} L ${px} ${H} Z`;
+  const isUp = ch24 >= 0;
+  const lc = isUp ? '#22c55e' : '#ef4444';
   const gradId = `cg${addr.slice(-6)}`;
 
   // ── Signal markers ─────────────────────────────────────────────
-  const sigTs      = token.scannedAt || Date.now();
+  const sigTs = token.scannedAt || Date.now();
   const [sigX, sigY] = svgPts[svgPts.length - 1]; // primary always at "Now"
 
   // Historical markers (prev signals)
@@ -181,7 +181,7 @@ function sparklineChart(token, frame) {
   if ((frame === '7d' || frame === 'all') && history.length >= 1) {
     // Each history entry maps to svgPts[i] in the multi-signal chart
     const curPrice = token.priceUSD || 1;
-    const cutoff   = frame === '7d' ? Date.now() - 7 * 86400000 : 0;
+    const cutoff = frame === '7d' ? Date.now() - 7 * 86400000 : 0;
     const filtered = history.filter(e => e.ts >= cutoff).slice().reverse();
     histMarkersHtml = filtered.map((e, i) => {
       const [hx, hy] = svgPts[i] || [];
@@ -190,20 +190,20 @@ function sparklineChart(token, frame) {
         <circle r="4" fill="${lc}" opacity="0.12"/>
         <circle r="3.5" fill="${lc}" opacity="0.5"/>
         <circle r="1.5" fill="white" opacity="0.6"/>
-        <text y="-10" font-size="7" fill="${lc}" opacity="0.55" text-anchor="middle">${i+1}</text>
+        <text y="-10" font-size="7" fill="${lc}" opacity="0.55" text-anchor="middle">${i + 1}</text>
       </g>`;
     }).join('');
   } else {
     // 1h / 4h / 24h: show one "prev" marker if within the window and not overlapping
     const prevEntry = history.find(e => Math.abs(e.ts - sigTs) > 300000 && Date.now() - e.ts < windowMs);
     if (prevEntry) {
-      const am   = Math.max(0, Date.now() - prevEntry.ts);
-      const af   = Math.min(1, am / windowMs);
+      const am = Math.max(0, Date.now() - prevEntry.ts);
+      const af = Math.min(1, am / windowMs);
       const idxF = (1 - af) * (svgPts.length - 1);
-      const i0   = Math.min(Math.floor(idxF), svgPts.length - 2);
-      const f    = idxF - i0;
-      const px2  = svgPts[i0][0] + (svgPts[i0+1][0] - svgPts[i0][0]) * f;
-      const py2  = svgPts[i0][1] + (svgPts[i0+1][1] - svgPts[i0][1]) * f;
+      const i0 = Math.min(Math.floor(idxF), svgPts.length - 2);
+      const f = idxF - i0;
+      const px2 = svgPts[i0][0] + (svgPts[i0 + 1][0] - svgPts[i0][0]) * f;
+      const py2 = svgPts[i0][1] + (svgPts[i0 + 1][1] - svgPts[i0][1]) * f;
       if (Math.abs(px2 - sigX) > 28) {
         histMarkersHtml = `<g transform="translate(${px2.toFixed(1)},${py2.toFixed(1)})">
           <circle r="5" fill="${lc}" opacity="0.1"/>
@@ -224,18 +224,18 @@ function sparklineChart(token, frame) {
   </g>`;
 
   // ── Signal popup metadata ──────────────────────────────────────
-  const ageMs       = Math.max(0, Date.now() - sigTs);
+  const ageMs = Math.max(0, Date.now() - sigTs);
   const sigWindowPct = ageMs < 300000 ? ch5m : ageMs < 3600000 ? ch1 : ageMs < 21600000 ? ch6 : ch24;
-  const divsr       = 1 + sigWindowPct / 100;
-  const safeDivsr   = Math.abs(divsr) > 0.05 ? divsr : 0.05;
-  const sigPrice    = token.priceUSD > 0 ? token.priceUSD / safeDivsr : 0;
-  const sigMC       = (token.mktCap || 0) / safeDivsr;
-  const _sd         = new Date(sigTs);
-  const sigDateStr  = `${_sd.getMonth()+1}/${_sd.getDate()}, ` +
-    _sd.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+  const divsr = 1 + sigWindowPct / 100;
+  const safeDivsr = Math.abs(divsr) > 0.05 ? divsr : 0.05;
+  const sigPrice = token.priceUSD > 0 ? token.priceUSD / safeDivsr : 0;
+  const sigMC = (token.mktCap || 0) / safeDivsr;
+  const _sd = new Date(sigTs);
+  const sigDateStr = `${_sd.getMonth() + 1}/${_sd.getDate()}, ` +
+    _sd.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
   // ── Time-filter buttons ────────────────────────────────────────
-  const frameDefs = [['1h','1h'],['4h','4h'],['24h','24h'],['7d','7d'],['All','all']];
+  const frameDefs = [['1h', '1h'], ['4h', '4h'], ['24h', '24h'], ['7d', '7d'], ['All', 'all']];
   const btnHtml = frameDefs.map(([lbl, key]) =>
     `<button class="stf-btn${frame === key ? ' active' : ''}" onclick="event.stopPropagation();window.sparkSetFrame('${addr}','${key}')">${lbl}</button>`
   ).join('');
@@ -246,7 +246,7 @@ function sparklineChart(token, frame) {
     data-sig-price="${sigPrice > 0 ? sigPrice.toPrecision(6) : '0'}"
     data-sig-mc="${Math.max(0, Math.round(sigMC))}"
     data-sig-change="${sigWindowPct.toFixed(2)}"
-    data-sig-symbol="${(token.symbol||'').replace(/"/g,'')}">
+    data-sig-symbol="${(token.symbol || '').replace(/"/g, '')}">
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:64px;display:block;">
       <defs>
         <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
@@ -290,18 +290,18 @@ function startSignalTimers() {
 // ── Re-merge custom tokens saved by the user after a fresh scan ─
 async function restoreCustomTokens() {
   let customs;
-  try { customs = JSON.parse(localStorage.getItem('tcmd_custom_tokens') || '[]'); } catch { customs = []; }
+  try { customs = await SupabaseDB.getUserData('custom_tokens', []); } catch { customs = []; }
   if (!customs.length) return;
 
   const existing = new Set((AppState.scannerTokens || []).map(t => t.address));
-  const missing  = customs.filter(addr => !existing.has(addr)).slice(0, 20); // cap at 20
+  const missing = customs.filter(addr => !existing.has(addr)).slice(0, 20); // cap at 20
   if (!missing.length) return;
 
   const settled = await Promise.allSettled(
     missing.map(async addr => {
       try {
         const pairs = await API.DexScreener.getTokenPairs('solana', addr);
-        const best  = (pairs || [])
+        const best = (pairs || [])
           .sort((a, b) => parseFloat(b.liquidity?.usd || 0) - parseFloat(a.liquidity?.usd || 0))[0];
         if (!best || parseFloat(best.priceUsd || 0) <= 0) return null;
         return Scanner.formatToken(best, 0);
@@ -387,16 +387,16 @@ async function autoAnalyzeOne(token) {
           if (t.address !== token.address) return t;
           return {
             ...t,
-            phase:           updated.phase,
-            phaseMeta:       updated.phaseMeta,
-            accumScore:      updated.accumScore,
-            trapScore:       updated.trapScore,
-            breakoutScore:   updated.breakoutScore,
-            distScore:       updated.distScore,
-            finalScore:      updated.finalScore,
-            phaseReasons:    updated.reasons,
-            phasePenalties:  updated.penalties,
-            phaseTier:       updated.tier
+            phase: updated.phase,
+            phaseMeta: updated.phaseMeta,
+            accumScore: updated.accumScore,
+            trapScore: updated.trapScore,
+            breakoutScore: updated.breakoutScore,
+            distScore: updated.distScore,
+            finalScore: updated.finalScore,
+            phaseReasons: updated.reasons,
+            phasePenalties: updated.penalties,
+            phaseTier: updated.tier
           };
         });
         // Live-update the card's phase badge and reasons row without full re-render
@@ -429,7 +429,7 @@ function updateCardPhase(address, pc) {
   // Update reasons row
   const existingReasons = card.querySelector('.card-reasons-row');
   if (pc.reasons && pc.reasons.length > 0) {
-    const html = `<div class="card-reasons-row">${pc.reasons.slice(0,3).map(r => `<span class="cr-pill">${r}</span>`).join('')}</div>`;
+    const html = `<div class="card-reasons-row">${pc.reasons.slice(0, 3).map(r => `<span class="cr-pill">${r}</span>`).join('')}</div>`;
     if (existingReasons) {
       existingReasons.outerHTML = html;
     } else {
@@ -464,31 +464,24 @@ function updateCardMomentum(address, result) {
 }
 
 // ── Favorites helpers (with dedup) ───────────────────────────
-function getFavorites() {
-  try {
-    const raw     = JSON.parse(localStorage.getItem('tcmd_favorites') || '[]');
-    const deduped = [...new Set(raw)];
-    if (deduped.length !== raw.length) {
-      localStorage.setItem('tcmd_favorites', JSON.stringify(deduped));
-    }
-    return deduped;
-  } catch { return []; }
-}
-function isFavorite(addr) { return getFavorites().includes(addr); }
+// In-memory cache, loaded from Supabase in App.init()
+let _favoritesCache = [];
+let _blacklistCache = [];
+
+function getFavorites() { return _favoritesCache; }
+function isFavorite(addr) { return _favoritesCache.includes(addr); }
 
 // ── Blacklist helpers ──────────────────────────────────────────
-function getBlacklist() {
-  try { return [...new Set(JSON.parse(localStorage.getItem('tcmd_blacklist') || '[]'))]; }
-  catch { return []; }
-}
-function isBlacklisted(addr) { return getBlacklist().includes(addr); }
+function getBlacklist() { return _blacklistCache; }
+function isBlacklisted(addr) { return _blacklistCache.includes(addr); }
 
-window.addToBlacklist = function(addr, name) {
+window.addToBlacklist = function (addr, name) {
   if (!addr) return;
   const bl = getBlacklist();
   if (bl.includes(addr)) return;
   bl.push(addr);
-  localStorage.setItem('tcmd_blacklist', JSON.stringify(bl));
+  _blacklistCache = bl;
+  SupabaseDB.setUserData('scanner_blacklist', bl).catch(e => console.warn('[App2] save blacklist:', e.message));
 
   // Remove from active scanner tokens immediately
   AppState.scannerTokens = (AppState.scannerTokens || []).filter(t => t.address !== addr);
@@ -500,7 +493,7 @@ window.addToBlacklist = function(addr, name) {
   if (container) {
     const toast = document.createElement('div');
     toast.className = 'toast toast-info';
-    const safeName = (name || addr.slice(0,6)+'…').replace(/[<>"']/g, '');
+    const safeName = (name || addr.slice(0, 6) + '…').replace(/[<>"']/g, '');
     toast.innerHTML = `
       <span class="toast-icon">🚫</span>
       <div><div class="toast-title">Hidden: ${safeName}</div><div class="toast-msg">Won't appear in scanner again</div></div>
@@ -511,22 +504,22 @@ window.addToBlacklist = function(addr, name) {
   }
 };
 
-window.undoBlacklist = function(addr, toastEl) {
-  const bl = getBlacklist().filter(a => a !== addr);
-  localStorage.setItem('tcmd_blacklist', JSON.stringify(bl));
+window.undoBlacklist = function (addr, toastEl) {
+  _blacklistCache = _blacklistCache.filter(a => a !== addr);
+  SupabaseDB.setUserData('scanner_blacklist', _blacklistCache).catch(e => console.warn('[App2] save blacklist:', e.message));
   if (toastEl) toastEl.remove();
   showToast('↩️', 'Unhidden', 'Token restored — rescan to see it again', 'info');
 };
 
-window.clearBlacklist = function() {
-  localStorage.removeItem('tcmd_blacklist');
+window.clearBlacklist = function () {
+  _blacklistCache = [];
+  SupabaseDB.setUserData('scanner_blacklist', []).catch(e => console.warn('[App2] clear blacklist:', e.message));
   showToast('🗑️', 'Blacklist cleared', 'All hidden tokens restored on next scan', 'info');
 };
 window.toggleFavorite = function (addr) {
-  const favs = getFavorites();
-  const idx = favs.indexOf(addr);
-  if (idx >= 0) favs.splice(idx, 1); else favs.push(addr);
-  localStorage.setItem('tcmd_favorites', JSON.stringify(favs));
+  const idx = _favoritesCache.indexOf(addr);
+  if (idx >= 0) _favoritesCache.splice(idx, 1); else _favoritesCache.push(addr);
+  SupabaseDB.setUserData('scanner_favorites', _favoritesCache).catch(e => console.warn('[App2] save favorites:', e.message));
   const isNowFav = idx < 0;
   document.querySelectorAll(`.fav-btn[data-addr="${addr}"]`).forEach(btn => {
     btn.classList.toggle('active', isNowFav);
@@ -575,8 +568,8 @@ async function searchAndAddToken(query) {
     if (!exists) {
       AppState.scannerTokens.unshift(newToken);
       // Persist custom tokens
-      const customs = JSON.parse(localStorage.getItem('tcmd_custom_tokens') || '[]');
-      if (!customs.includes(baseAddr)) { customs.unshift(baseAddr); localStorage.setItem('tcmd_custom_tokens', JSON.stringify(customs.slice(0, 50))); }
+      const customs = await SupabaseDB.getUserData('custom_tokens', []);
+      if (!customs.includes(baseAddr)) { customs.unshift(baseAddr); SupabaseDB.setUserData('custom_tokens', customs.slice(0, 50)).catch(e => console.warn('[App2] save custom tokens:', e.message)); }
     }
     // Clear search input and re-render
     const sq = document.getElementById('scanner-search');
@@ -599,31 +592,31 @@ function _buildTokenFromPair(pair) {
   const b = p.baseToken;
   const chainRaw = (p.chainId || 'solana').toLowerCase();
   return {
-    address:     b.address  || '',
-    name:        b.name     || 'Unknown',
-    symbol:      b.symbol   || '???',
-    chainId:     p.chainId  || 'solana',
-    priceUSD:    parseFloat(p.priceUsd || 0),
+    address: b.address || '',
+    name: b.name || 'Unknown',
+    symbol: b.symbol || '???',
+    chainId: p.chainId || 'solana',
+    priceUSD: parseFloat(p.priceUsd || 0),
     priceChange: { m5: p.priceChange?.m5 || 0, h1: p.priceChange?.h1 || 0, h6: p.priceChange?.h6 || 0, h24: p.priceChange?.h24 || 0 },
-    volume:      { m5: p.volume?.m5 || 0, h1: p.volume?.h1 || 0, h6: p.volume?.h6 || 0, h24: p.volume?.h24 || 0 },
-    liquidity:   p.liquidity?.usd || 0,
-    mktCap:      p.marketCap || 0,
-    fdv:         p.fdv || 0,
-    txns:        p.txns || {},
+    volume: { m5: p.volume?.m5 || 0, h1: p.volume?.h1 || 0, h6: p.volume?.h6 || 0, h24: p.volume?.h24 || 0 },
+    liquidity: p.liquidity?.usd || 0,
+    mktCap: p.marketCap || 0,
+    fdv: p.fdv || 0,
+    txns: p.txns || {},
     pairAddress: p.pairAddress || '',
-    dexUrl:      p.url || `https://dexscreener.com/${chainRaw}/${p.pairAddress}`,
-    socials:     [],
-    websites:    [],
-    imageUrl:    b.info?.imageUrl || null,
+    dexUrl: p.url || `https://dexscreener.com/${chainRaw}/${p.pairAddress}`,
+    socials: [],
+    websites: [],
+    imageUrl: b.info?.imageUrl || null,
     boostAmount: 0,
-    pumpScore:   Math.min(100, Math.round(((p.volume?.h1 || 0) / Math.max(p.liquidity?.usd || 1, 1)) * 20)),
-    rugFlags:    [],
-    isBreakout:  false,
-    signalType:  'fresh',
-    multiplier:  { label: '—', tier: 'low' },
-    memeSignal:  null,
-    scannedAt:   Date.now(),
-    isCustom:    true
+    pumpScore: Math.min(100, Math.round(((p.volume?.h1 || 0) / Math.max(p.liquidity?.usd || 1, 1)) * 20)),
+    rugFlags: [],
+    isBreakout: false,
+    signalType: 'fresh',
+    multiplier: { label: '—', tier: 'low' },
+    memeSignal: null,
+    scannedAt: Date.now(),
+    isCustom: true
   };
 }
 
@@ -707,14 +700,14 @@ function renderScannerCards() {
 
   // Sectioned view — only when no specific phase filter active
   const filter = AppState.scannerFilter || 'all';
-  const phaseFilters = ['trap','accumulation','breakout','distribution'];
+  const phaseFilters = ['trap', 'accumulation', 'breakout', 'distribution'];
   const useSections = filter === 'all' && tokens.some(t => t.phase);
 
   if (useSections) {
-    const trapTokens  = tokens.filter(t => t.trapScore  >= 55).sort((a,b) => b.trapScore  - a.trapScore);
-    const accumTokens = tokens.filter(t => t.accumScore >= 55 && t.phase !== 'distribution' && !trapTokens.includes(t)).sort((a,b) => b.accumScore - a.accumScore);
-    const boTokens    = tokens.filter(t => (t.phase === 'breakout' || t.breakoutScore >= 55) && !trapTokens.includes(t) && !accumTokens.includes(t)).sort((a,b) => b.breakoutScore - a.breakoutScore);
-    const distTokens  = tokens.filter(t => t.distScore  >= 55 && !trapTokens.includes(t) && !boTokens.includes(t) && !accumTokens.includes(t)).sort((a,b) => b.distScore - a.distScore);
+    const trapTokens = tokens.filter(t => t.trapScore >= 55).sort((a, b) => b.trapScore - a.trapScore);
+    const accumTokens = tokens.filter(t => t.accumScore >= 55 && t.phase !== 'distribution' && !trapTokens.includes(t)).sort((a, b) => b.accumScore - a.accumScore);
+    const boTokens = tokens.filter(t => (t.phase === 'breakout' || t.breakoutScore >= 55) && !trapTokens.includes(t) && !accumTokens.includes(t)).sort((a, b) => b.breakoutScore - a.breakoutScore);
+    const distTokens = tokens.filter(t => t.distScore >= 55 && !trapTokens.includes(t) && !boTokens.includes(t) && !accumTokens.includes(t)).sort((a, b) => b.distScore - a.distScore);
     const otherTokens = tokens.filter(t => !trapTokens.includes(t) && !accumTokens.includes(t) && !boTokens.includes(t) && !distTokens.includes(t));
 
     const buildSection = (id, emoji, title, cls, tokenList, collapsed = false) => {
@@ -734,19 +727,19 @@ function renderScannerCards() {
     };
 
     grid.innerHTML = [
-      buildSection('trap',  '🪤', 'Liquidity Trap Candidates', 'ss-trap',  trapTokens),
-      buildSection('accum', '📦', 'Accumulation Opportunities','ss-accum', accumTokens),
-      buildSection('bo',    '🚀', 'Breakout Trades',           'ss-bo',    boTokens),
-      buildSection('dist',  '⚠️', 'Distribution / Avoid',      'ss-dist',  distTokens,  true),
-      buildSection('other', '📊', 'Other / Watch',             'ss-other', otherTokens, true),
+      buildSection('trap', '🪤', 'Liquidity Trap Candidates', 'ss-trap', trapTokens),
+      buildSection('accum', '📦', 'Accumulation Opportunities', 'ss-accum', accumTokens),
+      buildSection('bo', '🚀', 'Breakout Trades', 'ss-bo', boTokens),
+      buildSection('dist', '⚠️', 'Distribution / Avoid', 'ss-dist', distTokens, true),
+      buildSection('other', '📊', 'Other / Watch', 'ss-other', otherTokens, true),
     ].join('');
   } else {
     grid.innerHTML = renderCards(tokens);
   }
 }
 
-window.toggleScannerSection = function(id) {
-  const sec  = document.getElementById(id);
+window.toggleScannerSection = function (id) {
+  const sec = document.getElementById(id);
   const body = document.getElementById(id + '-body');
   const chev = sec?.querySelector('.ss-chevron');
   if (!body) return;
@@ -756,44 +749,44 @@ window.toggleScannerSection = function(id) {
 
 // ── Technical levels: RSI · Support · Resistance · Range · Volume ─────
 function calcTechLevels(token) {
-  const p    = token.priceUSD || 0;
-  const ch1  = parseFloat(token.priceChange?.h1  || 0);
-  const ch6  = parseFloat(token.priceChange?.h6  || 0);
+  const p = token.priceUSD || 0;
+  const ch1 = parseFloat(token.priceChange?.h1 || 0);
+  const ch6 = parseFloat(token.priceChange?.h6 || 0);
   const ch24 = parseFloat(token.priceChange?.h24 || 0);
-  const ch5m = parseFloat(token.priceChange?.m5  || 0);
+  const ch5m = parseFloat(token.priceChange?.m5 || 0);
 
   // Reconstruct prices at each timeframe (relative to current)
   const safe = x => (Math.abs(1 + x / 100) > 0.01 ? 1 + x / 100 : 1);
-  const p1h  = p > 0 ? p / safe(ch1)  : p;
-  const p6h  = p > 0 ? p / safe(ch6)  : p;
+  const p1h = p > 0 ? p / safe(ch1) : p;
+  const p6h = p > 0 ? p / safe(ch6) : p;
   const p24h = p > 0 ? p / safe(ch24) : p;
   const prices = [p, p1h, p6h, p24h].filter(v => v > 0);
 
-  const rawLow  = Math.min(...prices);
+  const rawLow = Math.min(...prices);
   const rawHigh = Math.max(...prices);
 
   // Small buffer so lines sit just outside the price range (proper S/R levels)
-  const support    = rawLow  * 0.985;
+  const support = rawLow * 0.985;
   const resistance = rawHigh * 1.015;
-  const range      = support > 0 ? ((resistance - support) / support) * 100 : 0;
+  const range = support > 0 ? ((resistance - support) / support) * 100 : 0;
 
   // RSI estimate: same formula as scanner.js calcTechnicalSentiment
   const rsi = Math.min(90, Math.max(10, 50 + ch1 * 1.5 + ch5m * 2));
 
   // Volume quality relative to market cap
   const vol24 = token.volume?.h24 || 0;
-  const mc    = token.mktCap || 1;
-  const vr    = vol24 / mc;
+  const mc = token.mktCap || 1;
+  const vr = vol24 / mc;
   let volQuality, volColor;
-  if      (vr > 1)    { volQuality = 'Very High'; volColor = '#22c55e'; }
-  else if (vr > 0.3)  { volQuality = 'High';      volColor = '#4ade80'; }
-  else if (vr > 0.08) { volQuality = 'Normal';    volColor = '#94a3b8'; }
-  else if (vr > 0.02) { volQuality = 'Low';       volColor = '#f59e0b'; }
-  else                { volQuality = 'Very Low';   volColor = '#ef4444'; }
+  if (vr > 1) { volQuality = 'Very High'; volColor = '#22c55e'; }
+  else if (vr > 0.3) { volQuality = 'High'; volColor = '#4ade80'; }
+  else if (vr > 0.08) { volQuality = 'Normal'; volColor = '#94a3b8'; }
+  else if (vr > 0.02) { volQuality = 'Low'; volColor = '#f59e0b'; }
+  else { volQuality = 'Very Low'; volColor = '#ef4444'; }
 
   // MC equivalents (so users can read Support/Resistance as market cap values)
-  const suppMC = (token.mktCap > 0 && p > 0) ? token.mktCap * (support    / p) : 0;
-  const resMC  = (token.mktCap > 0 && p > 0) ? token.mktCap * (resistance / p) : 0;
+  const suppMC = (token.mktCap > 0 && p > 0) ? token.mktCap * (support / p) : 0;
+  const resMC = (token.mktCap > 0 && p > 0) ? token.mktCap * (resistance / p) : 0;
 
   return { rsi: rsi.toFixed(1), support, resistance, suppMC, resMC, range: range.toFixed(1), volQuality, volColor };
 }
@@ -809,7 +802,7 @@ function buildTechChart(token) {
   const lp = 44, rp = 4, tp = 10; // left / right / top padding
   const chartH = 104;              // price chart height
   const volGap = 8, volH = 26;    // volume section
-  const lblY   = H - 2;           // time label baseline
+  const lblY = H - 2;           // time label baseline
 
   const cx0 = lp, cx1 = W - rp;
   const cy0 = tp, cy1 = tp + chartH;
@@ -817,17 +810,17 @@ function buildTechChart(token) {
 
   // Price reconstruction
   const ch24 = parseFloat(token.priceChange?.h24 || 0);
-  const ch6  = parseFloat(token.priceChange?.h6  || 0);
-  const ch1  = parseFloat(token.priceChange?.h1  || 0);
+  const ch6 = parseFloat(token.priceChange?.h6 || 0);
+  const ch1 = parseFloat(token.priceChange?.h1 || 0);
   const p_now = 1.0;
-  const p_1h  = p_now / (1 + ch1  / 100 || 1);
-  const p_6h  = p_now / (1 + ch6  / 100 || 1);
+  const p_1h = p_now / (1 + ch1 / 100 || 1);
+  const p_6h = p_now / (1 + ch6 / 100 || 1);
   const p_24h = p_now / (1 + ch24 / 100 || 1);
-  const pPts  = [p_24h, p_24h*0.6+p_6h*0.4, p_24h*0.2+p_6h*0.8,
-                 p_6h,  p_6h*0.4+p_1h*0.6,  p_1h, p_now];
+  const pPts = [p_24h, p_24h * 0.6 + p_6h * 0.4, p_24h * 0.2 + p_6h * 0.8,
+    p_6h, p_6h * 0.4 + p_1h * 0.6, p_1h, p_now];
 
   const minP = Math.min(...pPts), maxP = Math.max(...pPts);
-  const buf  = (maxP - minP) * 0.14; // 14% vertical buffer so S/R lines are visible
+  const buf = (maxP - minP) * 0.14; // 14% vertical buffer so S/R lines are visible
   const normY = p => cy0 + (1 - (p - (minP - buf)) / ((maxP - minP) + 2 * buf)) * chartH;
 
   const svgPts = pPts.map((p, i) => [
@@ -838,7 +831,7 @@ function buildTechChart(token) {
   // Bezier path
   let d = `M ${svgPts[0][0].toFixed(1)} ${svgPts[0][1].toFixed(1)}`;
   for (let i = 1; i < svgPts.length; i++) {
-    const [ax, ay] = svgPts[i-1], [bx, by] = svgPts[i];
+    const [ax, ay] = svgPts[i - 1], [bx, by] = svgPts[i];
     const cpx = ax + (bx - ax) * 0.5;
     d += ` C ${cpx.toFixed(1)} ${ay.toFixed(1)} ${cpx.toFixed(1)} ${by.toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}`;
   }
@@ -846,27 +839,27 @@ function buildTechChart(token) {
   const fillD = `${d} L ${lastX.toFixed(1)} ${cy1} L ${cx0} ${cy1} Z`;
 
   const isUp = ch24 >= 0;
-  const lc   = isUp ? '#22c55e' : '#ef4444';
+  const lc = isUp ? '#22c55e' : '#ef4444';
   const gradId = `tcg${token.address.slice(-8)}`;
 
   // Support & resistance absolute prices and Y coordinates
-  const tl     = calcTechLevels(token);
-  const suppP  = tl.support;    // actual price value
-  const resP   = tl.resistance;
-  const pUsd   = token.priceUSD || 1;
+  const tl = calcTechLevels(token);
+  const suppP = tl.support;    // actual price value
+  const resP = tl.resistance;
+  const pUsd = token.priceUSD || 1;
   const suppRatio = suppP / pUsd;  // ratio (p_now=1.0 scale)
-  const resRatio  = resP  / pUsd;
-  const suppY  = normY(suppRatio);
-  const resY   = normY(resRatio);
+  const resRatio = resP / pUsd;
+  const suppY = normY(suppRatio);
+  const resY = normY(resRatio);
 
   // Volume bars (estimated from available volume data)
   const vol = token.volume || {};
   const volPts = [
-    (vol.h24||0)/24, (vol.h24||0)/24*0.9, (vol.h24||0)/24*1.2,
-    (vol.h6||0)/6,   (vol.h1||0)*0.8,     (vol.h1||0), (vol.m5||0)*12
+    (vol.h24 || 0) / 24, (vol.h24 || 0) / 24 * 0.9, (vol.h24 || 0) / 24 * 1.2,
+    (vol.h6 || 0) / 6, (vol.h1 || 0) * 0.8, (vol.h1 || 0), (vol.m5 || 0) * 12
   ];
   const maxVol = Math.max(...volPts, 1);
-  const barW   = ((cx1 - cx0) / volPts.length) * 0.75;
+  const barW = ((cx1 - cx0) / volPts.length) * 0.75;
   const volBars = volPts.map((v, i) => {
     const bx = cx0 + i * ((cx1 - cx0) / volPts.length);
     const bh = Math.max(1, (v / maxVol) * volH);
@@ -875,14 +868,14 @@ function buildTechChart(token) {
   }).join('');
 
   // MC values for the toggle
-  const suppMC    = tl.suppMC;
-  const resMC     = tl.resMC;
+  const suppMC = tl.suppMC;
+  const resMC = tl.resMC;
   const currentMC = token.mktCap || 0;
-  const hasMC     = suppMC > 0;
+  const hasMC = suppMC > 0;
   // Default to MC for meme / small-cap tokens (same rule as card tech bar)
   const isMemeChart = hasMC && (!!token.memeSignal || (token.mktCap > 0 && token.mktCap < 10000000));
-  const initMode    = isMemeChart ? 'mc' : 'price';
-  const chartId     = `tcw-${token.address.slice(-8)}`;
+  const initMode = isMemeChart ? 'mc' : 'price';
+  const chartId = `tcw-${token.address.slice(-8)}`;
 
   // Signal markers
   // Primary: always anchored to the rightmost chart point ("Now" / current price)
@@ -890,16 +883,16 @@ function buildTechChart(token) {
 
   // Secondary: time-based position for a previous scan (skip if too close to primary)
   const sigTs0 = token.scannedAt || Date.now();
-  const hist   = getSigHistory(token.address);
+  const hist = getSigHistory(token.address);
   const prevTs = hist.find(e => Math.abs(e.ts - sigTs0) > 300000 && Date.now() - e.ts < 86400000)?.ts;
   let secondaryMarkerHtml = '';
   if (prevTs) {
-    const af   = Math.min(1, Math.max(0, Date.now() - prevTs) / 86400000);
+    const af = Math.min(1, Math.max(0, Date.now() - prevTs) / 86400000);
     const idxF = (1 - af) * (svgPts.length - 1);
-    const i0   = Math.min(Math.floor(idxF), svgPts.length - 2);
-    const f    = idxF - i0;
-    const sx   = svgPts[i0][0] + (svgPts[i0+1][0] - svgPts[i0][0]) * f;
-    const sy   = svgPts[i0][1] + (svgPts[i0+1][1] - svgPts[i0][1]) * f;
+    const i0 = Math.min(Math.floor(idxF), svgPts.length - 2);
+    const f = idxF - i0;
+    const sx = svgPts[i0][0] + (svgPts[i0 + 1][0] - svgPts[i0][0]) * f;
+    const sy = svgPts[i0][1] + (svgPts[i0 + 1][1] - svgPts[i0][1]) * f;
     if (Math.abs(sx - primaryX) > 28) {
       secondaryMarkerHtml = `
       <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="9"   fill="${lc}" opacity="0.12"/>
@@ -932,7 +925,7 @@ function buildTechChart(token) {
       </defs>
       <!-- Grid -->
       <line x1="${cx0}" y1="${cy0}" x2="${cx1}" y2="${cy0}" stroke="rgba(255,255,255,0.05)" stroke-width="0.8"/>
-      <line x1="${cx0}" y1="${((cy0+cy1)/2).toFixed(1)}" x2="${cx1}" y2="${((cy0+cy1)/2).toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-width="0.8"/>
+      <line x1="${cx0}" y1="${((cy0 + cy1) / 2).toFixed(1)}" x2="${cx1}" y2="${((cy0 + cy1) / 2).toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-width="0.8"/>
       <line x1="${cx0}" y1="${cy1}" x2="${cx1}" y2="${cy1}" stroke="rgba(255,255,255,0.05)" stroke-width="0.8"/>
       <!-- Support (dashed green) — dual price / MC labels -->
       <line x1="${cx0}" y1="${suppY.toFixed(1)}" x2="${cx1}" y2="${suppY.toFixed(1)}" stroke="#22c55e" stroke-width="1.2" stroke-dasharray="5,4" opacity="0.65"/>
@@ -943,8 +936,8 @@ function buildTechChart(token) {
       <text class="tchart-p" x="${lp - 3}" y="${(resY + 3).toFixed(1)}" font-size="8.5" fill="#ef4444" opacity="0.8" text-anchor="end">${fPx(resP)}</text>
       ${hasMC ? `<text class="tchart-m" x="${lp - 3}" y="${(resY + 3).toFixed(1)}" font-size="8.5" fill="#ef4444" opacity="0.8" text-anchor="end">${fmt.vol(resMC)}</text>` : ''}
       <!-- Mid-axis value label — dual price / MC -->
-      <text class="tchart-p" x="${lp - 3}" y="${((cy0+cy1)/2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fPx(pUsd)}</text>
-      ${hasMC ? `<text class="tchart-m" x="${lp - 3}" y="${((cy0+cy1)/2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fmt.vol(currentMC)}</text>` : ''}
+      <text class="tchart-p" x="${lp - 3}" y="${((cy0 + cy1) / 2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fPx(pUsd)}</text>
+      ${hasMC ? `<text class="tchart-m" x="${lp - 3}" y="${((cy0 + cy1) / 2 + 3).toFixed(1)}" font-size="8" fill="rgba(255,255,255,0.25)" text-anchor="end">${fmt.vol(currentMC)}</text>` : ''}
       <!-- Area + line -->
       <path d="${fillD}" fill="url(#${gradId})"/>
       <path d="${d}" fill="none" stroke="${lc}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -957,7 +950,7 @@ function buildTechChart(token) {
       <text x="${cx0}" y="${(vcy1 + 9).toFixed(1)}" font-size="7.5" fill="rgba(255,255,255,0.2)">Volume</text>
       <!-- X labels -->
       <text x="${cx0}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.28)">${_t(86400000)}</text>
-      <text x="${(cx0+(cx1-cx0)*0.5).toFixed(1)}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.2)" text-anchor="middle">${_t(43200000)}</text>
+      <text x="${(cx0 + (cx1 - cx0) * 0.5).toFixed(1)}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.2)" text-anchor="middle">${_t(43200000)}</text>
       <text x="${cx1}" y="${lblY}" font-size="8" fill="rgba(255,255,255,0.28)" text-anchor="end">Now</text>
     </svg>
     <div class="tech-chart-legend">
@@ -973,10 +966,10 @@ function buildTechChart(token) {
 
 // ── FOMO alert banner — shown for exceptional signals ─────────────
 function fomoAlert(token, momResult) {
-  const isGem      = momResult?.isGem;
+  const isGem = momResult?.isGem;
   const isBreakout = token.isBreakout;
-  const score      = token.pumpScore;
-  const isFresh    = token.signalType === 'fresh';
+  const score = token.pumpScore;
+  const isFresh = token.signalType === 'fresh';
 
   // Priority: highest first
   // 1. GEM + confirmed breakout — rarest combo
@@ -1024,18 +1017,18 @@ function fomoAlert(token, momResult) {
  */
 function signalDesc(token, momResult) {
   const isBreakout = token.isBreakout;
-  const isFresh    = token.signalType === 'fresh';
-  const isGem      = momResult?.isGem;
-  const score      = token.pumpScore;
+  const isFresh = token.signalType === 'fresh';
+  const isGem = momResult?.isGem;
+  const score = token.pumpScore;
 
   // ── Action recommendation badge ──────────────────────────────
   let action = null, actionClass = '';
   if (isGem || (isBreakout && score >= 78)) {
     action = '🔥 STRONG BUY'; actionClass = 'action-strongbuy';
   } else if (isBreakout || score >= 70) {
-    action = '💚 BUY';        actionClass = 'action-buy';
+    action = '💚 BUY'; actionClass = 'action-buy';
   } else if (score >= 50) {
-    action = '👀 WATCH';      actionClass = 'action-watch';
+    action = '👀 WATCH'; actionClass = 'action-watch';
   }
   // Below 50 — no recommendation badge shown
 
@@ -1057,7 +1050,7 @@ function signalDesc(token, momResult) {
     dot = '⚡'; color = '#06b6d4';
     text = 'Hot New Launch — early movers phase, buys dominant — high risk/reward';
   } else if (isFresh) {
-    dot = '✦';  color = '#22d3ee';
+    dot = '✦'; color = '#22d3ee';
     text = 'Fresh Token — new launch < 6h, accumulation forming — early entry zone';
   } else if (score >= 70) {
     dot = '🟢'; color = '#22c55e';
@@ -1119,10 +1112,10 @@ function renderScannerCard(token) {
   const terminals = getTerminalLinks(token);
 
   // Terminal icon links — DEX = nav only; Axiom/GMGN/Padre = copy CA + open
-  const dsFavicon    = 'https://dexscreener.com/favicon.ico';
+  const dsFavicon = 'https://dexscreener.com/favicon.ico';
   const axiomFavicon = 'https://axiom.trade/favicon.ico';
-  const gmgnSvg      = 'assets/logos/gmgn.svg';
-  const padreSvg     = 'assets/logos/padre.svg';
+  const gmgnSvg = 'assets/logos/gmgn.svg';
+  const padreSvg = 'assets/logos/padre.svg';
 
   // Plain nav link (for DEX)
   const navLink = (href, iconSrc, label, cls, imgW = 14, isSvg = false) =>
@@ -1152,7 +1145,7 @@ function renderScannerCard(token) {
 
   // Reasons row (top 3)
   const reasonsHtml = (token.phaseReasons && token.phaseReasons.length > 0)
-    ? `<div class="card-reasons-row">${token.phaseReasons.slice(0,3).map(r => `<span class="cr-pill">${r}</span>`).join('')}</div>`
+    ? `<div class="card-reasons-row">${token.phaseReasons.slice(0, 3).map(r => `<span class="cr-pill">${r}</span>`).join('')}</div>`
     : '';
 
   // Card phase border color
@@ -1164,15 +1157,15 @@ function renderScannerCard(token) {
       ${phaseBadgeHtml}
       <span class="signal-age-clock" data-signal-ts="${scannedAt}" ${tip('Signal detected ' + fmtAge(scannedAt) + ' ago')}>${fmtAge(scannedAt)}</span>
       ${momResult
-        ? momResult.isGem
-          ? `<span class="mom-auto-badge gem" data-addr="${addr}" ${tip('💎 GEM — Momentum ≥75. High probability runner. Rare signal.')}>💎 GEM</span>`
-          : momResult.momentumScore >= 60
-            ? `<span class="mom-auto-badge high" data-addr="${addr}" ${tip('HIGH POTENTIAL — strong momentum, multiple signals firing')}>🚀 ${momResult.momentumScore}</span>`
-            : momResult.momentumScore >= 35
-              ? `<span class="mom-auto-badge medium" data-addr="${addr}" ${tip('MEDIUM momentum — building phase, watch closely')}>📈 ${momResult.momentumScore}</span>`
-              : `<span class="mom-auto-badge low" data-addr="${addr}" ${tip('LOW momentum — weak signals')}>📊 ${momResult.momentumScore}</span>`
-        : `<span class="mom-auto-badge pending" data-addr="${addr}" ${tip('Scanning momentum in background…')}>⟳</span>`
-      }
+      ? momResult.isGem
+        ? `<span class="mom-auto-badge gem" data-addr="${addr}" ${tip('💎 GEM — Momentum ≥75. High probability runner. Rare signal.')}>💎 GEM</span>`
+        : momResult.momentumScore >= 60
+          ? `<span class="mom-auto-badge high" data-addr="${addr}" ${tip('HIGH POTENTIAL — strong momentum, multiple signals firing')}>🚀 ${momResult.momentumScore}</span>`
+          : momResult.momentumScore >= 35
+            ? `<span class="mom-auto-badge medium" data-addr="${addr}" ${tip('MEDIUM momentum — building phase, watch closely')}>📈 ${momResult.momentumScore}</span>`
+            : `<span class="mom-auto-badge low" data-addr="${addr}" ${tip('LOW momentum — weak signals')}>📊 ${momResult.momentumScore}</span>`
+      : `<span class="mom-auto-badge pending" data-addr="${addr}" ${tip('Scanning momentum in background…')}>⟳</span>`
+    }
       <div class="pump-score ${scoreClass}" ${tip('Final Score: phase-adjusted opportunity score 0–100')}>
         <div class="pump-score-value">${displayScore}</div>
         <div class="pump-score-label">Score</div>
@@ -1194,8 +1187,8 @@ function renderScannerCard(token) {
 
     ${(() => {
       // Signal count badge — shows Nth detection; hover opens history popup
-      const sigHist   = getSigHistory(addr);
-      const sigNum    = sigHist.length + 1; // current is the Nth
+      const sigHist = getSigHistory(addr);
+      const sigNum = sigHist.length + 1; // current is the Nth
       return `<div class="card-coin-row">
       <div class="card-coin-info">
         <div style="position:relative;flex-shrink:0;">${logoHtml}</div>
@@ -1300,14 +1293,14 @@ function renderScannerCard(token) {
         <button class="ca-copy-btn" onclick="event.stopPropagation();copyCa('${addr}',this)" title="Copy contract address">
           📋 ${addr ? addr.slice(0, 4) + '…' + addr.slice(-4) : 'CA'}
         </button>
-        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g,"&#39;")}')" title="Deep rug analysis — 12 signals + wallet clusters">🛡️ Rug Check</button>
-        <button class="blacklist-btn" onclick="event.stopPropagation();window.addToBlacklist('${addr}','${token.name.replace(/'/g,'').replace(/"/g,'').slice(0,20)}')" title="Hide this token — won't show in scanner again">🚫 Hide</button>
+        <button class="rug-check-btn" onclick="event.stopPropagation();if(typeof RugUI!=='undefined')RugUI.openPanel('${addr}','${token.chainId}','${token.name.replace(/'/g, "&#39;")}')" title="Deep rug analysis — 12 signals + wallet clusters">🛡️ Rug Check</button>
+        <button class="blacklist-btn" onclick="event.stopPropagation();window.addToBlacklist('${addr}','${token.name.replace(/'/g, '').replace(/"/g, '').slice(0, 20)}')" title="Hide this token — won't show in scanner again">🚫 Hide</button>
         ${navLink(token.dexUrl, dsFavicon, 'View on DexScreener', 'dex')}
         ${token.socials[0]?.url ? `<a class="card-action-icon x-social-link" href="${token.socials[0].url}" target="_blank" onclick="event.stopPropagation()" title="X / Twitter"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.748l7.73-8.835L1.254 2.25H8.08l4.259 5.63L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z"/></svg></a>` : ''}
         ${token.websites[0]?.url ? `<a class="card-action-icon" href="${token.websites[0].url}" target="_blank" onclick="event.stopPropagation()" title="Website">🌐</a>` : ''}
         ${terminals.axiom ? tradeLink(terminals.axiom, axiomFavicon, 'Axiom', 'axiom', addr) : ''}
-        ${terminals.gmgn  ? tradeLink(terminals.gmgn,  gmgnSvg,      'GMGN',  'gmgn',  addr, 28, true) : ''}
-        ${terminals.padre ? tradeLink(terminals.padre,  padreSvg,     'Padre', 'padre', addr, 14, true) : ''}
+        ${terminals.gmgn ? tradeLink(terminals.gmgn, gmgnSvg, 'GMGN', 'gmgn', addr, 28, true) : ''}
+        ${terminals.padre ? tradeLink(terminals.padre, padreSvg, 'Padre', 'padre', addr, 14, true) : ''}
       </div>
       <span class="multiplier-badge mult-${token.multiplier.tier}" ${tip('Potential multiplier based on current market cap vs sector')}>${token.multiplier.label}</span>
     </div>
@@ -1318,26 +1311,26 @@ function updateScannerStats() {
   const tokens = AppState.scannerTokens;
   const el = document.getElementById('scanner-stats');
   if (!el) return;
-  const hot       = tokens.filter(t => (t.finalScore ?? t.pumpScore) >= 70).length;
+  const hot = tokens.filter(t => (t.finalScore ?? t.pumpScore) >= 70).length;
   const breakouts = tokens.filter(t => t.phase === 'breakout' || t.isBreakout).length;
-  const traps     = tokens.filter(t => t.trapScore  >= 55).length;
-  const accum     = tokens.filter(t => t.accumScore >= 55 && t.phase !== 'distribution').length;
-  const dist      = tokens.filter(t => t.distScore  >= 55).length;
-  const risk      = tokens.filter(t => t.rugFlags.length >= 2).length;
-  const gems      = tokens.filter(t => AppState.momentumResults?.[t.address]?.isGem).length;
-  const favs      = getFavorites().length;
+  const traps = tokens.filter(t => t.trapScore >= 55).length;
+  const accum = tokens.filter(t => t.accumScore >= 55 && t.phase !== 'distribution').length;
+  const dist = tokens.filter(t => t.distScore >= 55).length;
+  const risk = tokens.filter(t => t.rugFlags.length >= 2).length;
+  const gems = tokens.filter(t => AppState.momentumResults?.[t.address]?.isGem).length;
+  const favs = getFavorites().length;
 
   const hasPhase = tokens.some(t => t.phase);
   if (hasPhase) {
     el.innerHTML =
       `<span>${tokens.length} scanned</span>` +
-      (traps     ? ` · <span style="color:#8b5cf6;">🪤 ${traps} trap</span>` : '') +
-      (accum     ? ` · <span class="num-green">📦 ${accum} accum</span>` : '') +
+      (traps ? ` · <span style="color:#8b5cf6;">🪤 ${traps} trap</span>` : '') +
+      (accum ? ` · <span class="num-green">📦 ${accum} accum</span>` : '') +
       (breakouts ? ` · <span class="num-amber">🚀 ${breakouts} breakout</span>` : '') +
-      (dist      ? ` · <span class="num-red">⚠️ ${dist} dist</span>` : '') +
-      (risk      ? ` · <span class="num-red">🛡️ ${risk} risk</span>` : '') +
-      (gems      ? ` · <span style="color:#a855f7;">💎 ${gems} gem${gems !== 1 ? 's' : ''}</span>` : '') +
-      (favs      ? ` · <span class="num-amber">⭐ ${favs} fav${favs !== 1 ? 's' : ''}</span>` : '');
+      (dist ? ` · <span class="num-red">⚠️ ${dist} dist</span>` : '') +
+      (risk ? ` · <span class="num-red">🛡️ ${risk} risk</span>` : '') +
+      (gems ? ` · <span style="color:#a855f7;">💎 ${gems} gem${gems !== 1 ? 's' : ''}</span>` : '') +
+      (favs ? ` · <span class="num-amber">⭐ ${favs} fav${favs !== 1 ? 's' : ''}</span>` : '');
   } else {
     // Fallback: old style
     el.innerHTML =
@@ -1410,15 +1403,15 @@ function populateScannerDrawer(token) {
       </div>
       <div class="dmb-signals">
         ${meta.map(m => {
-          const s = sigs[m.key];
-          if (!s) return '';
-          const color = s.active ? 'var(--accent-green)' : s.score > 30 ? 'var(--accent-amber)' : 'var(--text-muted)';
-          return `<div class="dmb-signal-row">
+      const s = sigs[m.key];
+      if (!s) return '';
+      const color = s.active ? 'var(--accent-green)' : s.score > 30 ? 'var(--accent-amber)' : 'var(--text-muted)';
+      return `<div class="dmb-signal-row">
             <span style="font-size:12px;">${m.icon}</span>
             <span style="font-size:11px;flex:1;color:var(--text-secondary);">${m.label}</span>
             <span style="font-size:10px;color:${color};font-weight:600;">${s.active ? '✅' : '—'} ${s.score}</span>
           </div>`;
-        }).join('')}
+    }).join('')}
       </div>
     </div>`;
   })() : '';
@@ -1747,7 +1740,7 @@ async function loadTicker() {
 const App = {
   _initialized: false,
 
-  init() {
+  async init() {
     AuthManager.init();
     if (!AuthManager.isLoggedIn()) { showAuthPage(); return; }
     if (typeof showAppPage === 'function') showAppPage();
@@ -1767,14 +1760,34 @@ const App = {
 
     this.gateFeatures();
 
+    // ── Load per-user data from Supabase ──────────────────────────
+    try {
+      const [customCoins, favorites, blacklist] = await Promise.all([
+        SupabaseDB.getUserData('custom_coins', []),
+        SupabaseDB.getUserData('scanner_favorites', []),
+        SupabaseDB.getUserData('scanner_blacklist', []),
+      ]);
+      AppState.customCoins = customCoins;
+      _favoritesCache = Array.isArray(favorites) ? [...new Set(favorites)] : [];
+      _blacklistCache = Array.isArray(blacklist) ? [...new Set(blacklist)] : [];
+      // Load TradeLog positions from Supabase
+      await TradeLog.init();
+      // Load API keys from Supabase into ChainAPIs cache
+      if (typeof ChainAPIs !== 'undefined' && ChainAPIs.loadKeys) {
+        await ChainAPIs.loadKeys();
+      }
+    } catch (e) {
+      console.warn('[App.init] Per-user data load failed:', e.message);
+    }
+
     // ── Restore tab from URL hash (e.g. refresh preserves current tab) ──
     const VALID_TABS = ['signals', 'scanner', 'log', 'whales', 'tax'];
-    const hashParts  = window.location.hash.replace('#', '').split('/');
-    const hashTab    = VALID_TABS.includes(hashParts[0]) ? hashParts[0] : 'signals';
+    const hashParts = window.location.hash.replace('#', '').split('/');
+    const hashTab = VALID_TABS.includes(hashParts[0]) ? hashParts[0] : 'signals';
     switchTab(hashTab);
-    if (hashTab === 'scanner')  { if (!AppState.scannerTokens.length) loadScanner(); renderScannerCards(); }
-    if (hashTab === 'log')      renderTradingLog();
-    if (hashTab === 'whales')   { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
+    if (hashTab === 'scanner') { if (!AppState.scannerTokens.length) loadScanner(); renderScannerCards(); }
+    if (hashTab === 'log') renderTradingLog();
+    if (hashTab === 'whales') { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
     if (hashTab === 'tax') {
       const u = AuthManager.getUser();
       if (u?.role === 'admin' || u?.features?.taxCalculator) {
@@ -2035,9 +2048,9 @@ window.toggleMcMode = function (addr) {
     el.style.display = newIsMc ? 'inline' : 'none';
   });
   const btnPrice = block.querySelector('.mc-toggle-price');
-  const btnMc    = block.querySelector('.mc-toggle-mc');
-  if (btnPrice) btnPrice.style.display = newIsMc ? 'none'   : 'inline';
-  if (btnMc)    btnMc.style.display    = newIsMc ? 'inline' : 'none';
+  const btnMc = block.querySelector('.mc-toggle-mc');
+  if (btnPrice) btnPrice.style.display = newIsMc ? 'none' : 'inline';
+  if (btnMc) btnMc.style.display = newIsMc ? 'inline' : 'none';
 };
 
 // ── Sparkline timeframe switcher ─────────────────────────────
@@ -2072,20 +2085,20 @@ window.sparkSetFrame = function (addr, frame) {
     // Build full list oldest→newest, append current
     const allSigs = [...hist].reverse();
     // Ensure current signal is at the end
-    if (!allSigs.length || Math.abs(allSigs[allSigs.length-1].ts - sigTs) > 300000) {
+    if (!allSigs.length || Math.abs(allSigs[allSigs.length - 1].ts - sigTs) > 300000) {
       allSigs.push({ ts: sigTs, price: token.priceUSD || 0, mc: token.mktCap || 0 });
     }
     const count = allSigs.length;
     const latest = allSigs[allSigs.length - 1];
     const _sd = new Date(latest.ts);
-    const dateStr = `${_sd.getMonth()+1}/${_sd.getDate()}, ` +
-      _sd.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+    const dateStr = `${_sd.getMonth() + 1}/${_sd.getDate()}, ` +
+      _sd.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
     const rows = allSigs.map((e, i) => {
       const isCurr = i === allSigs.length - 1;
       return isCurr
         ? `<tr class="sig-pop-current"><td colspan="2">Current</td><td>${fmt.vol(e.mc)}</td><td>${fmt.price(e.price)}</td></tr>`
-        : `<tr><td>${i+1}</td><td>${fmtAge(e.ts)}</td><td>${e.mc > 0 ? fmt.vol(e.mc) : '—'}</td><td>${e.price > 0 ? fmt.price(e.price) : '—'}</td></tr>`;
+        : `<tr><td>${i + 1}</td><td>${fmtAge(e.ts)}</td><td>${e.mc > 0 ? fmt.vol(e.mc) : '—'}</td><td>${e.price > 0 ? fmt.price(e.price) : '—'}</td></tr>`;
     });
 
     pop.innerHTML = `
@@ -2096,18 +2109,18 @@ window.sparkSetFrame = function (addr, frame) {
       <table class="sig-pop-table">
         <thead><tr><th>#</th><th>Time</th><th>FDV</th><th>Price</th></tr></thead>
         <tbody>${rows.slice(0, -1).join('')}</tbody>
-        <tfoot>${rows[rows.length-1]}</tfoot>
+        <tfoot>${rows[rows.length - 1]}</tfoot>
       </table>`;
 
     pop.style.display = 'block';
     pop.style.opacity = '0';
     const rect = el.getBoundingClientRect();
     const popW = 270, popH = 44 + allSigs.length * 24;
-    let top  = rect.bottom + 6;
+    let top = rect.bottom + 6;
     let left = rect.left;
     if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
     if (top + popH > window.innerHeight - 8) top = rect.top - popH - 6;
-    pop.style.top  = `${top}px`;
+    pop.style.top = `${top}px`;
     pop.style.left = `${left}px`;
     requestAnimationFrame(() => { pop.style.opacity = '1'; });
   };
@@ -2162,15 +2175,15 @@ window.ctbToggle = function (addr) {
   }
 
   function reposition(target) {
-    const r   = target.getBoundingClientRect();
-    const tw  = tip.offsetWidth;
-    const th  = tip.offsetHeight;
-    const vw  = window.innerWidth;
-    const vh  = window.innerHeight;
+    const r = target.getBoundingClientRect();
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
     const GAP = 9;
 
     // Default: above the element, horizontally centred
-    let top  = r.top  - th - GAP;
+    let top = r.top - th - GAP;
     let left = r.left + (r.width - tw) / 2;
 
     // Flip below if it would go off the top
@@ -2181,7 +2194,7 @@ window.ctbToggle = function (addr) {
     // Clamp horizontally
     left = Math.max(8, Math.min(left, vw - tw - 8));
 
-    tip.style.top  = top  + 'px';
+    tip.style.top = top + 'px';
     tip.style.left = left + 'px';
   }
 
@@ -2200,7 +2213,7 @@ window.ctbToggle = function (addr) {
   });
   // Hide on scroll or any click
   document.addEventListener('scroll', () => tip.classList.remove('visible'), true);
-  document.addEventListener('click',  () => tip.classList.remove('visible'), true);
+  document.addEventListener('click', () => tip.classList.remove('visible'), true);
 })();
 
 // ══════════════════════════════════════════════════════════════
@@ -2236,9 +2249,9 @@ window.ctbToggle = function (addr) {
   function _fmtP(n) {
     n = parseFloat(n);
     if (!n || isNaN(n) || n <= 0) return '$—';
-    if (n >= 100)   return `$${n.toFixed(2)}`;
-    if (n >= 1)     return `$${n.toFixed(4)}`;
-    if (n >= 0.01)  return `$${n.toFixed(6)}`;
+    if (n >= 100) return `$${n.toFixed(2)}`;
+    if (n >= 1) return `$${n.toFixed(4)}`;
+    if (n >= 0.01) return `$${n.toFixed(6)}`;
     // Very small: find first significant decimals
     const dec = Math.min(Math.max(2 - Math.floor(Math.log10(n)), 4), 12);
     return `$${n.toFixed(dec)}`;
@@ -2246,25 +2259,25 @@ window.ctbToggle = function (addr) {
   function _fmtMC(n) {
     n = parseFloat(n);
     if (!n || isNaN(n)) return '$—';
-    if (n >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
-    if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
-    if (n >= 1e3) return `$${(n/1e3).toFixed(1)}K`;
+    if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+    if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+    if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
     return `$${n.toFixed(0)}`;
   }
 
   function show(el) {
-    const date   = el.getAttribute('data-sig-date')   || '';
-    const price  = el.getAttribute('data-sig-price')  || '0';
-    const mc     = el.getAttribute('data-sig-mc')     || '0';
+    const date = el.getAttribute('data-sig-date') || '';
+    const price = el.getAttribute('data-sig-price') || '0';
+    const mc = el.getAttribute('data-sig-mc') || '0';
     const change = parseFloat(el.getAttribute('data-sig-change') || '0');
 
-    document.getElementById('sigpop-date').textContent  = date;
-    document.getElementById('sigpop-mc').textContent    = _fmtMC(mc);
+    document.getElementById('sigpop-date').textContent = date;
+    document.getElementById('sigpop-mc').textContent = _fmtMC(mc);
     document.getElementById('sigpop-price').textContent = _fmtP(price);
 
     const chEl = document.getElementById('sigpop-change');
     chEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
-    chEl.className   = 'sigpop-value ' + (change >= 0 ? 'sigpop-pos' : 'sigpop-neg');
+    chEl.className = 'sigpop-value ' + (change >= 0 ? 'sigpop-pos' : 'sigpop-neg');
 
     pop.classList.add('visible');
     reposition(el);
@@ -2272,22 +2285,22 @@ window.ctbToggle = function (addr) {
 
   function reposition(el) {
     // For SVG elements, getBoundingClientRect() returns screen coords
-    const r  = el.getBoundingClientRect ? el.getBoundingClientRect()
-              : { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
-    const pw = pop.offsetWidth  || 260;
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect()
+      : { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+    const pw = pop.offsetWidth || 260;
     const ph = pop.offsetHeight || 90;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const GAP = 14;
 
-    let top  = r.top - ph - GAP;
+    let top = r.top - ph - GAP;
     let left = r.left + (r.width - pw) / 2;
 
-    if (top < 6)           top = r.bottom + GAP;  // flip below
+    if (top < 6) top = r.bottom + GAP;  // flip below
     if (top + ph > vh - 6) top = r.top - ph - GAP; // flip above
     left = Math.max(8, Math.min(left, vw - pw - 8));
 
-    pop.style.top  = top  + 'px';
+    pop.style.top = top + 'px';
     pop.style.left = left + 'px';
   }
 
@@ -2313,5 +2326,5 @@ window.ctbToggle = function (addr) {
     if (hit) { _hideTimer = setTimeout(() => pop.classList.remove('visible'), 150); }
   });
   document.addEventListener('scroll', () => pop.classList.remove('visible'), true);
-  document.addEventListener('click',  () => pop.classList.remove('visible'), true);
+  document.addEventListener('click', () => pop.classList.remove('visible'), true);
 })();

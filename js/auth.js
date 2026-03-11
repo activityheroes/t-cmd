@@ -444,8 +444,8 @@ async function renderAdminPanel() {
                     <td>
                         <span id="urole-${u.id}"><span class="role-badge role-${u.role}">${u.role}</span></span>
                         <select id="urole-input-${u.id}" style="display:none;height:26px;font-size:11px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:5px;color:var(--text-primary);cursor:pointer;">
-                            <option value="user"  ${u.role==='user'  ? 'selected':''}>user</option>
-                            <option value="admin" ${u.role==='admin' ? 'selected':''}>admin</option>
+                            <option value="user"  ${u.role === 'user' ? 'selected' : ''}>user</option>
+                            <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
                         </select>
                     </td>
                     <td><span class="status-badge status-${u.status}">${u.status}</span></td>
@@ -461,13 +461,13 @@ async function renderAdminPanel() {
                     <td>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
                             ${u.id === currentUser?.userId
-                              ? `<span style="color:var(--text-muted);font-size:11px;">You</span>`
-                              : `
+        ? `<span style="color:var(--text-muted);font-size:11px;">You</span>`
+        : `
                             <span id="uactions-${u.id}" style="display:flex;gap:4px;">
-                                ${u.status !== 'active'   ? `<button class="admin-btn approve" onclick="adminApprove('${u.id}')">✓</button>` : ''}
+                                ${u.status !== 'active' ? `<button class="admin-btn approve" onclick="adminApprove('${u.id}')">✓</button>` : ''}
                                 ${u.status !== 'disabled' ? `<button class="admin-btn disable" onclick="adminDisable('${u.id}')">⊘</button>` : ''}
                                 <button class="admin-btn" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="adminStartEdit('${u.id}')">✏️</button>
-                                <button class="admin-btn disable" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.25)" onclick="adminDeleteUser('${u.id}','${u.name.replace(/'/g,'')}')">🗑</button>
+                                <button class="admin-btn disable" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.25)" onclick="adminDeleteUser('${u.id}','${u.name.replace(/'/g, '')}')">🗑</button>
                             </span>
                             <span id="usave-${u.id}" style="display:none;gap:4px;">
                                 <button class="admin-btn approve" onclick="adminSaveEdit('${u.id}')">✓ Save</button>
@@ -516,7 +516,7 @@ async function renderAdminPanel() {
         <div class="admin-section" style="margin-top:20px;">
             <div class="admin-section-title">🔑 API Keys — Rug Checker</div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-                Keys are stored locally in your browser only. Required for the 12-signal rug checker, cluster detector, and wallet imports.
+                Keys are stored securely in Supabase (per-admin). Required for rug checker, cluster detector, wallet imports, and tax imports.
                 Get keys: <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
                 &nbsp;·&nbsp;
                 <a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
@@ -528,7 +528,7 @@ async function renderAdminPanel() {
                 <div style="display:flex;align-items:center;gap:8px;">
                     <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦅 Birdeye</label>
                     <input id="admin-birdeye-key" type="password" placeholder="Paste Birdeye API key…"
-                        value="${localStorage.getItem('tcmd_birdeye_key')||''}"
+                        value="${ChainAPIs.getKeys().birdeye || ''}"
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('birdeye')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                     <button onclick="adminTestKey('birdeye')" id="birdeye-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
@@ -537,7 +537,7 @@ async function renderAdminPanel() {
                 <div style="display:flex;align-items:center;gap:8px;">
                     <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🔆 Helius</label>
                     <input id="admin-helius-key" type="password" placeholder="Paste Helius API key (Solana)…"
-                        value="${localStorage.getItem('tcmd_helius_key')||''}"
+                        value="${ChainAPIs.getKeys().helius || ''}"
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('helius')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                     <button onclick="adminTestKey('helius')" id="helius-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
@@ -545,8 +545,8 @@ async function renderAdminPanel() {
                 <!-- Etherscan key (MetaMask / EVM wallet import) -->
                 <div style="display:flex;align-items:center;gap:8px;">
                     <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦊 Etherscan</label>
-                    <input id="admin-etherscan-key" type="password" placeholder="Paste Etherscan API key (MetaMask / EVM)…"
-                        value="${localStorage.getItem('tcmd_etherscan_key')||''}"
+                    <input id="admin-etherscan-key" type="password" placeholder="Paste Etherscan API key (MetaMask / EVM / Phantom ETH)…"
+                        value="${ChainAPIs.getKeys().etherscan || ''}"
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('etherscan')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                 </div>
@@ -606,10 +606,10 @@ window.adminToggleCreateForm = function () {
   if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none';
 };
 window.adminCreateUser = async function () {
-  const name   = document.getElementById('cu-name')?.value.trim();
-  const email  = document.getElementById('cu-email')?.value.trim();
-  const pass   = document.getElementById('cu-pass')?.value.trim();
-  const role   = document.getElementById('cu-role')?.value || 'user';
+  const name = document.getElementById('cu-name')?.value.trim();
+  const email = document.getElementById('cu-email')?.value.trim();
+  const pass = document.getElementById('cu-pass')?.value.trim();
+  const role = document.getElementById('cu-role')?.value || 'user';
   const status = document.getElementById('admin-create-status');
   if (!name || !email || !pass) {
     if (status) { status.textContent = '⚠️ Name, email and password are required'; status.style.color = '#f59e0b'; }
@@ -640,31 +640,31 @@ window.adminStartEdit = function (id) {
   // Show inputs, hide display spans
   ['uname', 'uemail', 'urole'].forEach(f => {
     const display = document.getElementById(`${f}-${id}`);
-    const input   = document.getElementById(`${f}-input-${id}`);
+    const input = document.getElementById(`${f}-input-${id}`);
     if (display) display.style.display = 'none';
-    if (input)   input.style.display   = 'inline-block';
+    if (input) input.style.display = 'inline-block';
   });
   const actions = document.getElementById(`uactions-${id}`);
-  const save    = document.getElementById(`usave-${id}`);
+  const save = document.getElementById(`usave-${id}`);
   if (actions) actions.style.display = 'none';
-  if (save)    save.style.display    = 'flex';
+  if (save) save.style.display = 'flex';
 };
 window.adminCancelEdit = function (id) {
   ['uname', 'uemail', 'urole'].forEach(f => {
     const display = document.getElementById(`${f}-${id}`);
-    const input   = document.getElementById(`${f}-input-${id}`);
+    const input = document.getElementById(`${f}-input-${id}`);
     if (display) display.style.display = '';
-    if (input)   input.style.display   = 'none';
+    if (input) input.style.display = 'none';
   });
   const actions = document.getElementById(`uactions-${id}`);
-  const save    = document.getElementById(`usave-${id}`);
+  const save = document.getElementById(`usave-${id}`);
   if (actions) actions.style.display = 'flex';
-  if (save)    save.style.display    = 'none';
+  if (save) save.style.display = 'none';
 };
 window.adminSaveEdit = async function (id) {
-  const name  = document.getElementById(`uname-input-${id}`)?.value.trim();
+  const name = document.getElementById(`uname-input-${id}`)?.value.trim();
   const email = document.getElementById(`uemail-input-${id}`)?.value.trim();
-  const role  = document.getElementById(`urole-input-${id}`)?.value;
+  const role = document.getElementById(`urole-input-${id}`)?.value;
   if (!name || !email) { alert('Name and email cannot be empty'); return; }
   try {
     await AuthManager.updateUser(id, { name, email, role });
@@ -762,16 +762,8 @@ async function renderWtPanel() {
   const wallets = allWallets.filter(w => w.chain === chain);
   const cfg = WalletTracker.CHAIN_CONFIG[chain];
 
-  // EVM key input for non-SOL chains
-  const keySection = chain !== 'SOL' ? `
-    <div class="wt-api-key-row">
-      <span style="font-size:11px;color:var(--text-muted);">${chain} API Key (Etherscan/Basescan/BSCScan — free):</span>
-      <input id="wt-api-key-input" class="auth-input" type="text" placeholder="Paste API key…" 
-        style="width:200px;" value="${localStorage.getItem('tcmd_evm_keys') ? (JSON.parse(localStorage.getItem('tcmd_evm_keys') || '{}'))[chain] || '' : ''}">
-      <button class="btn btn-ghost" style="font-size:11px;" onclick="saveWtApiKey('${chain}')">Save</button>
-      <a href="https://${chain === 'ETH' ? 'etherscan.io' : chain === 'BASE' ? 'basescan.org' : 'bscscan.com'}/register" 
-         target="_blank" style="font-size:11px;color:var(--accent-cyan);">Get free key →</a>
-    </div>` : '';
+  // EVM chains now use centralized API key from Admin → API Keys section
+  const keySection = '';
 
   panel.innerHTML = `
     ${keySection}
@@ -791,14 +783,14 @@ async function renderWtPanel() {
       <button class="btn btn-primary" style="font-size:11px;white-space:nowrap;" onclick="addTrackedWallet('${chain}')">+ Track</button>
     </div>
     <div id="wt-wallet-list">
-      ${wallets.length === 0 
-        ? `<div style="color:var(--text-muted);font-size:12px;padding:10px 0;">No wallets tracked on ${cfg?.label || chain} yet.</div>`
-        : wallets.map(w => `
+      ${wallets.length === 0
+      ? `<div style="color:var(--text-muted);font-size:12px;padding:10px 0;">No wallets tracked on ${cfg?.label || chain} yet.</div>`
+      : wallets.map(w => `
           <div class="wt-wallet-row" id="wt-row-${w.id}">
             <div class="wt-wallet-info">
               <span class="wt-wallet-label">${w.label}</span>
               <a href="${cfg?.explorer(w.address) || '#'}" target="_blank" 
-                 class="wt-wallet-addr" title="${w.address}">${w.address.slice(0,8)}…${w.address.slice(-4)}</a>
+                 class="wt-wallet-addr" title="${w.address}">${w.address.slice(0, 8)}…${w.address.slice(-4)}</a>
             </div>
             <div class="wt-wallet-actions">
               <button class="wt-fetch-btn" onclick="fetchWtActivity('${w.id}','${w.address}','${chain}')">📋 Activity</button>
@@ -806,13 +798,13 @@ async function renderWtPanel() {
             </div>
           </div>
           <div class="wt-activity-row" id="wt-activity-${w.id}" style="display:none;"></div>`
-        ).join('')}
+      ).join('')}
     </div>`;
 }
 
-window.saveWtApiKey = function (chain) {
-  const val = document.getElementById('wt-api-key-input')?.value.trim();
-  if (val) { WalletTracker.setApiKey(chain, val); showToast('✅', 'API Key Saved', `${chain} API key saved`, 'success'); }
+window.saveWtApiKey = function () {
+  // API keys are now managed centrally in Admin → API Keys via ChainAPIs.setKey()
+  showToast('ℹ️', 'API Keys Centralized', 'Set API keys in Admin → API Keys section', 'info');
 };
 
 window.addTrackedWallet = async function (chain) {
@@ -820,7 +812,7 @@ window.addTrackedWallet = async function (chain) {
   const label = document.getElementById('wt-label-input')?.value.trim();
   if (!addr) return;
   await WalletTracker.addWallet(chain, addr, label);
-  showToast('✅', 'Wallet Added', `${label || addr.slice(0,8)} tracked on ${chain}`, 'success');
+  showToast('✅', 'Wallet Added', `${label || addr.slice(0, 8)} tracked on ${chain}`, 'success');
   await renderWtPanel();
 };
 
@@ -876,7 +868,7 @@ window.adminSaveKey = function (name) {
 };
 
 window.adminTestKey = async function (name) {
-  const btn    = document.getElementById(`${name}-test-btn`);
+  const btn = document.getElementById(`${name}-test-btn`);
   const status = document.getElementById('admin-key-status');
   if (!btn || typeof ChainAPIs === 'undefined') return;
   const key = document.getElementById(`admin-${name}-key`)?.value?.trim();

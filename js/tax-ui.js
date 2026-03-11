@@ -928,7 +928,8 @@ const TaxUI = (() => {
                   <td class="tax-muted tax-nowrap" style="font-size:11px">
                     ${st.startDate ? fmtDate(st.startDate) + ' → ' + fmtDate(st.endDate || new Date().toISOString()) : '—'}
                   </td>
-                  <td class="ta-r">
+                  <td class="ta-r" style="white-space:nowrap">
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-import all transactions">🔄</button>
                     <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.removeAccount('${acc.id}')">Remove</button>
                   </td>
                 </tr>`;
@@ -1080,6 +1081,10 @@ const TaxUI = (() => {
     transfer_out: { icon: '→', color: '#64748b', label: 'Transfer Out' },
     spam: { icon: '🚫', color: '#475569', label: 'Spam' },
     approval: { icon: '✓', color: '#475569', label: 'Approval' },
+    staking: { icon: '🥩', color: '#22d3ee', label: 'Staking' },
+    nft_sale: { icon: '🖼️', color: '#a78bfa', label: 'NFT Sale' },
+    bridge: { icon: '🌉', color: '#818cf8', label: 'Bridge' },
+    defi_unknown: { icon: '🧩', color: '#f59e0b', label: 'DeFi' },
   };
 
   function renderTransactions() {
@@ -1323,7 +1328,9 @@ const TaxUI = (() => {
                     <div class="tax-review-group-why">${meta.why}</div>
                   </div>
                 </div>
-                <div class="tax-review-fix-tip">💡 ${meta.fix}</div>
+                <div class="tax-review-fix-tip">💡 ${meta.fix}
+                  ${reason === 'duplicate' ? `<button class="tax-btn tax-btn-xs" style="margin-left:8px;background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteDuplicates()">🗑 Delete all duplicates</button>` : ''}
+                </div>
                 <div class="tax-review-items">
                   ${items.map(({ txn }) => `
                     <div class="tax-review-item">
@@ -1331,10 +1338,12 @@ const TaxUI = (() => {
                         <span class="tax-asset-sym">${txn.assetSymbol}</span>
                         <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 8)}</span>
                         <span class="tax-muted">${fmtDateShort(txn.date)}</span>
+                        ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
                       </div>
                       <div class="tax-ri-right">
                         <button class="tax-btn tax-btn-xs tax-btn-primary" onclick="TaxUI.editTx('${txn.id}')">Edit</button>
                         <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')">OK</button>
+                        <button class="tax-btn tax-btn-xs" style="color:#f87171" onclick="TaxUI.deleteTx('${txn.id}')" title="Delete">🗑</button>
                       </div>
                     </div>
                   `).join('')}
@@ -1381,6 +1390,12 @@ const TaxUI = (() => {
           <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.navigate('review')" style="margin-left:8px">Fix →</button>
         </div>` : ''}
 
+        <div class="tax-user-info-bar" style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:12px 16px;background:rgba(255,255,255,.03);border:1px solid var(--tax-border);border-radius:10px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--tax-muted);white-space:nowrap">K4 Uppgifter:</span>
+          <input id="tax-user-name" class="tax-input" type="text" placeholder="Namn" value="${S.userName || ''}" onchange="TaxUI.setUserInfo('name', this.value)" style="width:200px;height:30px;font-size:12px">
+          <input id="tax-user-pnr" class="tax-input" type="text" placeholder="Personnummer (YYYYMMDD-XXXX)" value="${S.userPnr || ''}" onchange="TaxUI.setUserInfo('pnr', this.value)" style="width:220px;height:30px;font-size:12px">
+        </div>
+
         <div class="tax-report-hero">
           <div class="tax-rh-year">${S.taxYear}</div>
           <div class="tax-rh-title">Sammanfattning — Inkomstdeklaration 1</div>
@@ -1424,8 +1439,10 @@ const TaxUI = (() => {
             <h2>K4 Sektion D — Kryptovalutor</h2>
             ${k4.formsNeeded > 1 ? `<span class="tax-badge" style="background:rgba(99,102,241,.15);color:#818cf8">${k4.formsNeeded} blanketter</span>` : ''}
             <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
-              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4CSV()">⬇ K4 CSV (SKV 2104-D)</button>
+              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4PDF()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none">📄 Ladda ner K4 PDF</button>
+              <button class="tax-btn tax-btn-sm tax-btn-secondary" onclick="TaxUI.downloadK4CSV()">⬇ K4 CSV</button>
               <button class="tax-btn tax-btn-sm tax-btn-secondary" onclick="TaxUI.downloadAuditCSV()">⬇ Transaktionslogg</button>
+              <button class="tax-btn tax-btn-sm tax-btn-secondary" onclick="TaxUI.downloadHoldingsCSV()">⬇ Innehavsrapport</button>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.printReport()">🖨 Skriv ut</button>
             </div>
           </div>
@@ -1547,6 +1564,17 @@ const TaxUI = (() => {
       .map(t => t.needsReview ? { ...t, needsReview: false, reviewReason: null, userReviewed: true } : t);
     TaxEngine.saveTransactions(updated);
     S.taxResult = null;
+    render();
+  }
+  function deleteDuplicates() {
+    const txns = TaxEngine.getTransactions();
+    const dups = txns.filter(t => t.isDuplicate);
+    if (!dups.length) { showTaxToast('ℹ️', 'No duplicates', 'No duplicate transactions found.', 'info'); return; }
+    if (!confirm(`Delete ${dups.length} duplicate transactions? This cannot be undone.`)) return;
+    const clean = txns.filter(t => !t.isDuplicate);
+    TaxEngine.saveTransactions(clean);
+    S.taxResult = null;
+    showTaxToast('🗑', 'Duplicates removed', `${dups.length} duplicate transactions deleted.`, 'success');
     render();
   }
   function removeAccount(id) {
@@ -1674,6 +1702,67 @@ const TaxUI = (() => {
   }
   function printReport() { window.print(); }
 
+  async function downloadK4PDF() {
+    const result = getOrComputeTaxResult();
+    const userInfo = { name: S.userName || '', personnummer: S.userPnr || '' };
+    try {
+      if (!userInfo.name && typeof AuthManager !== 'undefined') {
+        const u = AuthManager.getUser();
+        if (u) userInfo.name = u.name;
+      }
+    } catch { }
+    try {
+      showTaxToast('⏳', 'Genererar K4 PDF', 'Fyller i Skatteverkets blankett…', 'info');
+      await K4PDFGenerator.downloadK4PDF(result, userInfo, S.taxYear);
+      showTaxToast('✅', 'K4 PDF klar', 'Filen har laddats ner.', 'success');
+    } catch (e) {
+      console.error('[K4PDF]', e);
+      showTaxToast('❌', 'Kunde inte generera K4 PDF', e.message, 'error');
+    }
+  }
+
+  function downloadHoldingsCSV() {
+    const result = getOrComputeTaxResult();
+    const { currentHoldings = {} } = result;
+    const lines = ['Tillgång,Antal,Genomsnittligt anskaffningsvärde (SEK),Totalt anskaffningsvärde (SEK)'];
+    for (const [sym, h] of Object.entries(currentHoldings).sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (h.qty <= 0) continue;
+      const avgCost = h.qty > 0 ? (h.totalCostSEK / h.qty) : 0;
+      lines.push(`${sym},${h.qty.toFixed(8)},${avgCost.toFixed(2)},${h.totalCostSEK.toFixed(2)}`);
+    }
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `TCMD_innehav_${S.taxYear}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  }
+
+  function setUserInfo(field, val) {
+    if (field === 'name') S.userName = val;
+    if (field === 'pnr') S.userPnr = val;
+    // Persist to Supabase
+    if (typeof SupabaseDB !== 'undefined' && SupabaseDB.setUserData) {
+      SupabaseDB.setUserData('tax_user_info', { name: S.userName || '', personnummer: S.userPnr || '' });
+    }
+  }
+
+  async function resyncAccount(accountId) {
+    if (!confirm('This will delete all imported transactions for this account and re-import. Continue?')) return;
+    TaxEngine.resyncAccount(accountId);
+    const acc = TaxEngine.getAccounts().find(a => a.id === accountId);
+    if (acc) {
+      showTaxToast('🔄', 'Re-syncing', `Re-importing ${acc.name}…`, 'info');
+      if (acc.type === 'solana' || acc.type === 'phantom_sol') {
+        await importWallet('SOL');
+      } else if (acc.type === 'metamask' || acc.type === 'phantom_eth' || acc.type === 'eth') {
+        await importWallet('ETH');
+      } else {
+        showTaxToast('ℹ️', 'Manual re-import needed', 'Please upload the CSV file again.', 'info');
+        render();
+      }
+    }
+  }
+
   // ── Helpers ───────────────────────────────────────────────
   function getOrComputeTaxResult() {
     if (!S.taxResult || S.taxResult.year !== S.taxYear) {
@@ -1781,6 +1870,17 @@ const TaxUI = (() => {
     S.taxResult = null;
     bindPipelineEvents();
 
+    // Load user info (name/personnummer) for K4 header
+    try {
+      if (typeof SupabaseDB !== 'undefined' && SupabaseDB.getUserData) {
+        const info = await SupabaseDB.getUserData('tax_user_info');
+        if (info) {
+          S.userName = info.name || '';
+          S.userPnr = info.personnummer || '';
+        }
+      }
+    } catch { }
+
     // Restore tax sub-page from URL hash (e.g. #tax/reports → reports page)
     const VALID_PAGES = ['portfolio', 'accounts', 'transactions', 'reports', 'review'];
     const hashParts = window.location.hash.replace('#', '').split('/');
@@ -1806,8 +1906,9 @@ const TaxUI = (() => {
     setFilter, sortTxns, setPage,
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
-    markReviewed, markAllReviewed, removeAccount,
-    downloadK4CSV, downloadAuditCSV, printReport,
+    markReviewed, markAllReviewed, deleteDuplicates, removeAccount,
+    downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
+    setUserInfo, resyncAccount,
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns

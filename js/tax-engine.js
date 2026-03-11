@@ -43,6 +43,8 @@ const TaxEngine = (() => {
     RECEIVE: 'receive', SEND: 'send', INCOME: 'income',
     FEE: 'fee', TRANSFER_IN: 'transfer_in', TRANSFER_OUT: 'transfer_out',
     SPAM: 'spam', APPROVAL: 'approval',
+    STAKING: 'staking', NFT_SALE: 'nft_sale', BRIDGE: 'bridge',
+    DEFI_UNKNOWN: 'defi_unknown',
   };
 
   // ── Storage Keys (price cache remains localStorage; rest moves to Supabase) ──
@@ -139,7 +141,7 @@ const TaxEngine = (() => {
     } catch (e) {
       // Fallback: try localStorage (may fail for large datasets)
       console.warn('[TaxEngine] IDB write failed, trying localStorage:', e.message);
-      try { localStorage.setItem(LS.TRANSACTIONS, JSON.stringify(txns)); } catch { }
+      try { localStorage.setItem('tcmd_tax_transactions', JSON.stringify(txns)); } catch { }
     }
   }
 
@@ -155,7 +157,7 @@ const TaxEngine = (() => {
       });
     } catch (e) {
       console.warn('[TaxEngine] IDB read failed, falling back to localStorage:', e.message);
-      try { return JSON.parse(localStorage.getItem(LS.TRANSACTIONS) || '[]'); } catch { return []; }
+      try { return JSON.parse(localStorage.getItem('tcmd_tax_transactions') || '[]'); } catch { return []; }
     }
   }
 
@@ -175,11 +177,11 @@ const TaxEngine = (() => {
     // One-time migration: if IDB is empty, check localStorage
     if (!_txCache.length) {
       try {
-        const raw = localStorage.getItem(LS.TRANSACTIONS);
+        const raw = localStorage.getItem('tcmd_tax_transactions');
         if (raw) {
           _txCache = JSON.parse(raw);
           await idbSaveAll(_txCache);
-          localStorage.removeItem(LS.TRANSACTIONS);  // free up space
+          localStorage.removeItem('tcmd_tax_transactions');  // free up space
           console.log('[TaxEngine] Migrated', _txCache.length, 'transactions from localStorage to IDB');
         }
       } catch { }
@@ -279,6 +281,14 @@ const TaxEngine = (() => {
     if (rawType.match(/mining/)) return CAT.INCOME;
     if (rawType.match(/approval/)) return CAT.APPROVAL;
 
+    // ── DeFi / Staking / NFT heuristics ───────────────────
+    if (rawType.match(/stake|unstake|claim/)) return CAT.STAKING;
+    if (rawType.match(/bridge|wrap|unwrap/)) return CAT.BRIDGE;
+    if (rawType.match(/nft.*sale|nft.*sell/)) return CAT.NFT_SALE;
+    if (rawType.match(/add.*liquidity|remove.*liquidity|lp/)) return CAT.TRADE;
+    if (rawType.match(/lend|borrow|repay|supply|withdraw.*vault/)) return CAT.DEFI_UNKNOWN;
+    if (rawType.match(/contract.*interaction|unknown.*program/)) return CAT.DEFI_UNKNOWN;
+
     // ── Blockchain heuristics ──────────────────────────────
     if (t.inAsset && t.inAmount > 0) return CAT.TRADE;
 
@@ -305,12 +315,14 @@ const TaxEngine = (() => {
   }
 
   function isTaxableCategory(cat) {
-    return [CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY].includes(cat);
+    return [CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY, CAT.STAKING, CAT.NFT_SALE].includes(cat);
   }
 
   function getReviewReason(t, cat) {
     if (!t.priceSEKPerUnit && !t.costBasisSEK) return 'missing_sek_price';
     if (!t.coinGeckoId && !STABLES.has(t.assetSymbol)) return 'unknown_asset';
+    if (cat === CAT.DEFI_UNKNOWN) return 'unsupported_defi';
+    if (cat === CAT.BRIDGE) return 'bridge_review';
     return 'unclassified';
   }
 
@@ -345,6 +357,7 @@ const TaxEngine = (() => {
           if (inc.assetSymbol !== out.assetSymbol) return false;
           const timeDiff = Math.abs(new Date(inc.date).getTime() - outDate);
           if (timeDiff > MATCH_WINDOW_MS) return false;
+          // Fee-aware matching: incoming may be slightly less due to network fee
           const amtDiff = Math.abs(inc.amount - out.amount) / (out.amount || 1);
           if (amtDiff > AMOUNT_TOLERANCE) return false;
           return true;
@@ -369,6 +382,77 @@ const TaxEngine = (() => {
     }
 
     return txns;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // CROSS-SOURCE DEDUPLICATION
+  // Detects same real-world transaction imported from multiple
+  // sources (e.g., API + CSV, exchange + wallet, multiple syncs)
+  // ════════════════════════════════════════════════════════════
+  const DEDUP_TIME_MS = 5 * 60 * 1000; // 5 minutes
+  const DEDUP_AMT_TOL = 0.01;          // 1%
+
+  function deduplicateTransactions(txns) {
+    // Group by asset symbol for efficient comparison
+    const byAsset = {};
+    for (const t of txns) {
+      const sym = t.assetSymbol || 'UNKNOWN';
+      (byAsset[sym] = byAsset[sym] || []).push(t);
+    }
+
+    const dupIds = new Set();
+    const dupGroups = []; // for review
+
+    for (const [sym, group] of Object.entries(byAsset)) {
+      if (group.length < 2) continue;
+
+      // Sort by date for efficient scanning
+      group.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+      for (let i = 0; i < group.length; i++) {
+        const a = group[i];
+        if (a.isDuplicate || a.manualCategory) continue;
+
+        for (let j = i + 1; j < group.length; j++) {
+          const b = group[j];
+          if (b.isDuplicate || b.manualCategory) continue;
+
+          // Must be from different accounts (same account dedup handled at import)
+          if (a.accountId === b.accountId) continue;
+
+          const timeDiff = Math.abs(new Date(b.date) - new Date(a.date));
+          if (timeDiff > DEDUP_TIME_MS) break; // sorted by date, no more matches possible
+
+          const amtDiff = a.amount > 0
+            ? Math.abs(a.amount - b.amount) / a.amount
+            : 0;
+
+          if (amtDiff <= DEDUP_AMT_TOL) {
+            // Same asset, similar amount, close time, different sources → likely duplicate
+            b.isDuplicate = true;
+            b.duplicateOfId = a.id;
+            b.needsReview = true;
+            b.reviewReason = 'duplicate';
+            dupIds.add(b.id);
+            dupGroups.push({ original: a.id, duplicate: b.id, sym, timeDiff, amtDiff });
+          }
+        }
+      }
+    }
+
+    return txns;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // RE-SYNC — clear account data and re-import
+  // ════════════════════════════════════════════════════════════
+  function resyncAccount(accountId) {
+    // Remove all transactions for this account
+    const txns = getTransactions().filter(t => t.accountId !== accountId);
+    saveTransactions(txns);
+    // Reset import status
+    setImportStatus(accountId, { status: 'never_synced' });
+    return txns.length;
   }
 
   // ════════════════════════════════════════════════════════════
@@ -587,29 +671,34 @@ const TaxEngine = (() => {
       };
 
       // Step 1 – Auto-classify
-      emit('classify', 10, 'Classifying transactions…');
+      emit('classify', 8, 'Classifying transactions…');
       let txns = getTransactions();
       txns = autoClassifyAll(txns);
       await tick();
 
-      // Step 2 – Match internal transfers
-      emit('transfer', 25, 'Matching internal transfers…');
+      // Step 2 – Detect cross-source duplicates
+      emit('dedup', 18, 'Detecting duplicate transactions…');
+      txns = deduplicateTransactions(txns);
+      await tick();
+
+      // Step 3 – Match internal transfers
+      emit('transfer', 28, 'Matching internal transfers…');
       txns = matchTransfers(txns);
       await tick();
 
-      // Step 3 – Fetch missing SEK prices
-      emit('price', 40, 'Fetching historical SEK prices…');
+      // Step 4 – Fetch missing SEK prices
+      emit('price', 38, 'Fetching historical SEK prices…');
       txns = await fetchAllSEKPrices(txns, (p) => {
-        emit('price', 40 + Math.round(p.pct * 0.3), p.msg);
+        emit('price', 38 + Math.round(p.pct * 0.3), p.msg);
       });
 
-      // Step 4 – Save enriched transactions
-      emit('save', 72, 'Saving…');
+      // Step 5 – Save enriched transactions
+      emit('save', 70, 'Saving…');
       saveTransactions(txns);
       await tick();
 
-      // Step 5 – Compute tax for current year
-      emit('tax', 80, 'Computing Swedish tax (Genomsnittsmetoden)…');
+      // Step 6 – Compute tax for current year
+      emit('tax', 78, 'Computing Swedish tax (Genomsnittsmetoden)…');
       const settings = getSettings();
       const taxResult = computeTaxYear(settings.taxYear, txns);
       const reviewIssues = getReviewIssues(txns);
@@ -619,6 +708,7 @@ const TaxEngine = (() => {
       const result = {
         totalTxns: txns.length,
         reviewIssues: reviewIssues.length,
+        duplicates: txns.filter(t => t.isDuplicate).length,
         taxResult,
       };
       Events.emit('pipeline:done', result);
@@ -639,12 +729,14 @@ const TaxEngine = (() => {
   // ════════════════════════════════════════════════════════════
   const REVIEW_DESCRIPTIONS = {
     missing_sek_price: { label: 'Missing SEK price', icon: '💰', why: 'Cannot calculate gain/loss without SEK value at time of transaction.', fix: 'Enter the market price in SEK on the transaction date.' },
-    unknown_asset: { label: 'Unknown asset', icon: '❓', why: 'No CoinGecko price feed found for this token.', fix: 'Enter the price manually or mark as spam if worthless.' },
+    unknown_asset: { label: 'Unknown asset', icon: '❓', why: 'No price feed found for this token.', fix: 'Enter the price manually or mark as spam if worthless.' },
     unmatched_transfer: { label: 'Unmatched transfer', icon: '🔗', why: 'This transfer could not be matched to an incoming/outgoing in your other accounts. May cause incorrect cost basis.', fix: 'Connect the other account or mark as external.' },
     negative_balance: { label: 'Negative balance', icon: '⚠️', why: 'More units sold than found in history — missing buy transactions.', fix: 'Import the full history for this asset.' },
-    duplicate: { label: 'Possible duplicate', icon: '📋', why: 'Very similar transaction already exists.', fix: 'Review and delete one if duplicate.' },
+    duplicate: { label: 'Possible duplicate', icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one if it is a duplicate.' },
     unclassified: { label: 'Unclassified', icon: '🏷️', why: 'Could not auto-classify this transaction type.', fix: 'Select the correct category.' },
     ambiguous_swap: { label: 'Ambiguous swap', icon: '↔️', why: 'Outgoing amount found but incoming asset/amount unknown.', fix: 'Enter the received asset and amount.' },
+    unsupported_defi: { label: 'Unsupported DeFi', icon: '🧩', why: 'This appears to be a complex DeFi interaction (lending, LP, vault, etc.) that cannot be auto-classified.', fix: 'Classify manually as buy/sell/income/ignore.' },
+    bridge_review: { label: 'Bridge transaction', icon: '🌉', why: 'Cross-chain bridge detected. Verify the corresponding deposit arrived.', fix: 'Confirm it is a non-taxable transfer or reclassify.' },
   };
 
   function getReviewIssues(txns) {
@@ -1190,8 +1282,9 @@ const TaxEngine = (() => {
   // IMPORTANT: raw Helius JSON (5–20 KB/tx) is normalized and discarded per page.
   // Never accumulate allRaw — 8000 raw txns ≈ 100 MB in V8, which crashes Chrome.
   async function importSolanaWallet(address, accountId, onProgress) {
-    const heliusKey = localStorage.getItem('tcmd_helius_key');
-    if (!heliusKey) return { txns: [], error: 'No Helius API key configured', missingKey: true };
+    const keys = (typeof ChainAPIs !== 'undefined' && ChainAPIs.getKeys) ? ChainAPIs.getKeys() : {};
+    const heliusKey = keys.helius || '';
+    if (!heliusKey) return { txns: [], error: 'No Helius API key configured. Add it in Admin → API Keys.', missingKey: true };
 
     let allTxns = [], totalFetched = 0, before = null, hasMore = true;
     setImportStatus(accountId, { status: 'syncing', source: 'solana', address });
@@ -1420,8 +1513,9 @@ const TaxEngine = (() => {
   // Key priority: localStorage → window.TCMD_KEYS → error
   // ════════════════════════════════════════════════════════════
   async function importEthWallet(address, accountId, onProgress) {
-    // Priority: Admin panel (localStorage) → config.js/keys.js (TCMD_KEYS)
-    const etherscanKey = localStorage.getItem('tcmd_etherscan_key')
+    // Priority: ChainAPIs (Supabase) → config.js/keys.js (TCMD_KEYS)
+    const keys = (typeof ChainAPIs !== 'undefined' && ChainAPIs.getKeys) ? ChainAPIs.getKeys() : {};
+    const etherscanKey = keys.etherscan
       || (typeof window !== 'undefined' && window.TCMD_KEYS?.etherscan)
       || '';
     if (!etherscanKey) {
@@ -1869,7 +1963,9 @@ const TaxEngine = (() => {
     // Pipeline
     runPipeline, Events,
     // Classification
-    autoClassifyAll, matchTransfers,
+    autoClassifyAll, matchTransfers, deduplicateTransactions,
+    // Re-sync
+    resyncAccount,
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine

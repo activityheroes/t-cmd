@@ -29,6 +29,10 @@ const TaxUI = (() => {
     portfolioHist: null,   // time-series history for chart
     portfolioRange: '1W',   // selected time range
     portfolioCharts: {},     // Chart.js instances { main, alloc, perf }
+    // Transaction selection
+    selectedTxIds: new Set(),
+    userName: '',
+    userPnr: '',
   };
 
   let _pendingCSVText = null;
@@ -1093,18 +1097,24 @@ const TaxUI = (() => {
     const filtered = filterTxns(allTxns);
     const sorted = sortTxnsArr(filtered);
     const paged = sorted.slice(S.txPage * S.txPageSize, (S.txPage + 1) * S.txPageSize);
+    const selCount = S.selectedTxIds.size;
 
     return `
-      <div class="tax-page">
-        <div class="tax-page-header">
+      <div class="tax-page" style="display:flex;flex-direction:column;height:100%;overflow:hidden">
+        <div class="tax-page-header" style="flex-shrink:0">
           <h1 class="tax-page-title">Transactions</h1>
-          <div class="tax-page-actions">
+          <div class="tax-page-actions" style="display:flex;gap:8px;align-items:center">
+            ${selCount > 0 ? `
+              <span style="font-size:12px;color:var(--tax-muted)">${selCount} selected</span>
+              <button class="tax-btn tax-btn-sm" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteSelected()">🗑 Delete selected</button>
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.clearSelection()">Clear</button>
+            ` : ''}
             <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.openImport('csv')">+ Add CSV</button>
             <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Process</button>
           </div>
         </div>
 
-        <div class="tax-filter-bar">
+        <div class="tax-filter-bar" style="flex-shrink:0">
           <div class="tax-search-wrap">
             <span class="tax-search-icon">🔍</span>
             <input type="text" class="tax-input tax-search-input" placeholder="Search asset, hash, notes…"
@@ -1131,7 +1141,7 @@ const TaxUI = (() => {
 
         ${S.calOpen ? renderCalendar() : ''}
 
-        <div class="tax-table-meta">
+        <div class="tax-table-meta" style="flex-shrink:0">
           <span class="tax-muted">${filtered.length.toLocaleString()} transactions</span>
           ${filtered.length < allTxns.length ? `<span class="tax-filter-chip">${allTxns.length.toLocaleString()} total</span>` : ''}
           <span style="flex:1"></span>
@@ -1140,8 +1150,14 @@ const TaxUI = (() => {
 
         ${paged.length === 0
         ? renderEmpty('No transactions', allTxns.length === 0 ? 'Add accounts from the Accounts page.' : 'No matches.', '📋')
-        : `<div class="tax-table-wrap"><table class="tax-table">
-              <thead><tr>
+        : `<div class="tax-table-wrap" style="flex:1;overflow-y:auto;min-height:0">
+              <table class="tax-table" style="width:100%">
+              <thead style="position:sticky;top:0;z-index:2;background:var(--tax-bg,#0d1021)">
+                <tr>
+                <th style="width:32px;padding:0 6px">
+                  <input type="checkbox" ${selCount === paged.length && paged.length > 0 ? 'checked' : ''}
+                    onchange="TaxUI.toggleSelectAll(this.checked)" title="Select all on page">
+                </th>
                 <th>Type</th>
                 <th class="sortable" onclick="TaxUI.sortTxns('date')">Date ${sortIcon('date')}</th>
                 <th>Asset</th>
@@ -1164,18 +1180,23 @@ const TaxUI = (() => {
     const cm = CAT_META[t.category] || { icon: '•', color: '#94a3b8', label: t.category };
     const val = t.costBasisSEK || (t.priceSEKPerUnit * t.amount) || 0;
     const isInternal = t.isInternalTransfer;
+    const checked = S.selectedTxIds.has(t.id);
     return `
-      <tr class="${t.needsReview ? 'tax-row-review' : ''} ${isInternal ? 'tax-row-internal' : ''}">
+      <tr class="${t.needsReview ? 'tax-row-review' : ''} ${isInternal ? 'tax-row-internal' : ''} ${checked ? 'tax-row-selected' : ''}">
+        <td style="width:32px;padding:0 6px">
+          <input type="checkbox" ${checked ? 'checked' : ''}
+            onchange="TaxUI.toggleSelectTx('${t.id}',this.checked)">
+        </td>
         <td>
           <span class="tax-cat-badge" style="background:${cm.color}22;color:${cm.color}">${cm.icon} ${cm.label}</span>
           ${isInternal ? '<span class="tax-transfer-tag">↔ internal</span>' : ''}
+          ${t.isDuplicate ? '<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>' : ''}
         </td>
         <td class="tax-muted tax-nowrap">${fmtDateShort(t.date)}</td>
         <td>
           <div class="tax-asset-cell-col">
             <span class="tax-asset-sym">${t.assetSymbol || '—'}</span>
             ${t.category === 'trade' && t.inAsset ? `<span style="font-size:11px;color:#8b5cf6">→ ${t.inAsset}</span>` : ''}
-            ${t.priceSource ? `<span class="tax-price-src">${t.priceSource === 'coingecko' ? '📈' : '💱'}</span>` : ''}
           </div>
         </td>
         <td class="ta-r tax-mono">${TaxEngine.formatCrypto(t.amount, 8)}</td>
@@ -1529,7 +1550,44 @@ const TaxUI = (() => {
   function closeEdit() { S.editTxId = null; S.taxResult = null; render(); }
   function deleteTx(id) {
     if (!confirm('Delete this transaction? This will affect tax calculations.')) return;
-    TaxEngine.deleteTransaction(id); S.taxResult = null; reRenderMain();
+    TaxEngine.deleteTransaction(id); S.selectedTxIds.delete(id); S.taxResult = null; reRenderMain();
+  }
+
+  // ── Selection & Bulk Delete ─────────────────────────────
+  function toggleSelectAll(checked) {
+    const allTxns = TaxEngine.getTransactions();
+    const filtered = filterTxns(allTxns);
+    const sorted = sortTxnsArr(filtered);
+    const paged = sorted.slice(S.txPage * S.txPageSize, (S.txPage + 1) * S.txPageSize);
+    if (checked) {
+      for (const t of paged) S.selectedTxIds.add(t.id);
+    } else {
+      for (const t of paged) S.selectedTxIds.delete(t.id);
+    }
+    reRenderMain();
+  }
+
+  function toggleSelectTx(id, checked) {
+    if (checked) S.selectedTxIds.add(id);
+    else S.selectedTxIds.delete(id);
+    reRenderMain();
+  }
+
+  function deleteSelected() {
+    const count = S.selectedTxIds.size;
+    if (!count) return;
+    if (!confirm(`Delete ${count} selected transaction${count > 1 ? 's' : ''}? This cannot be undone and will affect tax calculations.`)) return;
+    const txns = TaxEngine.getTransactions().filter(t => !S.selectedTxIds.has(t.id));
+    TaxEngine.saveTransactions(txns);
+    S.selectedTxIds.clear();
+    S.taxResult = null;
+    showTaxToast('🗑', 'Deleted', `${count} transactions removed.`, 'success');
+    render();
+  }
+
+  function clearSelection() {
+    S.selectedTxIds.clear();
+    reRenderMain();
   }
   function saveEdit(id) {
     const d = document.getElementById('e-date')?.value;
@@ -1906,6 +1964,7 @@ const TaxUI = (() => {
     setFilter, sortTxns, setPage,
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
+    toggleSelectAll, toggleSelectTx, deleteSelected, clearSelection,
     markReviewed, markAllReviewed, deleteDuplicates, removeAccount,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount,

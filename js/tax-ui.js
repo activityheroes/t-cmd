@@ -1297,10 +1297,13 @@ const TaxUI = (() => {
           <h1 class="tax-page-title">Transactions</h1>
           <div class="tax-page-actions" style="display:flex;gap:8px;align-items:center">
             ${selCount > 0 ? `
-              <span style="font-size:12px;color:var(--tax-muted)">${selCount} selected</span>
+              <span style="font-size:12px;color:var(--tax-muted)">${selCount.toLocaleString()} selected</span>
               <button class="tax-btn tax-btn-sm" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteSelected()">🗑 Delete selected</button>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.clearSelection()">Clear</button>
             ` : ''}
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" style="color:#f87171;border-color:rgba(248,113,113,.25)" onclick="TaxUI.deleteAllFiltered(${filtered.length})" title="Delete all transactions matching current filters">
+              🗑 Delete all ${filtered.length < allTxns.length ? filtered.length.toLocaleString() + ' filtered' : allTxns.length.toLocaleString()}
+            </button>
             <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.openImport('csv')">+ Add CSV</button>
             <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Process</button>
           </div>
@@ -1347,8 +1350,9 @@ const TaxUI = (() => {
               <thead style="position:sticky;top:0;z-index:2;background:var(--tax-bg,#0d1021)">
                 <tr>
                 <th style="width:32px;padding:0 6px">
-                  <input type="checkbox" ${selCount === paged.length && paged.length > 0 ? 'checked' : ''}
-                    onchange="TaxUI.toggleSelectAll(this.checked)" title="Select all on page">
+                  <input type="checkbox" ${selCount > 0 && selCount === sorted.length ? 'checked' : ''}
+                    onchange="TaxUI.toggleSelectAll(this.checked)"
+                    title="${selCount === sorted.length && sorted.length > 0 ? `Deselect all ${sorted.length.toLocaleString()}` : `Select all ${sorted.length.toLocaleString()} transactions`}">
                 </th>
                 <th>Type</th>
                 <th class="sortable" onclick="TaxUI.sortTxns('date')">Date ${sortIcon('date')}</th>
@@ -1788,11 +1792,11 @@ const TaxUI = (() => {
     const allTxns = TaxEngine.getTransactions();
     const filtered = filterTxns(allTxns);
     const sorted = sortTxnsArr(filtered);
-    const paged = sorted.slice(S.txPage * S.txPageSize, (S.txPage + 1) * S.txPageSize);
+    // Select/deselect ALL filtered transactions, not just the current page
     if (checked) {
-      for (const t of paged) S.selectedTxIds.add(t.id);
+      for (const t of sorted) S.selectedTxIds.add(t.id);
     } else {
-      for (const t of paged) S.selectedTxIds.delete(t.id);
+      for (const t of sorted) S.selectedTxIds.delete(t.id);
     }
     reRenderMain();
   }
@@ -1806,12 +1810,31 @@ const TaxUI = (() => {
   function deleteSelected() {
     const count = S.selectedTxIds.size;
     if (!count) return;
-    if (!confirm(`Delete ${count} selected transaction${count > 1 ? 's' : ''}? This cannot be undone and will affect tax calculations.`)) return;
+    if (!confirm(`Delete ${count.toLocaleString()} selected transaction${count > 1 ? 's' : ''}?\n\nThis cannot be undone and will affect tax calculations.`)) return;
     const txns = TaxEngine.getTransactions().filter(t => !S.selectedTxIds.has(t.id));
     TaxEngine.saveTransactions(txns);
     S.selectedTxIds.clear();
     S.taxResult = null;
-    showTaxToast('🗑', 'Deleted', `${count} transactions removed.`, 'success');
+    S.portfolioSnap = null; S.portfolioHist = null;
+    showTaxToast('🗑', 'Deleted', `${count.toLocaleString()} transactions removed.`, 'success');
+    render();
+  }
+
+  function deleteAllFiltered(count) {
+    const allTxns = TaxEngine.getTransactions();
+    const filtered = filterTxns(allTxns);
+    const total = allTxns.length;
+    const isAll = filtered.length === total;
+    const label = isAll
+      ? `ALL ${total.toLocaleString()} transactions`
+      : `${filtered.length.toLocaleString()} filtered transactions (${total.toLocaleString()} total)`;
+    if (!confirm(`⚠️ Delete ${label}?\n\nThis cannot be undone and will affect your tax calculations.`)) return;
+    const filteredIds = new Set(filtered.map(t => t.id));
+    TaxEngine.saveTransactions(allTxns.filter(t => !filteredIds.has(t.id)));
+    S.selectedTxIds.clear();
+    S.taxResult = null;
+    S.portfolioSnap = null; S.portfolioHist = null;
+    showTaxToast('🗑', 'Deleted', `${filtered.length.toLocaleString()} transactions removed.`, 'success');
     render();
   }
 
@@ -2243,7 +2266,7 @@ const TaxUI = (() => {
     setFilter, sortTxns, setPage,
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
-    toggleSelectAll, toggleSelectTx, deleteSelected, clearSelection,
+    toggleSelectAll, toggleSelectTx, deleteSelected, deleteAllFiltered, clearSelection,
     markReviewed, markAllReviewed, deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount,

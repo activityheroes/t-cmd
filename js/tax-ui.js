@@ -96,6 +96,19 @@ const TaxUI = (() => {
     `;
   }
 
+  // ── Utility Helpers ───────────────────────────────────────
+  function timeAgoShort(iso) {
+    if (!iso) return 'Never';
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  }
+
   // ── Auto-run pipeline ─────────────────────────────────────
   async function triggerPipeline() {
     if (TaxEngine.isPipelineRunning()) return;
@@ -108,10 +121,20 @@ const TaxUI = (() => {
   function render() {
     const panel = document.getElementById('tax-panel');
     if (!panel) return;
+    let pageHTML = '';
+    try {
+      pageHTML = renderPage();
+    } catch (e) {
+      console.error('[TaxUI] renderPage error:', e);
+      pageHTML = `<div style="padding:32px;color:#f87171;font-family:monospace">
+        <strong>⚠️ Render error on page "${S.page}":</strong><br><br>
+        <code>${e.message}</code><br><small>${e.stack?.split('\n').slice(0,3).join('<br>')}</small>
+      </div>`;
+    }
     panel.innerHTML = `
       <div class="tax-root">
         <aside class="tax-sidebar">${renderSidebar()}</aside>
-        <main class="tax-main">${renderPage()}</main>
+        <main class="tax-main">${pageHTML}</main>
       </div>
     `;
     bindEvents();
@@ -1079,15 +1102,17 @@ const TaxUI = (() => {
   function renderImportModal() {
     if (!S.importModal) return '';
     const src = ACC_SOURCES.find(s => s.type === S.importModal);
-    // If wallet with multiple networks and no network selected yet → show network picker
-    if (src?.category === 'wallet' && src.networks?.length > 1 && !S.importNetwork) {
+    const hasNetworks = src?.networks?.length > 0;
+    // Multiple networks and none selected yet → show network picker
+    if (hasNetworks && src.networks.length > 1 && !S.importNetwork) {
       return renderNetworkPickerModal(src);
     }
-    // Wallet with single network OR network already selected
-    if (src?.category === 'wallet') {
+    // Has networks (wallets / blockchains) → show wallet address input
+    if (hasNetworks) {
       const net = src.networks?.find(n => n.id === S.importNetwork) || src.networks?.[0];
       return renderWalletModal(S.importModal, net?.chain || 'eth', net);
     }
+    // Exchange or service → CSV upload
     return renderCSVModal(S.importModal);
   }
 
@@ -1998,12 +2023,12 @@ const TaxUI = (() => {
 
   function downloadHoldingsCSV() {
     const result = getOrComputeTaxResult();
-    const { currentHoldings = {} } = result;
+    const { currentHoldings = [] } = result;
     const lines = ['Tillgång,Antal,Genomsnittligt anskaffningsvärde (SEK),Totalt anskaffningsvärde (SEK)'];
-    for (const [sym, h] of Object.entries(currentHoldings).sort((a, b) => a[0].localeCompare(b[0]))) {
-      if (h.qty <= 0) continue;
-      const avgCost = h.qty > 0 ? (h.totalCostSEK / h.qty) : 0;
-      lines.push(`${sym},${h.qty.toFixed(8)},${avgCost.toFixed(2)},${h.totalCostSEK.toFixed(2)}`);
+    for (const h of [...currentHoldings].sort((a, b) => a.symbol.localeCompare(b.symbol))) {
+      if ((h.quantity || 0) <= 0) continue;
+      const avgCost = h.quantity > 0 ? (h.totalCostSEK / h.quantity) : 0;
+      lines.push(`${h.symbol},${h.quantity.toFixed(8)},${avgCost.toFixed(2)},${h.totalCostSEK.toFixed(2)}`);
     }
     const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);

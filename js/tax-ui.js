@@ -965,9 +965,15 @@ const TaxUI = (() => {
       <div class="tax-page tax-page--accounts">
         <div class="tax-page-header">
           <h1 class="tax-page-title">ACCOUNTS</h1>
-          <button class="acc-add-btn" onclick="TaxUI.openAddAccountModal()">
-            <span>＋</span> Add account
-          </button>
+          <div style="display:flex;gap:8px;align-items:center">
+            ${accounts.length > 0 ? `
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" style="color:#f87171;border-color:#f8717133" onclick="TaxUI.clearAllData()" title="Delete all accounts and transactions">
+              🗑 Clear all data
+            </button>` : ''}
+            <button class="acc-add-btn" onclick="TaxUI.openAddAccountModal()">
+              <span>＋</span> Add account
+            </button>
+          </div>
         </div>
 
         <!-- ── Connected accounts table ─────────────────── -->
@@ -1860,9 +1866,36 @@ const TaxUI = (() => {
     render();
   }
   function removeAccount(id) {
-    if (!confirm('Remove account? All its transactions will also be deleted.')) return;
-    TaxEngine.removeAccount(id); S.taxResult = null; render();
-    showTaxToast('✅', 'Account removed');
+    const acc = TaxEngine.getAccounts().find(a => a.id === id);
+    const txCount = TaxEngine.getTransactions().filter(t => t.accountId === id).length;
+    const label = acc?.label || (acc?.address ? acc.address.slice(0, 10) + '…' : 'this account');
+    const msg = txCount > 0
+      ? `Remove "${label}"?\n\nThis will permanently delete ${txCount.toLocaleString()} transaction${txCount !== 1 ? 's' : ''} associated with this account.\n\nThis cannot be undone.`
+      : `Remove "${label}"? This cannot be undone.`;
+    if (!confirm(msg)) return;
+    TaxEngine.removeAccount(id);
+    S.taxResult = null;
+    S.portfolioSnap = null;
+    S.portfolioHist = null;
+    if (S.portfolioRefreshTimer) { clearInterval(S.portfolioRefreshTimer); S.portfolioRefreshTimer = null; }
+    render();
+    showTaxToast('🗑', 'Account removed', txCount > 0 ? `${txCount.toLocaleString()} transactions deleted.` : '', 'success');
+  }
+
+  function clearAllData() {
+    const txCount = TaxEngine.getTransactions().length;
+    const accCount = TaxEngine.getAccounts().length;
+    if (accCount === 0 && txCount === 0) {
+      showTaxToast('ℹ️', 'Nothing to clear', 'No accounts or transactions found.'); return;
+    }
+    if (!confirm(`⚠️ Clear ALL data?\n\nThis will permanently delete:\n• ${accCount} account${accCount !== 1 ? 's' : ''}\n• ${txCount.toLocaleString()} transaction${txCount !== 1 ? 's' : ''}\n\nYour portfolio and tax reports will be wiped.\nThis cannot be undone.`)) return;
+    TaxEngine.clearAllData();
+    S.taxResult = null;
+    S.portfolioSnap = null;
+    S.portfolioHist = null;
+    if (S.portfolioRefreshTimer) { clearInterval(S.portfolioRefreshTimer); S.portfolioRefreshTimer = null; }
+    render();
+    showTaxToast('🗑', 'All data cleared', `${accCount} account${accCount !== 1 ? 's' : ''} and ${txCount.toLocaleString()} transactions deleted.`, 'success');
   }
 
   // ── CSV import ────────────────────────────────────────────
@@ -2211,7 +2244,7 @@ const TaxUI = (() => {
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
     toggleSelectAll, toggleSelectTx, deleteSelected, clearSelection,
-    markReviewed, markAllReviewed, deleteDuplicates, removeAccount,
+    markReviewed, markAllReviewed, deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount,
     // Portfolio dashboard

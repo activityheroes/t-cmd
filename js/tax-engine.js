@@ -98,6 +98,12 @@ const TaxEngine = (() => {
     saveTransactions(getTransactions().filter(t => t.accountId !== id));
     setImportStatus(id, null);
   }
+  function clearAllData() {
+    saveAccounts([]);
+    saveTransactions([]);
+    _importStatusCache = {};
+    SupabaseDB.setUserData('tax_import_status', {}).catch(() => {});
+  }
   function updateAccount(id, data) {
     saveAccounts(getAccounts().map(a => a.id === id ? { ...a, ...data } : a));
   }
@@ -1963,7 +1969,7 @@ const TaxEngine = (() => {
     // Settings
     getSettings, saveSettings, loadSettings,
     // Accounts
-    getAccounts, addAccount, removeAccount, updateAccount, loadAccounts,
+    getAccounts, addAccount, removeAccount, updateAccount, loadAccounts, clearAllData,
     getImportStatus, setImportStatus, loadImportStatuses,
     // Transactions
     loadTransactions,

@@ -38,6 +38,7 @@
         <button class="nav-tab" data-tab="log">📒 Trading Log</button>
         <button class="nav-tab" data-tab="whales" id="nav-tab-whales">🐋 Whales & Wallets</button>
         <button class="nav-tab" data-tab="tax" id="nav-tab-tax">🇸🇪 Tax Calculator</button>
+        <button class="nav-tab" data-tab="admin" id="nav-tab-admin" style="display:none">⚙️ Admin</button>
       </div>
 
       <div class="nav-actions">
@@ -323,6 +324,21 @@
       <div id="panel-tax" class="tab-panel">
         <div id="tax-panel">
           <!-- Populated by TaxUI.init() in tax-ui.js -->
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════════════════════
+         ADMIN TAB (admin users only)
+      ═══════════════════════════════════════════════ -->
+      <div id="panel-admin" class="tab-panel">
+        <div class="admin-page-wrap">
+          <div class="admin-page-header">
+            <h1 class="admin-page-title">⚙️ Admin Panel</h1>
+            <span class="admin-page-sub">Manage users, API keys, and system settings</span>
+          </div>
+          <div id="admin-page-content" class="admin-page-content">
+            <!-- Populated by renderAdminPanel() in auth.js -->
+          </div>
         </div>
       </div>
 

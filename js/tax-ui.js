@@ -17,6 +17,7 @@ const TaxUI = (() => {
     txPageSize: 50,
     importModal: null,
     importNetwork: null,  // selected network when multi-network wallet is chosen
+    addAccountModal: false, // Koinly-style "add account" search modal
     editTxId: null,
     calOpen: false,
     calField: null,
@@ -120,14 +121,12 @@ const TaxUI = (() => {
     const txns = TaxEngine.getTransactions();
     const reviewCount = TaxEngine.getReviewIssues(txns).length;
     const years = TaxEngine.getAvailableTaxYears();
-    const isAdmin = typeof AuthManager !== 'undefined' && AuthManager.isAdmin?.();
     const pages = [
       { id: 'portfolio',     icon: '💼', label: 'Portfolio' },
       { id: 'accounts',      icon: '🔗', label: 'Accounts' },
       { id: 'transactions',  icon: '📋', label: 'Transactions' },
       { id: 'review',        icon: '🔍', label: 'Review' },
       { id: 'reports',       icon: '📊', label: 'Reports' },
-      ...(isAdmin ? [{ id: 'admin', icon: '⚙️', label: 'Admin' }] : []),
     ];
     return `
       <div class="tax-logo">
@@ -172,7 +171,6 @@ const TaxUI = (() => {
       case 'transactions': return renderTransactions();
       case 'review': return renderReview();
       case 'reports': return renderReports();
-      case 'admin':   return renderAdminPage();
       default: return renderPortfolio();
     }
   }
@@ -898,116 +896,171 @@ const TaxUI = (() => {
   // ACCOUNTS PAGE
   // ════════════════════════════════════════════════════════════
 
-  // All account source types (wallets + exchanges)
+  // All account source types — wallets, blockchains, exchanges, services
   const ACC_SOURCES = [
     // ── Wallets ──────────────────────────────────────────────
-    { type: 'phantom',     icon: '👻', name: 'Phantom',  category: 'wallet',    desc: 'Solana & Ethereum wallet',  color: '#ab9ff2',
-      networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }, { id: 'eth', label: 'Ethereum', icon: 'Ξ', chain: 'eth' }] },
-    { type: 'metamask',    icon: '🦊', name: 'MetaMask', category: 'wallet',    desc: 'Ethereum & EVM networks',   color: '#e2761b',
+    { type: 'metamask',    icon: '🦊',  name: 'MetaMask',       category: 'wallets',    tag: 'popular', desc: 'Ethereum & EVM networks', color: '#e2761b',
       networks: [
         { id: 'eth',     label: 'Ethereum', icon: 'Ξ',  chain: 'eth' },
         { id: 'polygon', label: 'Polygon',  icon: '🔷', chain: 'eth', chainId: 137 },
         { id: 'base',    label: 'Base',     icon: '🔵', chain: 'eth', chainId: 8453 },
         { id: 'monad',   label: 'Monad',    icon: '🟣', chain: 'eth', chainId: 41454 },
       ] },
-    { type: 'sui',         icon: '💧', name: 'Sui',      category: 'wallet',    desc: 'Sui network wallet',        color: '#4DA2FF',
-      networks: [{ id: 'sui', label: 'Sui', icon: '💧', chain: 'sui' }] },
-    { type: 'solflare',    icon: '☀️', name: 'Solflare', category: 'wallet',    desc: 'Solana wallet',             color: '#fc7227',
+    { type: 'phantom',     icon: '👻',  name: 'Phantom',        category: 'wallets',    tag: 'popular', desc: 'Solana & Ethereum wallet', color: '#ab9ff2',
+      networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }, { id: 'eth', label: 'Ethereum', icon: 'Ξ', chain: 'eth' }] },
+    { type: 'solflare',    icon: '☀️',  name: 'Solflare',       category: 'wallets',    tag: '',        desc: 'Solana wallet',            color: '#fc7227',
       networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }] },
+    { type: 'sui',         icon: '💧',  name: 'Sui Wallet',     category: 'wallets',    tag: '',        desc: 'Sui network',              color: '#4DA2FF',
+      networks: [{ id: 'sui', label: 'Sui', icon: '💧', chain: 'sui' }] },
+    { type: 'ledger',      icon: '🔐',  name: 'Ledger',         category: 'wallets',    tag: 'popular', desc: 'Hardware wallet (CSV)',    color: '#00c4b4', networks: [] },
+    { type: 'trezor',      icon: '🛡️', name: 'Trezor',         category: 'wallets',    tag: '',        desc: 'Hardware wallet (CSV)',    color: '#1a9b3c', networks: [] },
+    // ── Blockchains ───────────────────────────────────────────
+    { type: 'ethereum_bc', icon: '🔷',  name: 'Ethereum',       category: 'blockchains',tag: 'popular', desc: 'EVM address import',       color: '#627EEA', networks: [{ id: 'eth', label: 'Ethereum', icon: 'Ξ', chain: 'eth' }] },
+    { type: 'solana_bc',   icon: '◎',   name: 'Solana',         category: 'blockchains',tag: 'popular', desc: 'Solana wallet import',      color: '#9945FF', networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }] },
+    { type: 'polygon_bc',  icon: '🟣',  name: 'Polygon',        category: 'blockchains',tag: '',        desc: 'Polygon (MATIC) address',   color: '#8247E5', networks: [{ id: 'polygon', label: 'Polygon', icon: '🟣', chain: 'eth', chainId: 137 }] },
+    { type: 'base_bc',     icon: '🔵',  name: 'Base',           category: 'blockchains',tag: '',        desc: 'Coinbase L2 address',       color: '#0052FF', networks: [{ id: 'base', label: 'Base', icon: '🔵', chain: 'eth', chainId: 8453 }] },
     // ── Exchanges ─────────────────────────────────────────────
-    { type: 'binance',     icon: '🟡', name: 'Binance',  category: 'exchange',  desc: 'Upload trade history CSV',  color: '#f0b90b', networks: [] },
-    { type: 'kraken',      icon: '🐙', name: 'Kraken',   category: 'exchange',  desc: 'Upload ledger CSV',         color: '#5741d9', networks: [] },
-    { type: 'bybit',       icon: '🔵', name: 'Bybit',    category: 'exchange',  desc: 'Upload order history CSV',  color: '#f7a600', networks: [] },
-    { type: 'coinbase',    icon: '🔵', name: 'Coinbase', category: 'exchange',  desc: 'Upload transaction CSV',    color: '#0052ff', networks: [] },
-    { type: 'csv',         icon: '📄', name: 'CSV File', category: 'exchange',  desc: 'Any exchange, generic CSV', color: '#64748b', networks: [] },
+    { type: 'binance',     icon: '🟡',  name: 'Binance',        category: 'exchanges',  tag: 'popular', desc: 'Upload trade history CSV',  color: '#f0b90b', networks: [] },
+    { type: 'coinbase',    icon: '🔵',  name: 'Coinbase',       category: 'exchanges',  tag: 'popular', desc: 'Upload transaction CSV',    color: '#0052ff', networks: [] },
+    { type: 'kraken',      icon: '🐙',  name: 'Kraken',         category: 'exchanges',  tag: 'popular', desc: 'Upload ledger CSV',         color: '#5741d9', networks: [] },
+    { type: 'bybit',       icon: '🔸',  name: 'Bybit',          category: 'exchanges',  tag: 'popular', desc: 'Upload order history CSV',  color: '#f7a600', networks: [] },
+    { type: 'kucoin',      icon: '🟢',  name: 'KuCoin',         category: 'exchanges',  tag: '',        desc: 'Upload trade history CSV',  color: '#26de81', networks: [] },
+    { type: 'cryptocom',   icon: '🔷',  name: 'Crypto.com',     category: 'exchanges',  tag: '',        desc: 'Upload transaction CSV',    color: '#002d74', networks: [] },
+    // ── Services ──────────────────────────────────────────────
+    { type: 'csv',         icon: '📄',  name: 'CSV / Generic',  category: 'services',   tag: '',        desc: 'Any exchange or wallet CSV', color: '#64748b', networks: [] },
   ];
+
+  // State for the add-account search modal
+  let _accSearch = '';
+  let _accFilter = 'all'; // all | exchanges | blockchains | wallets | services
 
   function renderAccounts() {
     const accounts = TaxEngine.getAccounts();
     const txns = TaxEngine.getTransactions();
-    const walletSources  = ACC_SOURCES.filter(s => s.category === 'wallet');
-    const exchangeSources = ACC_SOURCES.filter(s => s.category === 'exchange');
 
     return `
       <div class="tax-page tax-page--accounts">
         <div class="tax-page-header">
-          <h1 class="tax-page-title">Accounts</h1>
-          <span class="tax-page-subtitle">Connect wallets &amp; exchanges</span>
+          <h1 class="tax-page-title">ACCOUNTS</h1>
+          <button class="acc-add-btn" onclick="TaxUI.openAddAccountModal()">
+            <span>＋</span> Add account
+          </button>
         </div>
 
-        <!-- ── Source picker ────────────────────────────── -->
-        <div class="acc-picker-section">
-          <div class="acc-picker-group">
-            <div class="acc-picker-group-label">🔑 Wallets</div>
-            <div class="acc-picker-row">
-              ${walletSources.map(s => `
-                <button class="acc-picker-card" onclick="TaxUI.openImport('${s.type}')"
-                        style="--ac:${s.color}">
-                  <span class="acc-picker-icon">${s.icon}</span>
-                  <span class="acc-picker-name">${s.name}</span>
-                </button>`).join('')}
-            </div>
-          </div>
-          <div class="acc-picker-group">
-            <div class="acc-picker-group-label">🏦 Exchanges</div>
-            <div class="acc-picker-row">
-              ${exchangeSources.map(s => `
-                <button class="acc-picker-card" onclick="TaxUI.openImport('${s.type}')"
-                        style="--ac:${s.color}">
-                  <span class="acc-picker-icon">${s.icon}</span>
-                  <span class="acc-picker-name">${s.name}</span>
-                </button>`).join('')}
-            </div>
-          </div>
-        </div>
-
-        <!-- ── Connected accounts ───────────────────────── -->
+        <!-- ── Connected accounts table ─────────────────── -->
         ${accounts.length > 0 ? `
-        <div class="tax-section acc-connected-section">
-          <div class="tax-section-header">
-            <h2>Connected accounts</h2>
-            <span class="tax-section-count">${accounts.length}</span>
+        <div class="acc-table-wrap">
+          <div class="acc-table-header">
+            <span class="acc-th">Account</span>
+            <span class="acc-th">Synced</span>
+            <span class="acc-th">Type</span>
+            <span class="acc-th acc-th-r">Tx</span>
+            <span class="acc-th acc-th-r">Actions</span>
           </div>
-          <div class="acc-cards-grid">
-            ${accounts.map(acc => {
+          ${accounts.map(acc => {
       const st = TaxEngine.getImportStatus(acc.id);
       const cnt = txns.filter(t => t.accountId === acc.id).length;
       const src = ACC_SOURCES.find(s => s.type === acc.type) || { icon: '📂', name: acc.type, color: '#64748b' };
-      const statusMap = { synced: ['✅', 'Synced', '#4ade80'], syncing: ['⏳', 'Syncing…', '#818cf8'], partial_sync: ['⚠️', 'Partial', '#fbbf24'], failed: ['❌', 'Failed', '#f87171'], never_synced: ['⬜', 'Not synced', '#64748b'] };
-      const [stIcon, stLabel, stColor] = statusMap[st.status] || statusMap.never_synced;
-      const syncedAt = acc.lastSyncAt ? `Last synced ${timeAgoShort(acc.lastSyncAt)}` : 'Never synced';
-      return `<div class="acc-card" style="--ac:${src.color}">
-                  <div class="acc-card-top">
-                    <div class="acc-card-icon" style="background:${src.color}22;border-color:${src.color}55">${src.icon}</div>
-                    <div class="acc-card-info">
-                      <div class="acc-card-name">${acc.label || src.name}</div>
-                      ${acc.address ? `<div class="acc-card-addr">${acc.address.slice(0, 8)}…${acc.address.slice(-5)}</div>` : ''}
-                      <div class="acc-card-meta">
-                        <span style="color:${stColor}">${stIcon} ${stLabel}</span>
-                        <span class="acc-card-dot">·</span>
-                        <span>${cnt.toLocaleString()} txns</span>
-                        <span class="acc-card-dot">·</span>
-                        <span>${syncedAt}</span>
-                      </div>
+      const stMap = { synced: ['✅', 'Synced'], syncing: ['⏳', 'Syncing…'], partial_sync: ['⚠️', 'Partial'], failed: ['❌', 'Failed'], never_synced: ['—', 'Not synced'] };
+      const [stIcon, stLabel] = stMap[st.status] || stMap.never_synced;
+      const lastSync = acc.lastSyncAt ? timeAgoShort(acc.lastSyncAt) : 'Never';
+      return `<div class="acc-row">
+                  <div class="acc-row-account">
+                    <div class="acc-row-icon" style="background:${src.color}22;border:1px solid ${src.color}44">${src.icon}</div>
+                    <div>
+                      <div class="acc-row-name">${acc.label || src.name}</div>
+                      ${acc.address ? `<div class="acc-row-addr">${acc.address.slice(0, 8)}…${acc.address.slice(-5)}</div>` : ''}
                     </div>
                   </div>
-                  <div class="acc-card-actions">
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-sync">🔄 Sync</button>
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost tax-btn-danger" onclick="TaxUI.removeAccount('${acc.id}')">Remove</button>
+                  <div class="acc-row-sync">${stIcon} <span title="${lastSync}">${lastSync}</span></div>
+                  <div class="acc-row-type"><span class="tax-badge">${src.name}</span></div>
+                  <div class="acc-row-tx tax-mono">${cnt.toLocaleString()}</div>
+                  <div class="acc-row-actions">
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-sync">🔄</button>
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" style="color:#f87171" onclick="TaxUI.removeAccount('${acc.id}')">✕</button>
                   </div>
                 </div>`;
     }).join('')}
-          </div>
         </div>` : `
         <div class="acc-empty-state">
           <div class="acc-empty-icon">🔗</div>
           <div class="acc-empty-title">No accounts connected yet</div>
-          <div class="acc-empty-sub">Add a wallet or exchange above to import your transaction history.</div>
+          <div class="acc-empty-sub">Click <strong>+ Add account</strong> to import wallets and exchanges.</div>
+          <button class="acc-add-btn" style="margin-top:16px" onclick="TaxUI.openAddAccountModal()">＋ Add account</button>
         </div>`}
 
         ${renderImportModal()}
+        ${S.addAccountModal ? renderAddAccountModal() : ''}
       </div>
     `;
+  }
+
+  function renderAddAccountModal() {
+    const q = (_accSearch || '').toLowerCase();
+    const filter = _accFilter || 'all';
+    const filters = [
+      { id: 'all', label: 'All' },
+      { id: 'exchanges', label: 'Exchanges' },
+      { id: 'blockchains', label: 'Blockchains' },
+      { id: 'wallets', label: 'Wallets' },
+      { id: 'services', label: 'Services' },
+    ];
+
+    const visible = ACC_SOURCES.filter(s => {
+      if (filter !== 'all' && s.category !== filter) return false;
+      if (q && !s.name.toLowerCase().includes(q) && !s.desc.toLowerCase().includes(q)) return false;
+      return true;
+    });
+
+    const popular = visible.filter(s => s.tag === 'popular');
+    const others  = visible.filter(s => s.tag !== 'popular');
+
+    return `<div class="acc-modal-overlay" onclick="if(event.target===this)TaxUI.closeAddAccountModal()">
+      <div class="acc-modal">
+        <div class="acc-modal-header">
+          <span class="acc-modal-title">Add account</span>
+          <button class="tax-modal-close" onclick="TaxUI.closeAddAccountModal()">✕</button>
+        </div>
+        <div class="acc-modal-search-wrap">
+          <span class="acc-modal-search-icon">🔍</span>
+          <input class="acc-modal-search" id="acc-search-input" type="text"
+                 placeholder="Search for your wallet, exchange or blockchain"
+                 value="${_accSearch}"
+                 oninput="TaxUI.accSearch(this.value)" autofocus>
+        </div>
+        <div class="acc-modal-filters">
+          ${filters.map(f => `
+            <button class="acc-filter-pill ${_accFilter === f.id ? 'active' : ''}"
+                    onclick="TaxUI.accFilter('${f.id}')">${f.label}</button>`).join('')}
+        </div>
+        <div class="acc-modal-body">
+          ${popular.length > 0 ? `
+          <div class="acc-modal-section-label">MOST POPULAR</div>
+          <div class="acc-modal-grid">
+            ${popular.map(s => `
+              <button class="acc-modal-item" onclick="TaxUI.openImport('${s.type}');TaxUI.closeAddAccountModal()">
+                <div class="acc-modal-item-icon" style="background:${s.color}18;border:1px solid ${s.color}33">${s.icon}</div>
+                <div class="acc-modal-item-name">${s.name}</div>
+              </button>`).join('')}
+          </div>` : ''}
+          ${others.length > 0 ? `
+          ${popular.length > 0 ? '<div class="acc-modal-divider"></div>' : ''}
+          <div class="acc-modal-grid">
+            ${others.map(s => `
+              <button class="acc-modal-item" onclick="TaxUI.openImport('${s.type}');TaxUI.closeAddAccountModal()">
+                <div class="acc-modal-item-icon" style="background:${s.color}18;border:1px solid ${s.color}33">${s.icon}</div>
+                <div class="acc-modal-item-name">${s.name}</div>
+              </button>`).join('')}
+          </div>` : ''}
+          ${visible.length === 0 ? `<div style="text-align:center;padding:32px;color:var(--text-muted)">No results for "${_accSearch}"</div>` : ''}
+          <div class="acc-modal-request">
+            <a href="mailto:support@t-cmd.io?subject=Integration Request" class="acc-modal-request-link">
+              Request an integration ↗
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>`;
   }
 
   function renderImportStatus(st) {
@@ -1664,6 +1717,18 @@ const TaxUI = (() => {
   // ACTIONS
   // ════════════════════════════════════════════════════════════
 
+  // ── Add-Account modal (Koinly-style search + grid) ────────
+  function openAddAccountModal()  { S.addAccountModal = true; _accSearch = ''; _accFilter = 'all'; render(); }
+  function closeAddAccountModal() { S.addAccountModal = false; render(); }
+  function accSearch(q) {
+    _accSearch = q || '';
+    const grid = document.querySelector('.acc-modal-grid');
+    // Live filter without full re-render for performance
+    if (grid) { render(); return; }
+    render();
+  }
+  function accFilter(f) { _accFilter = f; render(); }
+
   function openImport(type) { S.importModal = type; S.importNetwork = null; render(); }
   function selectNetwork(netId) { S.importNetwork = netId; render(); }
   function closeImport() { S.importModal = null; S.importNetwork = null; _pendingCSVText = null; render(); }
@@ -2114,6 +2179,7 @@ const TaxUI = (() => {
   // ── Public ────────────────────────────────────────────────
   return {
     init, render, navigate, triggerPipeline,
+    openAddAccountModal, closeAddAccountModal, accSearch, accFilter,
     openImport, selectNetwork, closeImport,
     importWallet, importCSV, onCSVSelected,
     setFilter, sortTxns, setPage,

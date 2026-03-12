@@ -96,6 +96,12 @@ function switchTab(tab) {
   if (tab !== 'tax' || !window.location.hash.startsWith('#tax/')) {
     history.replaceState(null, '', '#' + tab);
   }
+  // Lazy-render admin panel when the admin tab is opened
+  if (tab === 'admin' && typeof renderAdminPanel === 'function') {
+    // Point renderAdminPanel at the dedicated page container
+    window._taxAdminTarget = document.getElementById('admin-page-content');
+    renderAdminPanel();
+  }
 }
 
 // ── Format helpers ─────────────────────────────────────

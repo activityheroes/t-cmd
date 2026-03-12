@@ -4856,3 +4856,10 @@ button.terminal-icon-link {
 /* Connected accounts redesign tweaks */
 .acc-connected-section .tax-section-header { margin-bottom: 14px; }
 
+
+/* ── Admin nav-tab panel ──────────────────────────────── */
+#panel-admin {
+  min-height: calc(100vh - var(--nav-height, 56px));
+  background: var(--bg-primary);
+}
+

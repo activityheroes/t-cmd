@@ -17,24 +17,27 @@ const TaxEngine = (() => {
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
-  // ── CoinCap asset ID mapping (api.coincap.io) — CORS-friendly ───
+  // ── CoinGecko asset ID mapping — free, no auth required ──────────
+  // CoinGecko IDs (primary price source — free tier, no auth required)
+  // Note: differs from CoinCap on BNB, AVAX, MATIC, NEAR, ARB etc.
   const CC_IDS = {
-    BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', BNB: 'binance-coin',
-    ADA: 'cardano', DOT: 'polkadot', AVAX: 'avalanche', MATIC: 'polygon',
-    LINK: 'chainlink', UNI: 'uniswap', ATOM: 'cosmos', NEAR: 'near-protocol',
-    OP: 'optimism', ARB: 'arbitrum', INJ: 'injective', APT: 'aptos',
-    SUI: 'sui', DOGE: 'dogecoin', LTC: 'litecoin', XRP: 'xrp',
+    BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', BNB: 'binancecoin',
+    ADA: 'cardano', DOT: 'polkadot', AVAX: 'avalanche-2', MATIC: 'matic-network',
+    LINK: 'chainlink', UNI: 'uniswap', ATOM: 'cosmos', NEAR: 'near',
+    OP: 'optimism', ARB: 'arbitrum', INJ: 'injective-protocol', APT: 'aptos',
+    SUI: 'sui', DOGE: 'dogecoin', LTC: 'litecoin', XRP: 'ripple',
     SHIB: 'shiba-inu', PEPE: 'pepe', WIF: 'dogwifhat', BONK: 'bonk',
-    JUP: 'jupiter', PYTH: 'pyth-network', SEI: 'sei', TIA: 'celestia',
-    STRK: 'starknet', TON: 'toncoin', // TRUMP/FARTCOIN not on CoinCap → manual price required
+    JUP: 'jupiter', PYTH: 'pyth-network', SEI: 'sei-network', TIA: 'celestia',
+    STRK: 'starknet', TON: 'the-open-network',
     USDT: 'tether', USDC: 'usd-coin', BUSD: 'binance-usd', DAI: 'dai',
-    WETH: 'weth', WBTC: 'wrapped-bitcoin', WSOL: 'solana',
+    WETH: 'weth', WBTC: 'wrapped-bitcoin', WSOL: 'wrapped-solana',
     ALGO: 'algorand', FTM: 'fantom', SAND: 'the-sandbox', MANA: 'decentraland',
-    CRV: 'curve-dao-token', AAVE: 'aave', COMP: 'compound',
-    SNX: 'synthetix-network-token', MKR: 'maker', LDO: 'lido-dao', RPL: 'rocket-pool',
+    CRV: 'curve-dao-token', AAVE: 'aave', COMP: 'compound-governance-token',
+    SNX: 'havven', MKR: 'maker', LDO: 'lido-dao', RPL: 'rocket-pool',
     RUNE: 'thorchain', GRT: 'the-graph', FIL: 'filecoin', ICP: 'internet-computer',
     VET: 'vechain', HBAR: 'hedera-hashgraph', ETC: 'ethereum-classic',
     BCH: 'bitcoin-cash', EOS: 'eos', ZEC: 'zcash', XMR: 'monero',
+    RAY: 'raydium', ORCA: 'orca', MNGO: 'mango-markets',
   };
 
   // ── Transaction Categories ────────────────────────────────
@@ -457,7 +460,7 @@ const TaxEngine = (() => {
 
   // ════════════════════════════════════════════════════════════
   // SEK PRICE PIPELINE  (CoinCap + Frankfurter — CORS-friendly)
-  // CoinCap:     api.coincap.io  — daily USD prices, batch by date range
+  // CoinGecko:   api.coingecko.com — daily USD prices, free tier no auth
   // Frankfurter: api.frankfurter.app — ECB FX rates USD→SEK, batch by year
   // No API key required. ~5–10 total requests regardless of tx count.
   // ════════════════════════════════════════════════════════════
@@ -489,20 +492,21 @@ const TaxEngine = (() => {
     }
   }
 
-  // Fetch one year of daily USD prices from CoinCap (single CORS-friendly request)
+  // Fetch one year of daily USD prices from CoinGecko /market_chart/range
   // Returns Map<YYYY-MM-DD, usdPrice>
-  async function fetchCoinCapYear(ccId, year) {
-    const startMs = Date.UTC(year, 0, 1);
-    const endMs = Date.UTC(year, 11, 31, 23, 59, 59);
+  async function fetchCoinCapYear(cgId, year) {
+    const from = Math.floor(Date.UTC(year, 0, 1) / 1000);
+    const to   = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
     try {
-      const url = `https://api.coincap.io/v2/assets/${ccId}/history?interval=d1&start=${startMs}&end=${endMs}`;
-      const r = await fetchWithTimeout(url, 10000);
+      const url = `https://api.coingecko.com/api/v3/coins/${cgId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`;
+      const r = await fetchWithTimeout(url, 12000);
       if (!r || !r.ok) return null;
       const data = await r.json();
       const map = new Map();
-      for (const pt of (data.data || [])) {
-        const d = new Date(pt.time);
-        map.set(d.toISOString().slice(0, 10), parseFloat(pt.priceUsd));
+      // data.prices = [[timestamp_ms, price], ...]
+      for (const [ts, price] of (data.prices || [])) {
+        const d = new Date(ts).toISOString().slice(0, 10);
+        map.set(d, price);
       }
       return map;
     } catch { return null; }
@@ -553,7 +557,7 @@ const TaxEngine = (() => {
         const ccId = CC_IDS[t.assetSymbol]; // only valid CoinCap IDs
         if (ccId) {
           price = cache[cacheKey(ccId, (t.date || '').slice(0, 10))] || null;
-          priceSource = price ? 'coincap' : null;
+          priceSource = price ? 'coingecko' : null;
         }
       }
 
@@ -1532,15 +1536,12 @@ const TaxEngine = (() => {
       // Live ETH price in SEK for accurate fee calculation
       let ethSEK = 28000; // safe fallback (≈ ETH $2700 × SEK 10.4)
       try {
-        const [sekRate, ethResp] = await Promise.all([
+        const [sekRate, ethMap] = await Promise.all([
           fetchLiveSEKRate(),
-          fetch('https://api.coincap.io/v2/assets/ethereum'),
+          fetchLivePrices(['ETH']),
         ]);
-        if (sekRate && ethResp?.ok) {
-          const ethData = await ethResp.json();
-          const ethUSD = parseFloat(ethData.data?.priceUsd || 0);
-          if (ethUSD > 0) ethSEK = ethUSD * sekRate;
-        }
+        const ethUSD = ethMap.get('ETH')?.priceUsd || 0;
+        if (sekRate && ethUSD > 0) ethSEK = ethUSD * sekRate;
       } catch { /* use fallback */ }
 
       // ── Etherscan paginator ──────────────────────────────────
@@ -1741,30 +1742,34 @@ const TaxEngine = (() => {
     } catch { return null; }
   }
 
-  // Fetch current USD prices + 24h change for a list of asset symbols (one bulk request)
+  // Fetch current USD prices + 24h change using CoinGecko (free, no auth required)
   // Returns Map<SYMBOL, { priceUsd: number, changePercent24Hr: number }>
   async function fetchLivePrices(symbols) {
     const result = new Map();
     const toFetch = [];
     const idToSym = {};
     for (const sym of symbols) {
-      const ccId = CC_IDS[sym.toUpperCase()];
-      if (ccId) { toFetch.push(ccId); idToSym[ccId] = sym.toUpperCase(); }
+      const cgId = CC_IDS[sym.toUpperCase()];
+      if (cgId && !idToSym[cgId]) { toFetch.push(cgId); idToSym[cgId] = sym.toUpperCase(); }
     }
     if (!toFetch.length) return result;
+
+    // CoinGecko /coins/markets — returns current_price (USD) + price_change_percentage_24h
+    const url = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${toFetch.join(',')}&order=market_cap_desc&per_page=250&page=1&sparkline=false&price_change_percentage=24h`;
     try {
-      const url = `https://api.coincap.io/v2/assets?ids=${toFetch.join(',')}`;
-      const r = await fetchWithTimeout(url, 10000);
+      const r = await fetchWithTimeout(url, 12000);
       if (!r || !r.ok) return result;
       const data = await r.json();
-      for (const asset of (data.data || [])) {
-        const sym = idToSym[asset.id];
+      for (const coin of (Array.isArray(data) ? data : [])) {
+        const sym = idToSym[coin.id];
         if (sym) result.set(sym, {
-          priceUsd: parseFloat(asset.priceUsd) || 0,
-          changePercent24Hr: parseFloat(asset.changePercent24Hr) || 0,
+          priceUsd:         parseFloat(coin.current_price) || 0,
+          changePercent24Hr: parseFloat(coin.price_change_percentage_24h) || 0,
         });
       }
-    } catch { }
+    } catch (e) {
+      console.warn('[TaxEngine] CoinGecko price fetch failed:', e.message);
+    }
     return result;
   }
 

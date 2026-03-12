@@ -437,8 +437,10 @@ function showAuthError(el, msg) {
 
 // ── Admin panel renderer ──────────────────────────────────────
 async function renderAdminPanel() {
-  // Support rendering inside the tax admin page (inline) or the drawer
-  const panel = window._taxAdminTarget || document.getElementById('admin-panel-content');
+  // Priority: dedicated admin nav page → inline tax target → legacy drawer overlay
+  window._taxAdminTarget = null; // reset so next call picks fresh target
+  const panel = document.getElementById('admin-page-content')
+    || document.getElementById('admin-panel-content');
   if (!panel) return;
   panel.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center;">Loading users...</div>`;
 

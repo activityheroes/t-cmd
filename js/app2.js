@@ -1781,7 +1781,7 @@ const App = {
     }
 
     // ── Restore tab from URL hash (e.g. refresh preserves current tab) ──
-    const VALID_TABS = ['signals', 'scanner', 'log', 'whales', 'tax'];
+    const VALID_TABS = ['signals', 'scanner', 'log', 'whales', 'tax', 'admin'];
     const hashParts = window.location.hash.replace('#', '').split('/');
     const hashTab = VALID_TABS.includes(hashParts[0]) ? hashParts[0] : 'signals';
     switchTab(hashTab);
@@ -1920,11 +1920,12 @@ const App = {
       }
     });
 
-    // Admin panel button
-    const adminBtn = document.getElementById('admin-btn');
-    if (adminBtn) {
-      if (AuthManager.isAdmin()) adminBtn.style.display = 'flex';
-      adminBtn.addEventListener('click', openAdminPanel);
+    // Show admin nav tab for admin users (the old icon button is now redundant but kept for compat)
+    if (AuthManager.isAdmin()) {
+      const adminNavTab = document.getElementById('nav-tab-admin');
+      if (adminNavTab) adminNavTab.style.display = '';
+      const adminBtn = document.getElementById('admin-btn');
+      if (adminBtn) adminBtn.style.display = 'none'; // replaced by nav tab
     }
 
     // Logout

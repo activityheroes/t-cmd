@@ -16,6 +16,7 @@ const TaxUI = (() => {
     txPage: 0,
     txPageSize: 50,
     importModal: null,
+    importNetwork: null,  // selected network when multi-network wallet is chosen
     editTxId: null,
     calOpen: false,
     calField: null,
@@ -29,6 +30,7 @@ const TaxUI = (() => {
     portfolioHist: null,   // time-series history for chart
     portfolioRange: '1W',   // selected time range
     portfolioCharts: {},     // Chart.js instances { main, alloc, perf }
+    portfolioRefreshTimer: null, // auto-refresh interval handle
     // Transaction selection
     selectedTxIds: new Set(),
     userName: '',
@@ -118,12 +120,14 @@ const TaxUI = (() => {
     const txns = TaxEngine.getTransactions();
     const reviewCount = TaxEngine.getReviewIssues(txns).length;
     const years = TaxEngine.getAvailableTaxYears();
+    const isAdmin = typeof AuthManager !== 'undefined' && AuthManager.isAdmin?.();
     const pages = [
-      { id: 'portfolio', icon: '💼', label: 'Portfolio' },
-      { id: 'accounts', icon: '🔗', label: 'Accounts' },
-      { id: 'transactions', icon: '📋', label: 'Transactions' },
-      { id: 'review', icon: '🔍', label: 'Review' },
-      { id: 'reports', icon: '📊', label: 'Reports' },
+      { id: 'portfolio',     icon: '💼', label: 'Portfolio' },
+      { id: 'accounts',      icon: '🔗', label: 'Accounts' },
+      { id: 'transactions',  icon: '📋', label: 'Transactions' },
+      { id: 'review',        icon: '🔍', label: 'Review' },
+      { id: 'reports',       icon: '📊', label: 'Reports' },
+      ...(isAdmin ? [{ id: 'admin', icon: '⚙️', label: 'Admin' }] : []),
     ];
     return `
       <div class="tax-logo">
@@ -168,6 +172,7 @@ const TaxUI = (() => {
       case 'transactions': return renderTransactions();
       case 'review': return renderReview();
       case 'reports': return renderReports();
+      case 'admin':   return renderAdminPage();
       default: return renderPortfolio();
     }
   }
@@ -249,7 +254,12 @@ const TaxUI = (() => {
 
           <!-- Right: summary panel -->
           <div class="tax-port-summary-panel">
-            <div class="tax-port-sum-title">Performance</div>
+            <div class="tax-port-sum-title">Performance <span class="tax-port-auto-tag">🔄 Auto</span></div>
+            <div class="tax-port-sum-row">
+              <span class="tax-port-sum-lbl">24h P&amp;L</span>
+              <span class="tax-port-sum-val" id="tax-ps-24h"><span class="tax-port-loading-val">—</span></span>
+            </div>
+            <div class="tax-port-sum-div"></div>
             <div class="tax-port-sum-row">
               <span class="tax-port-sum-lbl">Total return</span>
               <span class="tax-port-sum-val" id="tax-ps-return">${fmtVal(totalReturn)}</span>
@@ -365,7 +375,7 @@ const TaxUI = (() => {
                   <th class="ta-r">Cost</th>
                   <th class="ta-r">Holdings</th>
                   <th class="ta-r">Profit / Loss</th>
-                  <th class="ta-r">Last 24h</th>
+                  <th class="ta-r">24h Change</th>
                 </tr></thead>
                 <tbody id="tax-assets-tbody">
                   ${sortedHoldings.map(renderAssetRow).join('')}
@@ -395,6 +405,7 @@ const TaxUI = (() => {
     const ugl = h.unrealizedSEK;
     const uglPct = h.unrealizedPct;
     const ch24 = h.changePercent24Hr;
+    const ch24sek = h.change24hSEK;
     // Use resolved (clean) symbol for the CoinCap icon URL
     const icon = `https://assets.coincap.io/assets/icons/${displaySym.toLowerCase()}@2x.png`;
     return `<tr>
@@ -423,7 +434,8 @@ const TaxUI = (() => {
       </td>
       <td class="ta-r">
         ${ch24 !== null
-        ? `<span class="tax-24h-badge ${ch24 >= 0 ? 'up' : 'down'}">${ch24 >= 0 ? '+' : ''}${ch24.toFixed(2)}%</span>`
+        ? `<div class="tax-mono tax-24h-sek ${ch24 >= 0 ? 'tax-port-pos' : 'tax-port-neg'}">${ch24sek >= 0 ? '+' : ''}${TaxEngine.formatSEK(ch24sek)}</div>
+           <div class="tax-24h-pct ${ch24 >= 0 ? 'tax-port-pos' : 'tax-port-neg'}">${ch24 >= 0 ? '+' : ''}${ch24.toFixed(2)}%</div>`
         : '<span class="tax-port-loading-val">—</span>'}
       </td>
     </tr>`;
@@ -491,6 +503,18 @@ const TaxUI = (() => {
     S.portfolioCharts.alloc = _drawAllocChart(canvasAlloc, S.portfolioSnap);
     S.portfolioCharts.perf = _drawPerfChart(canvasPerf, S.portfolioSnap);
 
+    // Auto-refresh: re-fetch live prices every 5 minutes
+    if (S.portfolioRefreshTimer) clearInterval(S.portfolioRefreshTimer);
+    S.portfolioRefreshTimer = setInterval(async () => {
+      if (S.page !== 'portfolio') {
+        clearInterval(S.portfolioRefreshTimer);
+        S.portfolioRefreshTimer = null;
+        return;
+      }
+      S.portfolioSnap = null; // force full re-fetch
+      await initPortfolioCharts();
+    }, 5 * 60 * 1000);
+
     // Async: look up human-readable names for any holdings still showing
     // raw mint-prefix symbols (e.g. "A2CAQTDE") via DexScreener (cached 7 days).
     if (S.portfolioSnap) {
@@ -550,6 +574,15 @@ const TaxUI = (() => {
     const perfLoading = document.getElementById('tax-perf-loading');
     if (perfLoading) perfLoading.style.display = 'none';
 
+    // Compute total 24h P&L from holdings
+    const total24hSEK = snap.holdings.reduce((s, h) => s + (h.change24hSEK ?? 0), 0);
+    const has24h = snap.holdings.some(h => h.change24hSEK != null);
+    if (has24h) {
+      const el24 = document.getElementById('tax-ps-24h');
+      if (el24) {
+        el24.innerHTML = `<span class="${total24hSEK >= 0 ? 'tax-port-pos' : 'tax-port-neg'}">${total24hSEK >= 0 ? '+' : ''}${TaxEngine.formatSEK(total24hSEK)}</span>`;
+      }
+    }
     set('tax-port-total-val', fmt(displayTotalSEK));
     set('tax-ps-return', fmt(totalReturn));
     fmtClass(snap.totalUnrealizedSEK, 'tax-ps-unrealized');
@@ -864,83 +897,113 @@ const TaxUI = (() => {
   // ════════════════════════════════════════════════════════════
   // ACCOUNTS PAGE
   // ════════════════════════════════════════════════════════════
+
+  // All account source types (wallets + exchanges)
+  const ACC_SOURCES = [
+    // ── Wallets ──────────────────────────────────────────────
+    { type: 'phantom',     icon: '👻', name: 'Phantom',  category: 'wallet',    desc: 'Solana & Ethereum wallet',  color: '#ab9ff2',
+      networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }, { id: 'eth', label: 'Ethereum', icon: 'Ξ', chain: 'eth' }] },
+    { type: 'metamask',    icon: '🦊', name: 'MetaMask', category: 'wallet',    desc: 'Ethereum & EVM networks',   color: '#e2761b',
+      networks: [
+        { id: 'eth',     label: 'Ethereum', icon: 'Ξ',  chain: 'eth' },
+        { id: 'polygon', label: 'Polygon',  icon: '🔷', chain: 'eth', chainId: 137 },
+        { id: 'base',    label: 'Base',     icon: '🔵', chain: 'eth', chainId: 8453 },
+        { id: 'monad',   label: 'Monad',    icon: '🟣', chain: 'eth', chainId: 41454 },
+      ] },
+    { type: 'sui',         icon: '💧', name: 'Sui',      category: 'wallet',    desc: 'Sui network wallet',        color: '#4DA2FF',
+      networks: [{ id: 'sui', label: 'Sui', icon: '💧', chain: 'sui' }] },
+    { type: 'solflare',    icon: '☀️', name: 'Solflare', category: 'wallet',    desc: 'Solana wallet',             color: '#fc7227',
+      networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }] },
+    // ── Exchanges ─────────────────────────────────────────────
+    { type: 'binance',     icon: '🟡', name: 'Binance',  category: 'exchange',  desc: 'Upload trade history CSV',  color: '#f0b90b', networks: [] },
+    { type: 'kraken',      icon: '🐙', name: 'Kraken',   category: 'exchange',  desc: 'Upload ledger CSV',         color: '#5741d9', networks: [] },
+    { type: 'bybit',       icon: '🔵', name: 'Bybit',    category: 'exchange',  desc: 'Upload order history CSV',  color: '#f7a600', networks: [] },
+    { type: 'coinbase',    icon: '🔵', name: 'Coinbase', category: 'exchange',  desc: 'Upload transaction CSV',    color: '#0052ff', networks: [] },
+    { type: 'csv',         icon: '📄', name: 'CSV File', category: 'exchange',  desc: 'Any exchange, generic CSV', color: '#64748b', networks: [] },
+  ];
+
   function renderAccounts() {
     const accounts = TaxEngine.getAccounts();
     const txns = TaxEngine.getTransactions();
-
-    const SOURCES = [
-      { type: 'phantom', icon: '👻', name: 'Phantom (SOL)', desc: 'Solana wallet — imports full history via Helius', color: '#ab9ff2' },
-      { type: 'phantom_eth', icon: '👻', name: 'Phantom (ETH)', desc: 'Ethereum wallet via Phantom — imports via Etherscan', color: '#627EEA' },
-      { type: 'metamask', icon: '🦊', name: 'MetaMask', desc: 'Ethereum wallet — imports via Etherscan', color: '#e2761b' },
-      { type: 'binance', icon: '🟡', name: 'Binance', desc: 'Upload full trade history CSV from Binance', color: '#f0b90b' },
-      { type: 'kraken', icon: '🐙', name: 'Kraken', desc: 'Upload full ledger CSV from Kraken', color: '#5741d9' },
-      { type: 'bybit', icon: '🔵', name: 'Bybit', desc: 'Upload full trade history CSV from Bybit', color: '#f7a600' },
-      { type: 'coinbase', icon: '🔵', name: 'Coinbase', desc: 'Upload transaction history CSV from Coinbase', color: '#0052ff' },
-      { type: 'csv', icon: '📄', name: 'CSV Upload', desc: 'Generic CSV — any exchange or wallet', color: '#64748b' },
-    ];
+    const walletSources  = ACC_SOURCES.filter(s => s.category === 'wallet');
+    const exchangeSources = ACC_SOURCES.filter(s => s.category === 'exchange');
 
     return `
-      <div class="tax-page">
+      <div class="tax-page tax-page--accounts">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Accounts</h1>
-          <span class="tax-page-subtitle">Wallets and exchanges</span>
+          <span class="tax-page-subtitle">Connect wallets &amp; exchanges</span>
         </div>
 
-        <div class="tax-info-box">
-          <span>ℹ️</span>
-          <span>Import <strong>full transaction history</strong> from every account where you have traded or held crypto. Skatteverket requires all acquisitions to calculate correct cost basis under Genomsnittsmetoden.</span>
-        </div>
-
-        <div class="tax-section">
-          <div class="tax-section-header"><h2>Add Account</h2></div>
-          <div class="tax-account-grid">
-            ${SOURCES.map(a => `
-              <div class="tax-account-card" onclick="TaxUI.openImport('${a.type}')">
-                <div class="tax-ac-icon" style="background:${a.color}22;border-color:${a.color}44">${a.icon}</div>
-                <div class="tax-ac-info">
-                  <div class="tax-ac-name">${a.name}</div>
-                  <div class="tax-ac-desc">${a.desc}</div>
-                </div>
-                <button class="tax-btn tax-btn-sm tax-btn-primary">Connect</button>
-              </div>`).join('')}
+        <!-- ── Source picker ────────────────────────────── -->
+        <div class="acc-picker-section">
+          <div class="acc-picker-group">
+            <div class="acc-picker-group-label">🔑 Wallets</div>
+            <div class="acc-picker-row">
+              ${walletSources.map(s => `
+                <button class="acc-picker-card" onclick="TaxUI.openImport('${s.type}')"
+                        style="--ac:${s.color}">
+                  <span class="acc-picker-icon">${s.icon}</span>
+                  <span class="acc-picker-name">${s.name}</span>
+                </button>`).join('')}
+            </div>
+          </div>
+          <div class="acc-picker-group">
+            <div class="acc-picker-group-label">🏦 Exchanges</div>
+            <div class="acc-picker-row">
+              ${exchangeSources.map(s => `
+                <button class="acc-picker-card" onclick="TaxUI.openImport('${s.type}')"
+                        style="--ac:${s.color}">
+                  <span class="acc-picker-icon">${s.icon}</span>
+                  <span class="acc-picker-name">${s.name}</span>
+                </button>`).join('')}
+            </div>
           </div>
         </div>
 
+        <!-- ── Connected accounts ───────────────────────── -->
         ${accounts.length > 0 ? `
-        <div class="tax-section">
-          <div class="tax-section-header"><h2>Connected</h2><span class="tax-section-count">${accounts.length}</span></div>
-          <div class="tax-table-wrap"><table class="tax-table">
-            <thead><tr><th>Account</th><th>Type</th><th>Status</th><th class="ta-r">Transactions</th><th>Date range</th><th></th></tr></thead>
-            <tbody>
-              ${accounts.map(acc => {
+        <div class="tax-section acc-connected-section">
+          <div class="tax-section-header">
+            <h2>Connected accounts</h2>
+            <span class="tax-section-count">${accounts.length}</span>
+          </div>
+          <div class="acc-cards-grid">
+            ${accounts.map(acc => {
       const st = TaxEngine.getImportStatus(acc.id);
       const cnt = txns.filter(t => t.accountId === acc.id).length;
-      const src = SOURCES.find(s => s.type === acc.type) || { icon: '📂', name: acc.type };
-      return `<tr>
-                  <td>
-                    <div class="tax-asset-cell">
-                      <span>${src.icon}</span>
-                      <div>
-                        <div class="tax-acc-name">${acc.label || acc.type}</div>
-                        ${acc.address ? `<div class="tax-acc-addr">${acc.address.slice(0, 10)}…${acc.address.slice(-6)}</div>` : ''}
+      const src = ACC_SOURCES.find(s => s.type === acc.type) || { icon: '📂', name: acc.type, color: '#64748b' };
+      const statusMap = { synced: ['✅', 'Synced', '#4ade80'], syncing: ['⏳', 'Syncing…', '#818cf8'], partial_sync: ['⚠️', 'Partial', '#fbbf24'], failed: ['❌', 'Failed', '#f87171'], never_synced: ['⬜', 'Not synced', '#64748b'] };
+      const [stIcon, stLabel, stColor] = statusMap[st.status] || statusMap.never_synced;
+      const syncedAt = acc.lastSyncAt ? `Last synced ${timeAgoShort(acc.lastSyncAt)}` : 'Never synced';
+      return `<div class="acc-card" style="--ac:${src.color}">
+                  <div class="acc-card-top">
+                    <div class="acc-card-icon" style="background:${src.color}22;border-color:${src.color}55">${src.icon}</div>
+                    <div class="acc-card-info">
+                      <div class="acc-card-name">${acc.label || src.name}</div>
+                      ${acc.address ? `<div class="acc-card-addr">${acc.address.slice(0, 8)}…${acc.address.slice(-5)}</div>` : ''}
+                      <div class="acc-card-meta">
+                        <span style="color:${stColor}">${stIcon} ${stLabel}</span>
+                        <span class="acc-card-dot">·</span>
+                        <span>${cnt.toLocaleString()} txns</span>
+                        <span class="acc-card-dot">·</span>
+                        <span>${syncedAt}</span>
                       </div>
                     </div>
-                  </td>
-                  <td><span class="tax-badge">${src.name}</span></td>
-                  <td>${renderImportStatus(st)}</td>
-                  <td class="ta-r tax-mono">${cnt.toLocaleString()}</td>
-                  <td class="tax-muted tax-nowrap" style="font-size:11px">
-                    ${st.startDate ? fmtDate(st.startDate) + ' → ' + fmtDate(st.endDate || new Date().toISOString()) : '—'}
-                  </td>
-                  <td class="ta-r" style="white-space:nowrap">
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-import all transactions">🔄</button>
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.removeAccount('${acc.id}')">Remove</button>
-                  </td>
-                </tr>`;
+                  </div>
+                  <div class="acc-card-actions">
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-sync">🔄 Sync</button>
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost tax-btn-danger" onclick="TaxUI.removeAccount('${acc.id}')">Remove</button>
+                  </div>
+                </div>`;
     }).join('')}
-            </tbody>
-          </table></div>
-        </div>` : ''}
+          </div>
+        </div>` : `
+        <div class="acc-empty-state">
+          <div class="acc-empty-icon">🔗</div>
+          <div class="acc-empty-title">No accounts connected yet</div>
+          <div class="acc-empty-sub">Add a wallet or exchange above to import your transaction history.</div>
+        </div>`}
 
         ${renderImportModal()}
       </div>
@@ -962,9 +1025,37 @@ const TaxUI = (() => {
   // ── Import Modals ─────────────────────────────────────────
   function renderImportModal() {
     if (!S.importModal) return '';
-    const wallets = { phantom: 'sol', phantom_eth: 'eth', metamask: 'eth' };
-    if (wallets[S.importModal]) return renderWalletModal(S.importModal, wallets[S.importModal]);
+    const src = ACC_SOURCES.find(s => s.type === S.importModal);
+    // If wallet with multiple networks and no network selected yet → show network picker
+    if (src?.category === 'wallet' && src.networks?.length > 1 && !S.importNetwork) {
+      return renderNetworkPickerModal(src);
+    }
+    // Wallet with single network OR network already selected
+    if (src?.category === 'wallet') {
+      const net = src.networks?.find(n => n.id === S.importNetwork) || src.networks?.[0];
+      return renderWalletModal(S.importModal, net?.chain || 'eth', net);
+    }
     return renderCSVModal(S.importModal);
+  }
+
+  function renderNetworkPickerModal(src) {
+    return `<div class="tax-modal-overlay" onclick="if(event.target===this)TaxUI.closeImport()">
+      <div class="tax-modal tax-modal--sm">
+        <div class="tax-modal-header">
+          <span>${src.icon} ${src.name} — Choose Network</span>
+          <button class="tax-modal-close" onclick="TaxUI.closeImport()">✕</button>
+        </div>
+        <div class="tax-modal-body">
+          <div class="acc-net-picker">
+            ${src.networks.map(n => `
+              <button class="acc-net-btn" onclick="TaxUI.selectNetwork('${n.id}')">
+                <span class="acc-net-icon">${n.icon}</span>
+                <span class="acc-net-label">${n.label}</span>
+              </button>`).join('')}
+          </div>
+        </div>
+      </div>
+    </div>`;
   }
 
   const MODAL_INSTRUCTIONS = {
@@ -1000,40 +1091,57 @@ const TaxUI = (() => {
     },
   };
 
-  function renderWalletModal(type, chain) {
-    const names = { sol: 'Phantom (Solana)', eth: type === 'phantom_eth' ? 'Phantom (Ethereum)' : 'MetaMask (Ethereum)' };
-    const icons = { sol: '👻', eth: '🦊' };
-    return `<div class="tax-modal-overlay">
+  function renderWalletModal(type, chain, net) {
+    const src = ACC_SOURCES.find(s => s.type === type) || {};
+    const netLabel = net ? net.label : (chain === 'sol' ? 'Solana' : 'Ethereum');
+    const netIcon  = net ? net.icon  : (chain === 'sol' ? '◎' : 'Ξ');
+    const addrPlaceholder = chain === 'sol' ? 'Solana public key (base58)' :
+      chain === 'sui' ? 'Sui address (0x…)' : '0x… Ethereum address';
+
+    const isSui = chain === 'sui';
+    const chainId = net?.chainId || null;
+
+    return `<div class="tax-modal-overlay" onclick="if(event.target===this)TaxUI.closeImport()">
       <div class="tax-modal">
-        <div class="tax-modal-header"><span>${icons[chain]} Connect ${names[chain]}</span><button class="tax-modal-close" onclick="TaxUI.closeImport()">✕</button></div>
+        <div class="tax-modal-header">
+          <div style="display:flex;align-items:center;gap:8px">
+            ${src.networks?.length > 1 ? `<button class="tax-modal-back" onclick="TaxUI.selectNetwork(null)" title="Back">←</button>` : ''}
+            <span>${src.icon} ${src.name} <span class="acc-net-badge">${netIcon} ${netLabel}</span></span>
+          </div>
+          <button class="tax-modal-close" onclick="TaxUI.closeImport()">✕</button>
+        </div>
         <div class="tax-modal-body">
           <div class="tax-info-box" style="margin-bottom:14px">
             <span>🔒</span>
-            <span>Read-only — your private keys are <strong>never</strong> accessed or stored. Only your public address is used to fetch transaction history.</span>
+            <span>Read-only — private keys are <strong>never</strong> accessed. Only the public address is used.</span>
           </div>
           <div class="tax-form-group">
             <label>Public Wallet Address</label>
-            <input type="text" id="tax-wallet-addr" class="tax-input" placeholder="${chain === 'eth' ? '0x...' : 'Solana public key'}">
+            <input type="text" id="tax-wallet-addr" class="tax-input" placeholder="${addrPlaceholder}">
           </div>
           <div class="tax-form-group">
-            <label>Label (optional)</label>
-            <input type="text" id="tax-wallet-label" class="tax-input" placeholder="My ${names[chain]} wallet">
+            <label>Label <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
+            <input type="text" id="tax-wallet-label" class="tax-input" placeholder="e.g. My ${netLabel} wallet">
           </div>
           ${chain === 'sol' && !localStorage.getItem('tcmd_helius_key') ? `
-          <div class="tax-warn-box">⚠️ No Helius API key found. Add it in the Admin panel to enable full Solana history import.</div>` : ''}
+          <div class="tax-warn-box">⚠️ No Helius API key. Add it in Admin → API Keys to enable Solana import.</div>` : ''}
           ${chain === 'eth' && !localStorage.getItem('tcmd_etherscan_key') && !window.TCMD_KEYS?.etherscan ? `
           <div class="tax-warn-box" style="flex-direction:column;gap:4px">
-            <div><strong>⚠️ Etherscan API key required for MetaMask import.</strong></div>
+            <div><strong>⚠️ Etherscan API key required for EVM wallet import.</strong></div>
             <div style="color:#fde68a;font-weight:400">${typeof AuthManager !== 'undefined' && AuthManager.isAdmin()
-          ? `Go to <strong>Admin → API Keys → 🦊 Etherscan</strong> to add your key. Get a free key at <a href="https://etherscan.io/myapikey" target="_blank" style="color:#818cf8;text-decoration:underline">etherscan.io/myapikey</a>`
-          : `Contact your administrator to configure the Etherscan API key.`
-        }</div>
+              ? `Go to <strong>Admin → API Keys → 🦊 Etherscan</strong> to add your key.`
+              : 'Contact your administrator to configure the Etherscan API key.'
+            }</div>
           </div>` : ''}
+          ${isSui ? `<div class="tax-warn-box">⚠️ Sui import coming soon — history will be fetched via Sui indexer.</div>` : ''}
           <div id="tax-import-status"></div>
         </div>
         <div class="tax-modal-footer">
           <button class="tax-btn tax-btn-ghost" onclick="TaxUI.closeImport()">Cancel</button>
-          <button class="tax-btn tax-btn-primary" onclick="TaxUI.importWallet('${chain}')">Import Full History</button>
+          <button class="tax-btn tax-btn-primary" onclick="TaxUI.importWallet('${chain}',${chainId ? `'${chainId}'` : 'null'})"
+            ${isSui ? 'disabled title="Sui import coming soon"' : ''}>
+            Import Full History
+          </button>
         </div>
       </div></div>`;
   }
@@ -1528,11 +1636,37 @@ const TaxUI = (() => {
   const ROWS_PER_K4_FORM = 7; // for page break marker
 
   // ════════════════════════════════════════════════════════════
+  // ADMIN PAGE  (inline replica of the admin panel for admins)
+  // ════════════════════════════════════════════════════════════
+
+  function renderAdminPage() {
+    // Kick off the async admin panel render in the container after mount
+    setTimeout(() => {
+      const el = document.getElementById('tax-admin-inner');
+      if (el && typeof renderAdminPanel === 'function') renderAdminPanel();
+      // Patch renderAdminPanel to target tax-admin-inner when we're in the tax admin page
+      if (el) { window._taxAdminTarget = el; }
+    }, 0);
+
+    return `
+      <div class="tax-page tax-page--admin">
+        <div class="tax-page-header">
+          <h1 class="tax-page-title">Admin</h1>
+          <span class="tax-page-subtitle">Users, API keys, and system settings</span>
+        </div>
+        <div id="tax-admin-inner" class="tax-admin-inner">
+          <div style="color:var(--text-muted);padding:24px;text-align:center">Loading admin panel…</div>
+        </div>
+      </div>`;
+  }
+
+  // ════════════════════════════════════════════════════════════
   // ACTIONS
   // ════════════════════════════════════════════════════════════
 
-  function openImport(type) { S.importModal = type; render(); }
-  function closeImport() { S.importModal = null; _pendingCSVText = null; render(); }
+  function openImport(type) { S.importModal = type; S.importNetwork = null; render(); }
+  function selectNetwork(netId) { S.importNetwork = netId; render(); }
+  function closeImport() { S.importModal = null; S.importNetwork = null; _pendingCSVText = null; render(); }
 
   function setFilter(key, val) { S.txFilter[key] = val; S.txPage = 0; reRenderMain(); }
   function sortTxns(field) {
@@ -1698,10 +1832,17 @@ const TaxUI = (() => {
     setTimeout(triggerPipeline, 500);
   }
 
-  async function importWallet(chain) {
+  async function importWallet(chain, chainId) {
     const addr = document.getElementById('tax-wallet-addr')?.value?.trim();
     const label = document.getElementById('tax-wallet-label')?.value?.trim() || '';
     if (!addr) { showTaxToast('⚠️', 'Enter wallet address'); return; }
+
+    // Determine account type from current modal source + selected network
+    const src = ACC_SOURCES.find(s => s.type === S.importModal);
+    const net = src?.networks?.find(n => n.id === S.importNetwork) || src?.networks?.[0];
+    const accType = chain === 'sol' ? (S.importModal || 'phantom')
+      : chain === 'sui' ? 'sui'
+      : (S.importModal === 'phantom' ? 'phantom_eth' : (S.importModal || 'metamask'));
 
     const st = document.getElementById('tax-import-status');
     if (st) st.innerHTML = '<div class="tax-import-status-loading">⏳ Fetching full transaction history…</div>';
@@ -1709,12 +1850,21 @@ const TaxUI = (() => {
     const btn = document.querySelector('.tax-modal-footer .tax-btn-primary');
     if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
 
-    const acc = TaxEngine.addAccount({ type: chain === 'eth' ? 'metamask' : 'phantom', label, address: addr });
+    const acc = TaxEngine.addAccount({
+      type: accType,
+      label: label || (net ? `${src?.name} (${net.label})` : src?.name) || accType,
+      address: addr,
+      network: net?.id || chain,
+    });
     let res;
     try {
       const onProgress = p => {
         if (st) st.innerHTML = `<div class="tax-import-status-loading">⏳ ${p.msg}</div>`;
       };
+      if (chain === 'sui') {
+        // Sui: placeholder — will be implemented when Sui indexer is added
+        throw new Error('Sui import is not yet implemented. Coming soon!');
+      }
       res = chain === 'sol'
         ? await TaxEngine.importSolanaWallet(addr, acc.id, onProgress)
         : await TaxEngine.importEthWallet(addr, acc.id, onProgress);
@@ -1731,7 +1881,9 @@ const TaxUI = (() => {
     }
 
     const added = TaxEngine.addTransactions(res.txns || []);
-    S.importModal = null; S.taxResult = null; S.page = 'transactions';
+    // Update lastSyncAt
+    TaxEngine.updateAccount?.(acc.id, { lastSyncAt: new Date().toISOString() });
+    S.importModal = null; S.importNetwork = null; S.taxResult = null; S.page = 'transactions';
     render();
     showTaxToast('✅', `Imported ${added} transactions`, `Total fetched: ${res.totalFetched || 0}`);
     setTimeout(triggerPipeline, 500);
@@ -1950,7 +2102,10 @@ const TaxUI = (() => {
   }
 
   function navigate(page) {
-    if (page !== 'portfolio') destroyPortfolioCharts();
+    if (page !== 'portfolio') {
+      destroyPortfolioCharts();
+      if (S.portfolioRefreshTimer) { clearInterval(S.portfolioRefreshTimer); S.portfolioRefreshTimer = null; }
+    }
     S.page = page;
     history.replaceState(null, '', '#tax/' + page);
     render();
@@ -1959,7 +2114,7 @@ const TaxUI = (() => {
   // ── Public ────────────────────────────────────────────────
   return {
     init, render, navigate, triggerPipeline,
-    openImport, closeImport,
+    openImport, selectNetwork, closeImport,
     importWallet, importCSV, onCSVSelected,
     setFilter, sortTxns, setPage,
     openCal, closeCal, calNav, selectDate,

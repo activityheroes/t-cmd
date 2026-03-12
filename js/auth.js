@@ -130,66 +130,115 @@ function renderAuthPage() {
 }
 
 function buildLoginForm() {
-  const modeBadge = SUPABASE_READY
-    ? ''
-    : `<div class="demo-mode-badge">⚠️ Demo Mode (localStorage) — <a href="js/config.js" target="_blank">Configure Supabase</a></div>`;
+  const demoMode = !SUPABASE_READY;
   return `
-    <div class="auth-container">
-        <div class="auth-logo">
-            <div class="auth-logo-icon">⚡</div>
-            <div class="auth-logo-name">T-CMD</div>
-            <div class="auth-logo-sub">Trade Command</div>
+    <div class="auth-wrap">
+      <!-- Left decorative panel -->
+      <div class="auth-brand-panel">
+        <div class="auth-brand-content">
+          <div class="auth-brand-logo">⚡</div>
+          <div class="auth-brand-name">T-CMD</div>
+          <div class="auth-brand-tagline">Trade Command</div>
+          <div class="auth-brand-features">
+            <div class="auth-feat">📡 Real-time signals</div>
+            <div class="auth-feat">🔍 Meme scanner</div>
+            <div class="auth-feat">🇸🇪 K4 Tax calculator</div>
+            <div class="auth-feat">🐋 Whale tracker</div>
+          </div>
         </div>
-        ${modeBadge}
-        <div class="auth-card" id="auth-card">
-            <div class="auth-tabs">
-                <button class="auth-tab active" id="tab-login" onclick="switchAuthTab('login')">Sign In</button>
-                <button class="auth-tab" id="tab-register" onclick="switchAuthTab('register')">Request Access</button>
+      </div>
+
+      <!-- Right form panel -->
+      <div class="auth-form-panel">
+        <div class="auth-form-inner">
+          <div class="auth-form-logo">
+            <span class="auth-form-logo-icon">⚡</span>
+            <span class="auth-form-logo-name">T-CMD</span>
+          </div>
+
+          ${demoMode ? `<div class="auth-demo-banner">⚠️ Demo mode — <a href="js/config.js" target="_blank">configure Supabase</a> for full access</div>` : ''}
+
+          <!-- Tab switcher -->
+          <div class="auth-toggle" id="auth-toggle">
+            <button class="auth-toggle-btn active" id="tab-login" onclick="switchAuthTab('login')">Sign In</button>
+            <button class="auth-toggle-btn" id="tab-register" onclick="switchAuthTab('register')">Request Access</button>
+            <div class="auth-toggle-slider" id="auth-toggle-slider"></div>
+          </div>
+
+          <!-- Sign In form -->
+          <div id="auth-login-form" class="auth-form-section">
+            <h2 class="auth-form-title">Welcome back</h2>
+            <p class="auth-form-sub">Sign in to your account to continue.</p>
+
+            <div class="auth-field-group">
+              <label class="auth-field-label">Email address</label>
+              <input class="auth-field-input" type="email" id="auth-email"
+                     placeholder="you@example.com" autocomplete="email">
+            </div>
+            <div class="auth-field-group">
+              <label class="auth-field-label">Password</label>
+              <div class="auth-input-wrap">
+                <input class="auth-field-input" type="password" id="auth-password"
+                       placeholder="••••••••" autocomplete="current-password">
+                <button class="auth-eye-btn" type="button" onclick="toggleAuthPwd('auth-password',this)"
+                        title="Show/hide password">👁</button>
+              </div>
             </div>
 
-            <!-- Login form -->
-            <div id="auth-login-form">
-                <div class="auth-field">
-                    <label class="auth-label">Email</label>
-                    <input class="auth-input" type="email" id="auth-email" placeholder="you@example.com" autocomplete="email">
-                </div>
-                <div class="auth-field">
-                    <label class="auth-label">Password</label>
-                    <input class="auth-input" type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password">
-                </div>
-                <div class="auth-error" id="auth-error" style="display:none;"></div>
-                <button class="btn btn-primary auth-btn" id="auth-submit" onclick="handleLogin()">
-                    <span id="auth-btn-text">Sign In</span>
-                </button>
-                <div class="auth-divider"><span>or</span></div>
-                <button class="btn btn-outline auth-btn" onclick="handlePasskeyLogin()" style="gap:8px;">
-                    🔑 Sign In with Passkey
-                </button>
+            <div class="auth-error" id="auth-error" style="display:none"></div>
+
+            <button class="auth-submit-btn" id="auth-submit" onclick="handleLogin()">
+              <span id="auth-btn-text">Sign In →</span>
+            </button>
+
+            <div class="auth-sep"><span>or continue with</span></div>
+
+            <button class="auth-passkey-btn" onclick="handlePasskeyLogin()">
+              🔑 Passkey
+            </button>
+          </div>
+
+          <!-- Request Access form -->
+          <div id="auth-register-form" class="auth-form-section" style="display:none">
+            <h2 class="auth-form-title">Request access</h2>
+            <p class="auth-form-sub">Fill in your details — an admin will review your request.</p>
+
+            <div class="auth-field-group">
+              <label class="auth-field-label">Full name</label>
+              <input class="auth-field-input" type="text" id="reg-name" placeholder="Your name">
+            </div>
+            <div class="auth-field-group">
+              <label class="auth-field-label">Email address</label>
+              <input class="auth-field-input" type="email" id="reg-email" placeholder="you@example.com">
+            </div>
+            <div class="auth-field-group">
+              <label class="auth-field-label">Create password <span class="auth-field-hint">min 6 chars</span></label>
+              <div class="auth-input-wrap">
+                <input class="auth-field-input" type="password" id="reg-password"
+                       placeholder="••••••••" autocomplete="new-password">
+                <button class="auth-eye-btn" type="button" onclick="toggleAuthPwd('reg-password',this)"
+                        title="Show/hide password">👁</button>
+              </div>
             </div>
 
-            <!-- Register form -->
-            <div id="auth-register-form" style="display:none;">
-                <div class="auth-field">
-                    <label class="auth-label">Full Name</label>
-                    <input class="auth-input" type="text" id="reg-name" placeholder="Your name">
-                </div>
-                <div class="auth-field">
-                    <label class="auth-label">Email</label>
-                    <input class="auth-input" type="email" id="reg-email" placeholder="you@example.com">
-                </div>
-                <div class="auth-field">
-                    <label class="auth-label">Create Password</label>
-                    <input class="auth-input" type="password" id="reg-password" placeholder="Min 6 characters" autocomplete="new-password">
-                </div>
-                <div class="auth-error" id="reg-error" style="display:none;"></div>
-                <button class="btn btn-primary auth-btn" onclick="handleRegister()">
-                    <span>Request Access</span>
-                </button>
-                <p class="auth-hint">Your request will be reviewed by an admin. Once approved, sign in with your email and the password above.</p>
-            </div>
+            <div class="auth-error" id="reg-error" style="display:none"></div>
+
+            <button class="auth-submit-btn" onclick="handleRegister()">Send Request →</button>
+
+            <p class="auth-register-note">Once approved you'll be able to sign in with your email and password.</p>
+          </div>
         </div>
+      </div>
     </div>`;
 }
+
+// Toggle password visibility helper
+window.toggleAuthPwd = function(inputId, btn) {
+  const inp = document.getElementById(inputId);
+  if (!inp) return;
+  if (inp.type === 'password') { inp.type = 'text'; btn.textContent = '🙈'; }
+  else { inp.type = 'password'; btn.textContent = '👁'; }
+};
 
 async function renderInvitePage(page, token) {
   // Show loading while we validate the token
@@ -388,7 +437,8 @@ function showAuthError(el, msg) {
 
 // ── Admin panel renderer ──────────────────────────────────────
 async function renderAdminPanel() {
-  const panel = document.getElementById('admin-panel-content');
+  // Support rendering inside the tax admin page (inline) or the drawer
+  const panel = window._taxAdminTarget || document.getElementById('admin-panel-content');
   if (!panel) return;
   panel.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center;">Loading users...</div>`;
 

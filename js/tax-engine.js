@@ -1788,9 +1788,14 @@ const TaxEngine = (() => {
       if (currentValueSEK != null) totalValueSEK += currentValueSEK;
       totalCostSEK += h.totalCostSEK;
       if (unrealizedSEK != null) totalUnrealizedSEK += unrealizedSEK;
+      const changePercent24Hr = live?.changePercent24Hr ?? null;
+      // 24h P&L in SEK: how much the current value changed over the last 24h
+      const change24hSEK = (currentValueSEK != null && changePercent24Hr != null)
+        ? currentValueSEK * changePercent24Hr / 100
+        : null;
       return {
         ...h, currentPriceSEK, currentValueSEK, unrealizedSEK, unrealizedPct,
-        changePercent24Hr: live?.changePercent24Hr ?? null
+        changePercent24Hr, change24hSEK
       };
     });
 

@@ -98,6 +98,11 @@ const SupabaseDB = (() => {
     // ── Public API ────────────────────────────────────────────
     return {
 
+        // Returns the authenticated user's ID (or 'anon').
+        // Exposed so other modules (e.g. tax-engine.js) can scope their
+        // own storage (IndexedDB) per user without importing AuthManager directly.
+        getCurrentUserId() { return _uid(); },
+
         // ── Users ─────────────────────────────────────
         async getUserByEmail(email) {
             if (!SUPABASE_READY) {

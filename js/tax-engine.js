@@ -169,13 +169,27 @@ const TaxEngine = (() => {
   function getImportStatus(accountId) { return getImportStatuses()[accountId] || { status: 'never_synced' }; }
 
   // ── IndexedDB helpers (no 5 MB quota limit) ───────────────
-  const IDB_NAME = 'tcmd_tax';
-  const IDB_STORE = 'transactions';
+  // Database name is user-scoped so sessions belonging to different users
+  // on the same browser NEVER share transaction data.
+  const IDB_STORE   = 'transactions';
   const IDB_VERSION = 1;
 
+  // Returns a user-specific IDB name.
+  // Falls back to a generic name only when no user is authenticated yet.
+  function _idbName() {
+    try {
+      const uid = SupabaseDB.getCurrentUserId?.() || 'anon';
+      return `tcmd_tax_${uid}`;
+    } catch { return 'tcmd_tax_anon'; }
+  }
+
+  // Track the last user who loaded data so we can wipe stale cache on switch.
+  let _idbLastUserId = null;
+
   function idbOpen() {
+    const dbName = _idbName();
     return new Promise((res, rej) => {
-      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      const req = indexedDB.open(dbName, IDB_VERSION);
       req.onupgradeneeded = e => {
         const db = e.target.result;
         if (!db.objectStoreNames.contains(IDB_STORE))
@@ -184,6 +198,16 @@ const TaxEngine = (() => {
       req.onsuccess = e => res(e.target.result);
       req.onerror = e => rej(e.target.error);
     });
+  }
+
+  // Call this on login/logout to drop the in-memory transaction cache
+  // so the next loadTransactions() reads from the correct user's IDB.
+  function clearUserCache() {
+    _txCache          = null;
+    _accountsCache    = [];
+    _settingsCache    = null;
+    _idbLastUserId    = null;
+    _importStatusCache = {};
   }
 
   async function idbSaveAll(txns) {
@@ -228,16 +252,24 @@ const TaxEngine = (() => {
   }
 
   async function loadTransactions() {
-    if (_txCache !== null) return;  // already loaded
+    // Detect user switch: if the current user differs from the last loaded user,
+    // wipe the in-memory cache so stale data is never served to the wrong user.
+    const currentUid = SupabaseDB.getCurrentUserId?.() || 'anon';
+    if (_idbLastUserId !== null && _idbLastUserId !== currentUid) {
+      console.log('[TaxEngine] User changed — clearing transaction cache');
+      clearUserCache();
+    }
+    if (_txCache !== null) return;  // already loaded for this user
+    _idbLastUserId = currentUid;
     _txCache = await idbLoadAll();
-    // One-time migration: if IDB is empty, check localStorage
+    // One-time migration: if IDB is empty, check legacy (un-scoped) localStorage key
     if (!_txCache.length) {
       try {
         const raw = localStorage.getItem('tcmd_tax_transactions');
         if (raw) {
           _txCache = JSON.parse(raw);
           await idbSaveAll(_txCache);
-          localStorage.removeItem('tcmd_tax_transactions');  // free up space
+          localStorage.removeItem('tcmd_tax_transactions');
           console.log('[TaxEngine] Migrated', _txCache.length, 'transactions from localStorage to IDB');
         }
       } catch { }
@@ -261,23 +293,48 @@ const TaxEngine = (() => {
 
   function mkId() { return 'txn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 
+  // Derive the blockchain network name from the import source string.
+  // Used by the pricing engine to call GeckoTerminal with the right network.
+  function chainFromSource(src) {
+    if (!src) return null;
+    const s = src.toLowerCase();
+    if (s.includes('solana') || s.includes('sol_')) return 'solana';
+    if (s.includes('base'))        return 'base';
+    if (s.includes('arbitrum') || s.includes('arb')) return 'arbitrum';
+    if (s.includes('optimism') || s.includes('_op')) return 'optimism';
+    if (s.includes('polygon') || s.includes('matic')) return 'polygon_pos';
+    if (s.includes('avax') || s.includes('avalanche')) return 'avax';
+    if (s.includes('bsc') || s.includes('binance_wallet')) return 'bsc';
+    if (s.includes('eth') || s.includes('ethereum')) return 'eth';
+    return null;
+  }
+
   // ── Normalise raw → standard transaction ─────────────────
   function normalizeTransaction(raw, accountId, source) {
     // Promote rawType from the source record so classification works
     // after storage reload without needing the full raw object.
     const rawType = (raw.type || raw.side || raw.category || raw.transactionType || '').toLowerCase();
+    // Preserve the original symbol before normalization — it may be the contract/mint address
+    // and is needed by the GeckoTerminal pricing layer.
+    const rawSymbol = (raw.assetSymbol || raw.symbol || raw.asset || '').trim();
+    const normalizedSym = normalizeAssetSymbol(rawSymbol.toUpperCase());
     return {
       id: raw.id || mkId(),
       accountId,
       source,
+      chain: raw.chain || chainFromSource(source),
       txHash: raw.txHash || raw.hash || raw.id || ('manual_' + Date.now()),
       date: parseDate(raw.date || raw.timestamp) || new Date().toISOString(),
       category: raw.category || CAT.RECEIVE,
       autoClassified: false,
       isInternalTransfer: false,
-      assetSymbol: normalizeAssetSymbol((raw.assetSymbol || raw.symbol || raw.asset || '').toUpperCase()),
+      assetSymbol: normalizedSym,
+      // contractAddress: the original on-chain address before symbol resolution
+      // Used for GeckoTerminal pricing when the token isn't in CoinGecko
+      contractAddress: raw.contractAddress || raw.mintAddress
+                    || (looksLikeContractAddress(rawSymbol) ? rawSymbol : null),
       assetName: raw.assetName || '',
-      coinGeckoId: raw.coinGeckoId || CC_IDS[normalizeAssetSymbol((raw.assetSymbol || '').toUpperCase())] || null,
+      coinGeckoId: raw.coinGeckoId || CC_IDS[normalizedSym] || null,
       amount: Math.abs(parseFloat(raw.amount || 0)),
       inAsset: normalizeAssetSymbol((raw.inAsset || '').toUpperCase()),
       inAmount: Math.abs(parseFloat(raw.inAmount || 0)),
@@ -446,7 +503,19 @@ const TaxEngine = (() => {
         if (inCached) inAsset = inCached.symbol || inAsset;
       }
 
-      return { ...t, assetSymbol: sym, assetName: name, coinGeckoId, inAsset: inAsset || t.inAsset };
+      // Preserve the original contractAddress even after symbol resolution
+      // so GeckoTerminal can look up the token's historical OHLCV by address.
+      const contractAddress = t.contractAddress
+        || (looksLikeContractAddress(t.assetSymbol) ? t.assetSymbol : null);
+
+      return {
+        ...t,
+        assetSymbol: sym,
+        assetName: name,
+        coinGeckoId,
+        inAsset: inAsset || t.inAsset,
+        contractAddress,
+      };
     });
   }
 
@@ -828,6 +897,45 @@ const TaxEngine = (() => {
     }
   }
 
+  // ── GeckoTerminal — DEX OHLCV for on-chain tokens not in CoinGecko ──
+  // GeckoTerminal's free API provides historical price data for tokens traded
+  // on DEXes (Raydium, Uniswap, etc.) using the token's contract/mint address.
+  // This is the pricing source that handles ROOT, DSYNC, NEURAL and similar
+  // obscure tokens that are never listed on centralized price feeds.
+  const GT_NETWORK_MAP = {
+    solana: 'solana', eth: 'eth', base: 'base',
+    arbitrum: 'arbitrum', optimism: 'optimism',
+    polygon_pos: 'polygon_pos', avax: 'avax', bsc: 'bsc',
+  };
+
+  // Fetch OHLCV for a token by contract/mint address for a given year.
+  // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
+  async function fetchGeckoTerminalYear(address, network, year) {
+    const gtNetwork = GT_NETWORK_MAP[network];
+    if (!gtNetwork || !address) return null;
+    try {
+      // GeckoTerminal v2 — fetch last 365 days of OHLCV before end of year
+      const beforeTs = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
+      const url = `https://api.geckoterminal.com/api/v2/networks/${gtNetwork}/tokens/${address}/ohlcv/day?limit=365&before_timestamp=${beforeTs}`;
+      const r = await fetchWithTimeout(url, 12000);
+      if (!r || !r.ok) return null;
+      const json = await r.json();
+      // Response shape: { data: { attributes: { ohlcv_list: [[ts, open, high, low, close, volume]] } } }
+      const ohlcv = json?.data?.attributes?.ohlcv_list;
+      if (!Array.isArray(ohlcv) || !ohlcv.length) return null;
+      const map = new Map();
+      for (const [ts, , , , close] of ohlcv) {
+        const d = new Date(ts * 1000).toISOString().slice(0, 10);
+        // Use close price (USD)
+        if (typeof close === 'number' && close > 0) map.set(d, close);
+      }
+      return map.size > 0 ? map : null;
+    } catch { return null; }
+  }
+
+  // ── Cache key for GeckoTerminal data (separate namespace) ────
+  function gtCacheKey(address, dateStr) { return `gt:${address}:${dateStr}`; }
+
   // Fetch one year of daily USD prices from CoinGecko /market_chart/range
   // Returns Map<YYYY-MM-DD, usdPrice>
   async function fetchCoinCapYear(cgId, year) {
@@ -881,12 +989,14 @@ const TaxEngine = (() => {
   // ════════════════════════════════════════════════════════════
   // SEK PRICING SERVICE — 6-level fallback chain
   //
-  // Level 1  trade_exact           Exchange-reported execution price
-  // Level 2  swap_implied          Derive from the other leg of a swap
-  // Level 3  market_api_coingecko  Historical CoinGecko daily USD × FX
-  // Level 4  pair_derived          Infer from counterpart in same tx
-  // Level 5  stable_historical_fx  Stablecoin × historical USD/SEK rate
-  // Level 6  stable_approx         Stablecoin × hardcoded fallback rate
+  // Level 1  trade_exact            Exchange-reported execution price
+  // Level 2  swap_implied           Derive from the other leg of a swap (inAsset/inAmount)
+  // Level 3  market_api_coingecko   Historical CoinGecko daily USD × FX (known tokens)
+  //          market_api_dex         GeckoTerminal on-chain DEX OHLCV (contract address)
+  // Level 4  pair_derived           Infer from priced counterpart in same txHash group
+  // Level 5  stable_historical_fx   Stablecoin × historical USD/SEK FX rate
+  // Level 6  stable_approx          Stablecoin × hardcoded fallback rate
+  //          missing                All passes failed → manual review
   //
   // Every transaction gets: priceSEKPerUnit, costBasisSEK,
   //   priceSource, priceConfidence, priceDerivedFromOtherLeg
@@ -894,32 +1004,58 @@ const TaxEngine = (() => {
   // ════════════════════════════════════════════════════════════
 
   const PS = {
-    TRADE_EXACT:    'trade_exact',
-    SWAP_IMPLIED:   'swap_implied',
-    MARKET_API:     'market_api_coingecko',
-    PAIR_DERIVED:   'pair_derived',
-    STABLE_HIST_FX: 'stable_historical_fx',
-    STABLE_APPROX:  'stable_approx',
-    MANUAL:         'manual',
-    MISSING:        'missing',
+    TRADE_EXACT:     'trade_exact',        // Exchange execution price (most reliable)
+    SWAP_IMPLIED:    'swap_implied',        // Derived from the other swap leg
+    MARKET_API:      'market_api_coingecko',// CoinGecko historical daily price
+    DEX_MARKET:      'market_api_dex',     // GeckoTerminal on-chain DEX OHLCV
+    PAIR_DERIVED:    'pair_derived',        // Inferred from priced counterpart in same tx
+    STABLE_HIST_FX:  'stable_historical_fx',// Stablecoin × historical USD/SEK FX rate
+    STABLE_APPROX:   'stable_approx',      // Stablecoin × hardcoded fallback rate
+    MANUAL:          'manual',             // User-entered price
+    MISSING:         'missing',            // All passes failed — manual review required
   };
 
   // Look up a SEK price from the daily-price cache for a symbol + date.
-  // Tries exact date then walks ±7 days (handles weekends / CoinGecko gaps).
-  function lookupCachedSEK(sym, dateStr, cache) {
+  // Checks CoinGecko cache (by ccId) first, then GeckoTerminal cache (by contractAddress).
+  // Tries exact date then walks ±7 days (handles weekends / API gaps).
+  function lookupCachedSEK(sym, dateStr, cache, contractAddress) {
+    if (!dateStr) return null;
+
+    // 1. CoinGecko cache (by ccId)
     const ccId = CC_IDS[sym?.toUpperCase()];
-    if (!ccId || !dateStr) return null;
-    const exact = cache[cacheKey(ccId, dateStr)];
-    if (exact) return exact;
-    const base = new Date(dateStr);
-    for (let delta = 1; delta <= 7; delta++) {
-      for (const sign of [1, -1]) {
-        const d = new Date(base);
-        d.setUTCDate(d.getUTCDate() + sign * delta);
-        const v = cache[cacheKey(ccId, d.toISOString().slice(0, 10))];
-        if (v) return v;
+    if (ccId) {
+      const exact = cache[cacheKey(ccId, dateStr)];
+      if (exact) return exact;
+      const base = new Date(dateStr);
+      for (let delta = 1; delta <= 7; delta++) {
+        for (const sign of [1, -1]) {
+          const d = new Date(base);
+          d.setUTCDate(d.getUTCDate() + sign * delta);
+          const v = cache[cacheKey(ccId, d.toISOString().slice(0, 10))];
+          if (v) return v;
+        }
       }
     }
+
+    // 2. Symbol as cache key (used when GeckoTerminal prices are stored under sym key)
+    const symDirect = cache[cacheKey(sym?.toUpperCase(), dateStr)];
+    if (symDirect) return symDirect;
+
+    // 3. GeckoTerminal cache (by contract address)
+    if (contractAddress) {
+      const gtExact = cache[gtCacheKey(contractAddress, dateStr)];
+      if (gtExact) return gtExact;
+      const base = new Date(dateStr);
+      for (let delta = 1; delta <= 7; delta++) {
+        for (const sign of [1, -1]) {
+          const d = new Date(base);
+          d.setUTCDate(d.getUTCDate() + sign * delta);
+          const v = cache[gtCacheKey(contractAddress, d.toISOString().slice(0, 10))];
+          if (v) return v;
+        }
+      }
+    }
+
     return null;
   }
 
@@ -943,7 +1079,7 @@ const TaxEngine = (() => {
       const rate = historicalFX(date, fxByYear) || STABLE_SEK.USD;
       return EUR_STABLES.has(sym) ? rate * (STABLE_SEK.EUR / STABLE_SEK.USD) * amt : rate * amt;
     }
-    const cached = lookupCachedSEK(sym, date, cache);
+    const cached = lookupCachedSEK(sym, date, cache, null);
     return cached ? cached * amt : null;
   }
 
@@ -1023,9 +1159,9 @@ const TaxEngine = (() => {
       }
     }
 
-    // ── Level 3: Historical market API (CoinGecko cache) ──
+    // ── Level 3: Historical market API (CoinGecko + GeckoTerminal cache) ──
     if (!STABLES.has(sym)) {
-      const cached = lookupCachedSEK(sym, date, cache);
+      const cached = lookupCachedSEK(sym, date, cache, t.contractAddress);
       if (cached) {
         return {
           ...t,
@@ -1203,7 +1339,7 @@ const TaxEngine = (() => {
       const sym  = (t.assetSymbol || '').toUpperCase();
       const date = (t.date || '').slice(0, 10);
       const amt  = t.amount || 0;
-      const price = lookupCachedSEK(sym, date, cache)
+      const price = lookupCachedSEK(sym, date, cache, t.contractAddress)
         || symPriceMap.get(`${sym}|${date}`)
         || (STABLES.has(sym) ? (historicalFX(date, fxByYear) || stableSEKPrice(sym)) : null);
       if (!price) return t;
@@ -1271,9 +1407,11 @@ const TaxEngine = (() => {
       if (!neededPairs.has(pairKey)) neededPairs.set(pairKey, { ccId, year });
       if (neededPairs.size >= MAX_PAIRS) break;
     }
-    // Also add years from swap IN-assets (need FX for derivation)
+    // Also collect years from all categories that carry economic value:
+    // TRADE (swap in-asset derivation), BRIDGE_IN (carries FMV cost basis), AIRDROP
+    const ECONOMIC_CATS = new Set([CAT.TRADE, CAT.BRIDGE_IN, CAT.AIRDROP, CAT.INCOME, CAT.STAKING]);
     for (const t of txns) {
-      if (t.category !== CAT.TRADE) continue;
+      if (!ECONOMIC_CATS.has(t.category) && !isTaxableCategory(t.category)) continue;
       const year = parseInt((t.date || '').slice(0, 4));
       if (!isNaN(year)) allTaxableYears.add(year);
     }
@@ -1316,15 +1454,76 @@ const TaxEngine = (() => {
       stepsDone++;
       if (onProgress) onProgress({
         step: 'price',
-        pct: 60 + Math.round((stepsDone / totalSteps) * 35),
+        pct: 60 + Math.round((stepsDone / totalSteps) * 25),
         msg: `Fetching prices (${ccId} ${year})…`,
+      });
+    }
+
+    // ── C: GeckoTerminal — on-chain DEX tokens with contract address ──
+    // This is the pricing layer for tokens like ROOT, DSYNC, NEURAL, and any
+    // obscure DEX token not indexed by CoinGecko. Uses the contract/mint address
+    // preserved in `contractAddress` to call GeckoTerminal's OHLCV API.
+    const gtNeeded = new Map(); // "address|chain|year" → { address, chain, year }
+    const MAX_GT = 30; // Limit to avoid rate-limiting (GT free tier: 30 req/min)
+
+    for (const t of txns) {
+      if (t.isInternalTransfer) continue;
+      if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
+      if (t.priceSEKPerUnit > 0 || t.coinGeckoId) continue; // already priced or has CG
+      if (!t.contractAddress) continue;
+      const network = GT_NETWORK_MAP[t.chain] || GT_NETWORK_MAP[chainFromSource(t.source)];
+      if (!network) continue;
+      const year = parseInt((t.date || '').slice(0, 4));
+      if (isNaN(year)) continue;
+      const gtKey = `${t.contractAddress}|${network}|${year}`;
+      // Skip if already cached
+      if (updatedCache[gtCacheKey(t.contractAddress, (t.date || '').slice(0, 10))]) continue;
+      if (!gtNeeded.has(gtKey)) {
+        gtNeeded.set(gtKey, { address: t.contractAddress, chain: network, year });
+        if (gtNeeded.size >= MAX_GT) break;
+      }
+    }
+
+    for (const [, { address, chain, year }] of gtNeeded) {
+      const fxMap    = fxByYear.get(year);
+      const priceMap = await fetchGeckoTerminalYear(address, chain, year);
+      if (priceMap) {
+        for (const [date, usdPrice] of priceMap) {
+          if (isNaN(usdPrice) || usdPrice <= 0) continue;
+          const fx = fxMap ? nearestMapValue(fxMap, date) : null;
+          if (fx) {
+            updatedCache[gtCacheKey(address, date)] = usdPrice * fx;
+            // Also cache under the canonical symbol key if we know it
+            // (set below after resolution — best effort)
+          }
+        }
+      }
+      if (onProgress) onProgress({
+        step: 'price',
+        pct: 85 + Math.round(gtNeeded.size > 0 ? 5 : 0),
+        msg: `GeckoTerminal: pricing ${address.slice(0, 8)}… (${chain})`,
       });
     }
 
     savePriceCache(updatedCache);
 
+    // ── D: Apply full pricing chain (all passes) ───────────
     if (onProgress) onProgress({ step: 'price', pct: 97, msg: 'Applying pricing chain…' });
-    return applyPricingChain(txns, updatedCache, fxByYear);
+
+    // For GeckoTerminal-priced tokens: inject SEK price from the gt cache
+    // before applyPricingChain runs so Level 3 can find it.
+    const txnsWithGTPrices = txns.map(t => {
+      if (t.priceSEKPerUnit > 0 || !t.contractAddress) return t;
+      const dateStr = (t.date || '').slice(0, 10);
+      const gtPrice = updatedCache[gtCacheKey(t.contractAddress, dateStr)];
+      if (!gtPrice) return t;
+      // Store under asset symbol key too so the normal cache lookup works
+      const symKey = cacheKey(t.assetSymbol, dateStr);
+      if (!updatedCache[symKey]) updatedCache[symKey] = gtPrice;
+      return t;
+    });
+
+    return applyPricingChain(txnsWithGTPrices, updatedCache, fxByYear);
   }
 
   // ════════════════════════════════════════════════════════════
@@ -1379,18 +1578,20 @@ const TaxEngine = (() => {
       txns = deduplicateTransactions(txns);
       await tick();
 
-      // ── Step 5: Match internal transfers ──────────────────
-      // Pair SEND ↔ RECEIVE across user's own wallets/exchanges.
-      // Matched pairs are marked isInternalTransfer = true (non-taxable).
-      emit('transfer', 36, 'Matching internal transfers…');
-      txns = matchTransfers(txns);
+      // ── Step 5: Classify all transactions ─────────────────
+      // Classification MUST run before transfer matching so the matcher can
+      // filter by the correct economic categories (BRIDGE_IN/OUT, SEND/RECEIVE…).
+      // Without categories, matchTransfers has no signal and matches nothing.
+      emit('classify', 36, 'Classifying transactions…');
+      txns = autoClassifyAll(txns);
       await tick();
 
-      // ── Step 6: Classify all transactions ─────────────────
-      // Now that tokens are resolved and transfers are matched,
-      // categorize each tx (buy/sell/trade/income/fee/staking/…).
-      emit('classify', 44, 'Classifying transactions…');
-      txns = autoClassifyAll(txns);
+      // ── Step 6: Match internal transfers ──────────────────
+      // Now that every transaction has a proper category, pair SEND ↔ RECEIVE
+      // (and BRIDGE_OUT ↔ BRIDGE_IN) across all user wallets/exchanges/chains.
+      // Matched pairs are marked isInternalTransfer = true (non-taxable).
+      emit('transfer', 44, 'Matching internal transfers…');
+      txns = matchTransfers(txns);
       await tick();
 
       // ── Step 7: Assign SEK prices ─────────────────────────
@@ -3036,6 +3237,7 @@ const TaxEngine = (() => {
     getSettings, saveSettings, loadSettings,
     // Accounts
     getAccounts, addAccount, removeAccount, updateAccount, loadAccounts, clearAllData,
+    clearUserCache,  // call on login/logout to wipe stale user data from memory
     getImportStatus, setImportStatus, loadImportStatuses,
     // Transactions
     loadTransactions,

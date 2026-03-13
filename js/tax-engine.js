@@ -727,101 +727,319 @@ const TaxEngine = (() => {
     return null;
   }
 
-  // Stamp cached SEK prices onto transactions (pure helper)
-  function stampPrices(txns, cache) {
+  // ════════════════════════════════════════════════════════════
+  // SEK PRICING SERVICE — 6-level fallback chain
+  //
+  // Level 1  trade_exact           Exchange-reported execution price
+  // Level 2  swap_implied          Derive from the other leg of a swap
+  // Level 3  market_api_coingecko  Historical CoinGecko daily USD × FX
+  // Level 4  pair_derived          Infer from counterpart in same tx
+  // Level 5  stable_historical_fx  Stablecoin × historical USD/SEK rate
+  // Level 6  stable_approx         Stablecoin × hardcoded fallback rate
+  //
+  // Every transaction gets: priceSEKPerUnit, costBasisSEK,
+  //   priceSource, priceConfidence, priceDerivedFromOtherLeg
+  // Transactions reach manual review ONLY when ALL fallbacks fail.
+  // ════════════════════════════════════════════════════════════
+
+  const PS = {
+    TRADE_EXACT:    'trade_exact',
+    SWAP_IMPLIED:   'swap_implied',
+    MARKET_API:     'market_api_coingecko',
+    PAIR_DERIVED:   'pair_derived',
+    STABLE_HIST_FX: 'stable_historical_fx',
+    STABLE_APPROX:  'stable_approx',
+    MANUAL:         'manual',
+    MISSING:        'missing',
+  };
+
+  // Look up a SEK price from the daily-price cache for a symbol + date.
+  // Tries exact date then walks ±7 days (handles weekends / CoinGecko gaps).
+  function lookupCachedSEK(sym, dateStr, cache) {
+    const ccId = CC_IDS[sym?.toUpperCase()];
+    if (!ccId || !dateStr) return null;
+    const exact = cache[cacheKey(ccId, dateStr)];
+    if (exact) return exact;
+    const base = new Date(dateStr);
+    for (let delta = 1; delta <= 7; delta++) {
+      for (const sign of [1, -1]) {
+        const d = new Date(base);
+        d.setUTCDate(d.getUTCDate() + sign * delta);
+        const v = cache[cacheKey(ccId, d.toISOString().slice(0, 10))];
+        if (v) return v;
+      }
+    }
+    return null;
+  }
+
+  // Historical SEK/USD rate for a date (falls back ±7 days for bank holidays)
+  function historicalFX(dateStr, fxByYear) {
+    if (!dateStr || !fxByYear) return null;
+    const year = parseInt(dateStr.slice(0, 4));
+    const fxMap = fxByYear.get(year);
+    return fxMap ? nearestMapValue(fxMap, dateStr, 7) : null;
+  }
+
+  // Price one transaction through the full fallback chain.
+  // Returns an updated transaction object with price metadata set.
+  function priceOneTxn(t, cache, fxByYear) {
+    // Never overwrite manual prices
+    if (t.priceSource === PS.MANUAL || t.manualCategory) return t;
+    // Internal transfers are non-taxable — zero value
+    if (t.isInternalTransfer) {
+      return { ...t, priceSEKPerUnit: 0, costBasisSEK: 0,
+               priceSource: PS.TRADE_EXACT, priceConfidence: 'high' };
+    }
+    // Non-taxable categories: skip
+    if (!isTaxableCategory(t.category)) return t;
+
+    const sym  = (t.assetSymbol || '').toUpperCase();
+    const date = (t.date || '').slice(0, 10);
+    const amt  = t.amount || 0;
+
+    // ── Already priced ─────────────────────────────────────
+    if (t.priceSEKPerUnit > 0) {
+      return {
+        ...t,
+        costBasisSEK: t.costBasisSEK || t.priceSEKPerUnit * amt,
+        priceSource:     t.priceSource     || PS.TRADE_EXACT,
+        priceConfidence: t.priceConfidence || 'high',
+      };
+    }
+
+    // ── Level 1: Exchange-reported execution price ─────────
+    // Exchange CSV parsers can set rawTradePrice (in USD or SEK)
+    if (t.rawTradePrice && t.rawTradeCurrency) {
+      const raw = parseFloat(t.rawTradePrice) || 0;
+      if (raw > 0) {
+        const fx   = historicalFX(date, fxByYear) || STABLE_SEK.USD;
+        const price = t.rawTradeCurrency === 'SEK' ? raw : raw * fx;
+        return {
+          ...t,
+          priceSEKPerUnit: price, costBasisSEK: price * amt,
+          priceSource: PS.TRADE_EXACT, priceConfidence: 'high',
+          needsReview: false, reviewReason: null,
+        };
+      }
+    }
+
+    // ── Level 3: Historical market API (CoinGecko cache) ──
+    if (!STABLES.has(sym)) {
+      const cached = lookupCachedSEK(sym, date, cache);
+      if (cached) {
+        return {
+          ...t,
+          priceSEKPerUnit: cached, costBasisSEK: cached * amt,
+          priceSource: PS.MARKET_API, priceConfidence: 'high',
+          needsReview: false, reviewReason: null,
+        };
+      }
+    }
+
+    // ── Level 5: Stablecoin × historical USD/SEK FX ───────
+    if (STABLES.has(sym)) {
+      const EUR_STABLES = new Set(['EUROC', 'EURC', 'EURT', 'EURS']);
+      const isEUR = EUR_STABLES.has(sym);
+      // Try historical FX first
+      const usdSEK = historicalFX(date, fxByYear);
+      if (usdSEK) {
+        // EUR stables: also need EUR/USD rate — approximate via fixed ratio
+        const price = isEUR ? usdSEK * (STABLE_SEK.EUR / STABLE_SEK.USD) : usdSEK;
+        return {
+          ...t,
+          priceSEKPerUnit: price, costBasisSEK: price * amt,
+          priceSource: PS.STABLE_HIST_FX, priceConfidence: 'high',
+          needsReview: false, reviewReason: null,
+        };
+      }
+      // Level 6 fallback: hardcoded rate
+      const approx = stableSEKPrice(sym);
+      return {
+        ...t,
+        priceSEKPerUnit: approx, costBasisSEK: approx * amt,
+        priceSource: PS.STABLE_APPROX, priceConfidence: 'medium',
+        needsReview: false, reviewReason: null,
+      };
+    }
+
+    // Mark for swap-derivation pass
+    return { ...t, priceSource: PS.MISSING, priceConfidence: null };
+  }
+
+  // Pass 2: Swap leg derivation
+  // For TRADE transactions still unpriced, try to derive value from the
+  // other side of the swap (e.g. unknown token → 350 USDC → derive SEK from USDC).
+  function deriveSwapPrices(txns) {
+    // Build a quick price lookup by id
+    const byId = new Map(txns.map(t => [t.id, t]));
+
     return txns.map(t => {
-      if (t.priceSEKPerUnit > 0) return t;
-      if (t.isInternalTransfer) return t;
+      if (t.category !== CAT.TRADE) return t;
+      // Already priced — only check if costBasisSEK also needs filling
+      if (t.priceSEKPerUnit > 0 && t.priceSource !== PS.MISSING) {
+        return t.costBasisSEK > 0 ? t : { ...t, costBasisSEK: t.priceSEKPerUnit * (t.amount || 0) };
+      }
 
-      let price = null, priceSource = null;
+      const inSym  = (t.inAsset  || '').toUpperCase();
+      const outSym = (t.assetSymbol || '').toUpperCase();
+      const inAmt  = t.inAmount || 0;
+      const outAmt = t.amount   || 0;
 
-      if (STABLES.has(t.assetSymbol)) {
-        price = stableSEKPrice(t.assetSymbol);
-        priceSource = 'stable_approx';
-      } else {
-        const ccId = CC_IDS[t.assetSymbol]; // only valid CoinCap IDs
-        if (ccId) {
-          price = cache[cacheKey(ccId, (t.date || '').slice(0, 10))] || null;
-          priceSource = price ? 'coingecko' : null;
+      // ── Case A: IN side is a stablecoin — derive OUT price ─
+      if (inSym && inAmt > 0 && STABLES.has(inSym)) {
+        // Use the SEK price we already stamped on inSym (or approx)
+        const inUnitPrice = byId.get(t.id)?._inSEK  // if pre-stamped
+          || (STABLES.has(inSym) ? STABLE_SEK.USD : null);  // fallback approx
+        const inSEK = inUnitPrice ? inUnitPrice * inAmt : null;
+        if (inSEK && outAmt > 0) {
+          const outPricePer = inSEK / outAmt;
+          return {
+            ...t,
+            priceSEKPerUnit: outPricePer, costBasisSEK: inSEK,
+            priceSource: PS.SWAP_IMPLIED, priceConfidence: 'high',
+            priceDerivedFromOtherLeg: true,
+            needsReview: false, reviewReason: null,
+          };
         }
       }
 
-      if (!price) return t; // Still missing — goes to review
+      // ── Case B: IN side has a CoinGecko price already ─────
+      if (inSym && inAmt > 0) {
+        const sibling = [...byId.values()].find(x =>
+          x.id !== t.id &&
+          x.assetSymbol?.toUpperCase() === inSym &&
+          x.priceSEKPerUnit > 0 &&
+          Math.abs(new Date(x.date) - new Date(t.date)) < 48 * 3600 * 1000
+        );
+        if (sibling?.priceSEKPerUnit && outAmt > 0) {
+          const totalSEK = sibling.priceSEKPerUnit * inAmt;
+          return {
+            ...t,
+            priceSEKPerUnit: totalSEK / outAmt, costBasisSEK: totalSEK,
+            priceSource: PS.SWAP_IMPLIED, priceConfidence: 'medium',
+            priceDerivedFromOtherLeg: true,
+            needsReview: false, reviewReason: null,
+          };
+        }
+      }
 
+      // ── Case C: OUT side is known, derive IN unit price ───
+      // (Already priced on the OUT side — just fill in costBasisSEK cleanly)
+      if (t.priceSEKPerUnit > 0 && outAmt > 0) {
+        return {
+          ...t,
+          costBasisSEK: t.priceSEKPerUnit * outAmt,
+          priceConfidence: t.priceConfidence || 'medium',
+          needsReview: false, reviewReason: null,
+        };
+      }
+
+      return t;
+    });
+  }
+
+  // Pass 3: Price fee rows using the same-date price of the fee asset
+  function priceFees(txns, cache, fxByYear) {
+    return txns.map(t => {
+      if (t.category !== CAT.FEE) return t;
+      if ((t.feeSEK > 0 || t.priceSEKPerUnit > 0) && t.priceSource !== PS.MISSING) return t;
+      const sym  = (t.assetSymbol || '').toUpperCase();
+      const date = (t.date || '').slice(0, 10);
+      const amt  = t.amount || 0;
+      const price = lookupCachedSEK(sym, date, cache)
+        || (STABLES.has(sym) ? (historicalFX(date, fxByYear) || stableSEKPrice(sym)) : null);
+      if (!price) return t;
       return {
         ...t,
         priceSEKPerUnit: price,
-        costBasisSEK: price * (t.amount || 0),
-        priceSource,
-        needsReview: false,
-        reviewReason: null,
+        costBasisSEK: price * amt,
+        feeSEK: t.feeSEK || price * amt,
+        priceSource: STABLES.has(sym) ? PS.STABLE_HIST_FX : PS.MARKET_API,
+        priceConfidence: 'medium',
+        needsReview: false, reviewReason: null,
       };
     });
   }
 
-  // Fetch all missing SEK prices — batched by (coin × year) for minimal requests
+  // Full 3-pass pricing application
+  function applyPricingChain(txns, cache, fxByYear) {
+    let result = txns.map(t => priceOneTxn(t, cache, fxByYear)); // Pass 1
+    result = deriveSwapPrices(result);                             // Pass 2
+    result = priceFees(result, cache, fxByYear);                  // Pass 3
+    // Final: tag anything still unpriceable for manual review
+    return result.map(t => {
+      if (t.isInternalTransfer || !isTaxableCategory(t.category)) return t;
+      if (!t.priceSEKPerUnit && !t.costBasisSEK) {
+        return { ...t, needsReview: true, reviewReason: 'missing_sek_price',
+                 priceSource: PS.MISSING, priceConfidence: null };
+      }
+      return t;
+    });
+  }
+
+  // Fetch all missing SEK prices — batched by (coin × year) for minimal API requests
   async function fetchAllSEKPrices(txns, onProgress) {
     const cache = getPriceCache();
 
-    // Collect unique (ccId, year) pairs that need fetching.
-    // IMPORTANT: Only use CC_IDS[symbol] — never t.coinGeckoId, which may hold stale
-    // CoinGecko IDs from old imports that are invalid CoinCap IDs (e.g. 'avalanche-2').
-    const neededPairs = new Map(); // "ccId|year" → { ccId, year }
-    const neededYears = new Set();
-    const MAX_PAIRS = 80; // safety cap: prevents browser freeze on huge wallets
+    // Collect ALL years with taxable transactions
+    // (FX needed for every year that has stablecoins, not just years with unknown coins)
+    const allTaxableYears = new Set();
+    const neededPairs     = new Map(); // "ccId|year" → { ccId, year }
+    const MAX_PAIRS       = 80;
 
     for (const t of txns) {
       if (t.isInternalTransfer) continue;
       if (!isTaxableCategory(t.category)) continue;
-      if (t.priceSEKPerUnit > 0) continue;
-      if (STABLES.has(t.assetSymbol)) continue;
-
-      const ccId = CC_IDS[t.assetSymbol]; // only use known-valid CoinCap IDs
-      if (!ccId) continue;
-
       const dateStr = (t.date || '').slice(0, 10);
       if (!dateStr) continue;
-
-      // Skip if already cached (keyed by CC ID + date)
-      if (cache[cacheKey(ccId, dateStr)] !== undefined) continue;
-
       const year = parseInt(dateStr.slice(0, 4));
+      if (!isNaN(year)) allTaxableYears.add(year);
+
+      // Queue CoinGecko fetch for non-stable, unpriced, known-ID tokens
+      if (t.priceSEKPerUnit > 0) continue;
+      if (STABLES.has((t.assetSymbol || '').toUpperCase())) continue;
+      const ccId = CC_IDS[(t.assetSymbol || '').toUpperCase()];
+      if (!ccId) continue;
+      if (cache[cacheKey(ccId, dateStr)] !== undefined) continue;
       const pairKey = `${ccId}|${year}`;
-      if (!neededPairs.has(pairKey)) {
-        neededPairs.set(pairKey, { ccId, year });
-        neededYears.add(year);
-      }
-      if (neededPairs.size >= MAX_PAIRS) break; // process remaining on next pipeline run
+      if (!neededPairs.has(pairKey)) neededPairs.set(pairKey, { ccId, year });
+      if (neededPairs.size >= MAX_PAIRS) break;
+    }
+    // Also add years from swap IN-assets (need FX for derivation)
+    for (const t of txns) {
+      if (t.category !== CAT.TRADE) continue;
+      const year = parseInt((t.date || '').slice(0, 4));
+      if (!isNaN(year)) allTaxableYears.add(year);
     }
 
-    const totalSteps = neededYears.size + neededPairs.size;
+    const totalSteps = allTaxableYears.size + neededPairs.size;
 
     if (totalSteps === 0) {
       if (onProgress) onProgress({ step: 'price', pct: 100, msg: 'Prices up to date' });
-      return stampPrices(txns, cache);
+      return applyPricingChain(txns, cache, new Map());
     }
 
     let stepsDone = 0;
 
-    // Step 1: Fetch FX rates per year (1 request/year — e.g. 2023, 2024, 2025)
+    // ── A: Fetch USD→SEK FX for ALL taxable years ─────────
+    // This ensures stablecoins get historical rates, not a hardcoded 10.4
     const fxByYear = new Map();
-    for (const year of neededYears) {
+    for (const year of allTaxableYears) {
       const fxMap = await fetchFXYear(year);
-      fxByYear.set(year, fxMap);
+      if (fxMap) fxByYear.set(year, fxMap);
       stepsDone++;
       if (onProgress) onProgress({
         step: 'price',
-        pct: Math.round((stepsDone / totalSteps) * 100),
-        msg: `Fetching FX rates (${year})…`,
+        pct: Math.round((stepsDone / totalSteps) * 60),
+        msg: `Loading FX rates (${year})…`,
       });
     }
 
-    // Step 2: Fetch coin price history per (coin × year) (1 request/coin/year)
+    // ── B: Fetch CoinGecko price history per (coin × year) ─
     const updatedCache = { ...cache };
     for (const [, { ccId, year }] of neededPairs) {
       const priceMap = await fetchCoinCapYear(ccId, year);
-      const fxMap = fxByYear.get(year);
-
+      const fxMap    = fxByYear.get(year);
       if (priceMap) {
         for (const [date, usdPrice] of priceMap) {
           if (isNaN(usdPrice)) continue;
@@ -829,17 +1047,18 @@ const TaxEngine = (() => {
           if (fx) updatedCache[cacheKey(ccId, date)] = usdPrice * fx;
         }
       }
-
       stepsDone++;
       if (onProgress) onProgress({
         step: 'price',
-        pct: Math.round((stepsDone / totalSteps) * 100),
+        pct: 60 + Math.round((stepsDone / totalSteps) * 35),
         msg: `Fetching prices (${ccId} ${year})…`,
       });
     }
 
     savePriceCache(updatedCache);
-    return stampPrices(txns, updatedCache);
+
+    if (onProgress) onProgress({ step: 'price', pct: 97, msg: 'Applying pricing chain…' });
+    return applyPricingChain(txns, updatedCache, fxByYear);
   }
 
   // ════════════════════════════════════════════════════════════
@@ -2332,7 +2551,7 @@ const TaxEngine = (() => {
 
   // ── Public API ────────────────────────────────────────────
   return {
-    CAT, REVIEW_DESCRIPTIONS,
+    CAT, PS, REVIEW_DESCRIPTIONS,
     // Settings
     getSettings, saveSettings, loadSettings,
     // Accounts

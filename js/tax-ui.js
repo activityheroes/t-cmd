@@ -1358,7 +1358,7 @@ const TaxUI = (() => {
                 <th class="sortable" onclick="TaxUI.sortTxns('date')">Date ${sortIcon('date')}</th>
                 <th>Asset</th>
                 <th class="ta-r">Amount</th>
-                <th class="ta-r">Price (SEK)</th>
+                <th class="ta-r" title="Price source legend: 🟢 Exchange/CoinGecko (high) · 🟣 Swap-derived · 🟡 Approximate · 🔴 Missing">Price (SEK) <span style="font-size:9px;opacity:.5">●</span></th>
                 <th class="ta-r">Value (SEK)</th>
                 <th class="ta-r">Fee</th>
                 <th></th>
@@ -1372,11 +1372,38 @@ const TaxUI = (() => {
     `;
   }
 
+  // Price source → short label + colour for the confidence dot in price column
+  const PRICE_SOURCE_LABELS = {
+    trade_exact:            { label: 'Exchange',   dot: '#22c55e' },
+    market_api_coingecko:   { label: 'CoinGecko',  dot: '#22c55e' },
+    swap_implied:           { label: 'Swap',        dot: '#a78bfa' },
+    pair_derived:           { label: 'Derived',     dot: '#a78bfa' },
+    stable_historical_fx:   { label: 'FX',          dot: '#34d399' },
+    stable_approx:          { label: 'Approx',      dot: '#fbbf24' },
+    manual:                 { label: 'Manual',      dot: '#60a5fa' },
+    missing:                { label: 'Missing',     dot: '#f87171' },
+  };
+
   function renderTxRow(t) {
     const cm = CAT_META[t.category] || { icon: '•', color: '#94a3b8', label: t.category };
     const val = t.costBasisSEK || (t.priceSEKPerUnit * t.amount) || 0;
     const isInternal = t.isInternalTransfer;
     const checked = S.selectedTxIds.has(t.id);
+
+    // Resolve display symbol for asset column
+    const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(t.assetSymbol) : { symbol: t.assetSymbol, name: '' };
+    const displaySym = td.symbol || t.assetSymbol || '—';
+    const displayName = td.name || t.assetName || '';
+
+    // Price source indicator
+    const psMeta = PRICE_SOURCE_LABELS[t.priceSource] || null;
+    const priceCell = t.priceSEKPerUnit
+      ? `<span style="display:inline-flex;align-items:center;gap:4px">
+           ${TaxEngine.formatSEK(t.priceSEKPerUnit, 2)}
+           ${psMeta ? `<span title="${psMeta.label}" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${psMeta.dot};flex-shrink:0"></span>` : ''}
+         </span>`
+      : '<span class="tax-missing" title="Price missing — run pipeline to resolve">—</span>';
+
     return `
       <tr class="${t.needsReview ? 'tax-row-review' : ''} ${isInternal ? 'tax-row-internal' : ''} ${checked ? 'tax-row-selected' : ''}">
         <td style="width:32px;padding:0 6px">
@@ -1387,21 +1414,23 @@ const TaxUI = (() => {
           <span class="tax-cat-badge" style="background:${cm.color}22;color:${cm.color}">${cm.icon} ${cm.label}</span>
           ${isInternal ? '<span class="tax-transfer-tag">↔ internal</span>' : ''}
           ${t.isDuplicate ? '<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>' : ''}
+          ${t.priceDerivedFromOtherLeg ? '<span class="tax-badge" style="font-size:10px;opacity:.7" title="SEK value derived from the other side of this swap">↔ derived</span>' : ''}
         </td>
         <td class="tax-muted tax-nowrap">${fmtDateShort(t.date)}</td>
         <td>
           <div class="tax-asset-cell-col">
-            <span class="tax-asset-sym">${t.assetSymbol || '—'}</span>
+            <span class="tax-asset-sym" title="${t.assetSymbol || ''}">${displaySym}</span>
+            ${displayName && displayName !== displaySym ? `<span style="font-size:10px;color:var(--tax-muted)">${displayName}</span>` : ''}
             ${t.category === 'trade' && t.inAsset ? `<span style="font-size:11px;color:#8b5cf6">→ ${t.inAsset}</span>` : ''}
           </div>
         </td>
         <td class="ta-r tax-mono">${TaxEngine.formatCrypto(t.amount, 8)}</td>
-        <td class="ta-r tax-mono">${t.priceSEKPerUnit ? TaxEngine.formatSEK(t.priceSEKPerUnit, 2) : '<span class="tax-missing">—</span>'}</td>
+        <td class="ta-r tax-mono">${priceCell}</td>
         <td class="ta-r tax-mono">${val ? TaxEngine.formatSEK(val) : '<span class="tax-missing">—</span>'}</td>
         <td class="ta-r tax-mono">${t.feeSEK ? TaxEngine.formatSEK(t.feeSEK, 2) : '—'}</td>
         <td>
           <div class="tax-row-actions">
-            ${t.needsReview ? '<span title="Needs review" style="font-size:13px">⚠️</span>' : ''}
+            ${t.needsReview ? `<span title="${t.reviewReason || 'Needs review'}" style="font-size:13px">⚠️</span>` : ''}
             <button class="tax-icon-btn" onclick="TaxUI.editTx('${t.id}')">✏️</button>
             <button class="tax-icon-btn tax-icon-del" onclick="TaxUI.deleteTx('${t.id}')">🗑️</button>
           </div>

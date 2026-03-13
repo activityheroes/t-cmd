@@ -2278,18 +2278,33 @@ const TaxUI = (() => {
   function printReport() { window.print(); }
 
   async function downloadK4PDF() {
+    const settings = TaxEngine.getSettings();
+    const name = settings.userName || S.userName || '';
+    const pnr  = settings.personnummer || S.userPnr || '';
+
+    if (!name || !pnr) {
+      showTaxToast('⚠️', 'Profil saknas', 'Fyll i Namn och Personnummer under ⚙️ Inställningar för att generera K4 PDF.', 'warning');
+      return;
+    }
+
+    if (typeof K4PdfFiller === 'undefined') {
+      showTaxToast('❌', 'PDF-biblioteket saknas', 'Ladda om sidan och försök igen.', 'error');
+      return;
+    }
+
     const result = getOrComputeTaxResult();
-    const userInfo = { name: S.userName || '', personnummer: S.userPnr || '' };
     try {
-      if (!userInfo.name && typeof AuthManager !== 'undefined') {
-        const u = AuthManager.getUser();
-        if (u) userInfo.name = u.name;
-      }
-    } catch { }
-    try {
-      showTaxToast('⏳', 'Genererar K4 PDF', 'Fyller i Skatteverkets blankett…', 'info');
-      await K4PDFGenerator.downloadK4PDF(result, userInfo, S.taxYear);
-      showTaxToast('✅', 'K4 PDF klar', 'Filen har laddats ner.', 'success');
+      showTaxToast('⏳', 'Genererar K4 PDF…', '', 'info');
+      const k4  = TaxEngine.generateK4Report(result);
+      const buf = await K4PdfFiller.generate(k4, { name, pnr, year: S.taxYear });
+      const blob = new Blob([buf], { type: 'application/pdf' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const pnrSafe = pnr.replace(/[^0-9]/g, '');
+      a.download = `K4_${S.taxYear}_${pnrSafe}.pdf`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showTaxToast('✅', 'K4 PDF nedladdad', `K4_${S.taxYear}_${pnrSafe}.pdf`, 'success');
     } catch (e) {
       console.error('[K4PDF]', e);
       showTaxToast('❌', 'Kunde inte generera K4 PDF', e.message, 'error');

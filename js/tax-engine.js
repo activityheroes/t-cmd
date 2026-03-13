@@ -113,7 +113,12 @@ const TaxEngine = (() => {
   // ── Settings (in-memory cache loaded from Supabase) ──────
   let _settingsCache = null;
   function getSettings() {
-    const def = { currency: 'SEK', taxYear: new Date().getFullYear() - 1, country: 'SE', method: 'genomsnittsmetoden' };
+    const def = {
+      currency: 'SEK', taxYear: new Date().getFullYear() - 1,
+      country: 'SE', method: 'genomsnittsmetoden',
+      userName:     '',   // Namn — shown in K4 PDF header
+      personnummer: '',   // Personnummer YYYYMMDD-XXXX — shown in K4 PDF header
+    };
     return _settingsCache ? { ...def, ..._settingsCache } : def;
   }
   async function loadSettings() {

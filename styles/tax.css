@@ -2678,3 +2678,102 @@
   /* Inherits .admin-section styling from components.css */
 }
 
+
+/* ── Review stats bar ────────────────────────────────────── */
+.tax-review-stats {
+  background: rgba(251, 191, 36, 0.06);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+.tax-rs-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.tax-rs-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #000;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 0 6px;
+}
+.tax-rs-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #e2e8f0);
+}
+.tax-rs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tax-rs-chip {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+}
+.tax-rs-chip strong { color: var(--text-primary, #e2e8f0); }
+
+/* ── Profile inline form ─────────────────────────────────── */
+.tax-profile-inline {
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.05);
+  margin-bottom: 20px;
+  overflow: hidden;
+  transition: border-color .2s;
+}
+.tax-profile-required {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.04);
+}
+.tax-profile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+.tax-profile-head:hover { background: rgba(255,255,255,0.03); }
+.tax-profile-headtitle {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary, #e2e8f0);
+}
+.tax-profile-toggle {
+  font-size: 14px;
+  color: var(--text-muted, #94a3b8);
+  transition: transform .2s;
+}
+.tax-profile-body {
+  display: none;
+  padding: 0 16px 16px;
+  flex-direction: column;
+  gap: 12px;
+}
+.tax-profile-open .tax-profile-body { display: flex; }
+.tax-profile-open .tax-profile-toggle { transform: rotate(45deg); }
+.tax-profile-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+@keyframes tax-shake {
+  0%,100% { transform: translateX(0); }
+  20%,60%  { transform: translateX(-6px); }
+  40%,80%  { transform: translateX(6px); }
+}
+.tax-profile-shake { animation: tax-shake .4s ease; }

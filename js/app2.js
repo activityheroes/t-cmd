@@ -1818,16 +1818,22 @@ const App = {
         if (t === 'log') renderTradingLog();
         if (t === 'whales') { if (typeof WhalesPanel !== 'undefined') WhalesPanel.render(); }
         if (t === 'tax') {
-          const user = AuthManager.getUser();
-          // Admin users always have access; regular users need taxCalculator feature
-          const hasAccess = user?.role === 'admin' || user?.features?.taxCalculator;
-          if (hasAccess) {
-            if (typeof TaxUI !== 'undefined') TaxUI.init();
-          } else {
-            // Show access-denied screen instead of the full UI
-            const panel = document.getElementById('tax-panel');
-            if (panel) {
-              panel.innerHTML = `
+          // SECURITY: Re-verify session against the DB before loading privileged content.
+          // This prevents a user who edited localStorage from accessing the tax calculator.
+          const panel = document.getElementById('tax-panel');
+          AuthManager.verifySession().then(valid => {
+            const user = AuthManager.getUser(); // read fresh session after verifySession
+            if (!valid || !user) {
+              // Session was invalidated — send back to login
+              AuthManager.logout();
+              if (typeof showAuthPage !== 'undefined') showAuthPage('login');
+              return;
+            }
+            const hasAccess = user.role === 'admin' || user.features?.taxCalculator;
+            if (hasAccess) {
+              if (typeof TaxUI !== 'undefined') TaxUI.init();
+            } else {
+              if (panel) panel.innerHTML = `
                 <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;gap:16px;text-align:center;padding:40px;">
                   <div style="font-size:48px">🔒</div>
                   <div style="font-size:20px;font-weight:700;color:var(--text-primary)">Tax Calculator — Access Required</div>
@@ -1840,7 +1846,7 @@ const App = {
                   </div>
                 </div>`;
             }
-          }
+          }); // end verifySession().then
         }
       });
     });

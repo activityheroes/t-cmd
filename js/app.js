@@ -96,11 +96,26 @@ function switchTab(tab) {
   if (tab !== 'tax' || !window.location.hash.startsWith('#tax/')) {
     history.replaceState(null, '', '#' + tab);
   }
-  // Lazy-render admin panel when the admin tab is opened
+  // Lazy-render admin panel when the admin tab is opened.
+  // SECURITY: verifySession() re-checks role against the DB before rendering.
   if (tab === 'admin' && typeof renderAdminPanel === 'function') {
+    if (!AuthManager.isAdmin()) {
+      // Not admin — don't even attempt to load the panel
+      const p = document.getElementById('admin-page-content');
+      if (p) p.innerHTML = `<div style="color:#f87171;padding:40px;text-align:center;">⛔ Access denied.</div>`;
+      return;
+    }
     // Point renderAdminPanel at the dedicated page container
     window._taxAdminTarget = document.getElementById('admin-page-content');
-    renderAdminPanel();
+    // Re-verify session with DB before loading any user data
+    AuthManager.verifySession().then(valid => {
+      if (!valid) {
+        AuthManager.logout();
+        if (typeof showAuthPage !== 'undefined') showAuthPage('login');
+        return;
+      }
+      renderAdminPanel();
+    });
   }
 }
 

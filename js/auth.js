@@ -6,21 +6,44 @@
 const AuthManager = (() => {
   const STORAGE_KEY = 'tcmd_auth'; // session only — always localStorage
 
-  // ── Session (always local) ────────────────────────────────
-  function getSession() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { return null; }
+  function clearSession() { localStorage.removeItem(STORAGE_KEY); }
+
+  // ── Session integrity hash ────────────────────────────────
+  // A lightweight deterrent against session tampering.
+  // Computes a stable string from the session that changes if role/features/email
+  // are altered. Not cryptographically secure (client-side JS), but it:
+  //   a) Detects accidental or casual localStorage edits immediately
+  //   b) Forces re-login when the hash doesn't match
+  // Full security requires server-side JWT verification (see supabase-schema.sql).
+  function _sessionHash(s) {
+    if (!s) return '';
+    return btoa(`${s.userId}|${s.role}|${s.email}|${JSON.stringify(s.features || {})}`);
   }
   function setSession(user) {
     const session = {
-      userId: user.id,
-      role: user.role,
-      name: user.name,
-      email: user.email,
+      userId:   user.id,
+      role:     user.role,
+      name:     user.name,
+      email:    user.email,
       features: user.features || { coinSignals: true, memeScanner: true, tradingLog: true }
     };
+    session._h = _sessionHash(session);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
   }
-  function clearSession() { localStorage.removeItem(STORAGE_KEY); }
+  function getSession() {
+    try {
+      const s = JSON.parse(localStorage.getItem(STORAGE_KEY));
+      if (!s) return null;
+      // Detect tampering: recompute hash and compare
+      const expected = _sessionHash(s);
+      if (s._h && s._h !== expected) {
+        console.error('[Security] Session integrity check failed — possible tampering. Logging out.');
+        localStorage.removeItem(STORAGE_KEY);
+        return null;
+      }
+      return s;
+    } catch { return null; }
+  }
 
   // ── Public (sync — safe for UI guards) ───────────────────
   return {
@@ -30,6 +53,32 @@ const AuthManager = (() => {
     getUser() { return getSession(); },
     isAdmin() { const s = getSession(); return s?.role === 'admin'; },
     hasFeature(f) { const s = getSession(); return !!(s?.features?.[f]); },
+
+    // Re-verify the current session against the live database.
+    // Call this before rendering privileged pages (admin, tax calculator).
+    // Returns true if the session is still valid and the DB role matches localStorage.
+    async verifySession() {
+      const s = getSession();
+      if (!s?.userId || !s?.email) return false;
+      try {
+        const dbUser = await SupabaseDB.getUserByEmail(s.email);
+        if (!dbUser) { clearSession(); return false; }
+        if (dbUser.status !== 'active') { clearSession(); return false; }
+        // If the DB role differs from what's in localStorage, the session was tampered with.
+        if (dbUser.role !== s.role || dbUser.id !== s.userId) {
+          console.error('[Security] Session role mismatch vs database — forcing re-login.');
+          clearSession();
+          return false;
+        }
+        // Refresh the session with authoritative DB data so features are always current
+        setSession(dbUser);
+        return true;
+      } catch {
+        // Network error: don't log out — just trust the cached session
+        return true;
+      }
+    },
+
     logout() {
       clearSession();
       // Wipe per-user transaction cache so the next user cannot see stale data
@@ -81,25 +130,65 @@ const AuthManager = (() => {
     },
 
     // ── Admin helpers (async) ──────────────────────────────
-    async getAllUsers() { return SupabaseDB.getAllUsers(); },
-    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false } }); },
-    async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
-    async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
-    async deleteUser(id) { return SupabaseDB.deleteUser(id); },
+    // SECURITY: Every admin operation first verifies the session role.
+    // The client-side check is a usability guard; Supabase RLS provides the
+    // server-side enforcement layer that cannot be bypassed from the browser.
+    _requireAdmin() {
+      const s = getSession();
+      if (!s || s.role !== 'admin') {
+        console.error('[AuthManager] Unauthorized admin operation attempted by', s?.email || 'unauthenticated user');
+        throw new Error('Unauthorized: administrator access required.');
+      }
+    },
+
+    async getAllUsers() {
+      this._requireAdmin();
+      return SupabaseDB.getAllUsers();
+    },
+    async approveUser(id) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false } });
+    },
+    async disableUser(id) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, { status: 'disabled' });
+    },
+    async updateFeatures(id, features) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, { features });
+    },
+    async deleteUser(id) {
+      this._requireAdmin();
+      // Prevent admin from deleting their own account accidentally
+      const s = getSession();
+      if (s.userId === id) throw new Error('Cannot delete your own admin account.');
+      return SupabaseDB.deleteUser(id);
+    },
     async createUserDirect({ name, email, password, role = 'user' }) {
+      this._requireAdmin();
       return SupabaseDB.createUser({
         name, email, password, role, status: 'active',
         features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false },
       });
     },
-    async updateUser(id, data) { return SupabaseDB.updateUser(id, data); },
+    async updateUser(id, data) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, data);
+    },
 
     // ── Invite helpers ────────────────────────────────────
     async generateInvite(email = null, name = null) {
+      this._requireAdmin();
       const session = getSession();
       return SupabaseDB.createInvite({ email, name, createdBy: session?.userId || null });
     },
-    async getAllInvites() { return SupabaseDB.getAllInvites(); },
+    async getAllInvites() {
+      this._requireAdmin();
+      const session = getSession();
+      // Non-admin requests are already blocked above; but pass createdBy as
+      // defence-in-depth so the query itself is also scoped.
+      return SupabaseDB.getAllInvites(session?.userId);
+    },
 
     // Register via invite token (bypasses pending — creates active account)
     async registerViaInvite(token, name, email, password) {
@@ -445,6 +534,16 @@ function showAuthError(el, msg) {
 
 // ── Admin panel renderer ──────────────────────────────────────
 async function renderAdminPanel() {
+  // SECURITY: abort immediately if the current session is not admin.
+  // This prevents an attacker who edited localStorage from ever seeing
+  // the admin UI or triggering admin data loads.
+  if (!AuthManager.isAdmin()) {
+    console.warn('[Security] Unauthorized attempt to render admin panel.');
+    const panel = document.getElementById('admin-page-content') || document.getElementById('admin-panel-content');
+    if (panel) panel.innerHTML = `<div style="color:#f87171;padding:40px;text-align:center;font-size:14px;">⛔ Access denied — administrator account required.</div>`;
+    return;
+  }
+
   // Priority: dedicated admin nav page → inline tax target → legacy drawer overlay
   window._taxAdminTarget = null; // reset so next call picks fresh target
   const panel = document.getElementById('admin-page-content')

@@ -429,73 +429,100 @@ const SupabaseDB = (() => {
         // ══════════════════════════════════════════════════════
 
         async getApiKeys() {
+            // API keys are app-wide (admin-managed) when Supabase is live.
+            // When falling back to localStorage the keys are stored per-user so one
+            // user cannot read another user's manually entered dev keys.
+            const userId = _uid();
+            const K = window.TCMD_KEYS || {};
             if (!SUPABASE_READY) {
-                // Fall back to localStorage keys
-                const K = window.TCMD_KEYS || {};
                 return {
-                    helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
-                    birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
-                    etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
+                    helius:    localStorage.getItem(`tcmd_${userId}_helius_key`)    || K.helius    || '',
+                    birdeye:   localStorage.getItem(`tcmd_${userId}_birdeye_key`)   || K.birdeye   || '',
+                    etherscan: localStorage.getItem(`tcmd_${userId}_etherscan_key`) || K.etherscan || '',
                 };
             }
             try {
                 const rows = await sbGet('api_keys');
                 const keys = {};
                 for (const r of rows) keys[r.name] = r.value || '';
-                // Merge with defaults from keys.js
-                const K = window.TCMD_KEYS || {};
                 return {
-                    helius: keys.helius || K.helius || '',
-                    birdeye: keys.birdeye || K.birdeye || '',
+                    helius:    keys.helius    || K.helius    || '',
+                    birdeye:   keys.birdeye   || K.birdeye   || '',
                     etherscan: keys.etherscan || K.etherscan || '',
                 };
             } catch {
-                const K = window.TCMD_KEYS || {};
                 return {
-                    helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
-                    birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
-                    etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
+                    helius:    localStorage.getItem(`tcmd_${userId}_helius_key`)    || K.helius    || '',
+                    birdeye:   localStorage.getItem(`tcmd_${userId}_birdeye_key`)   || K.birdeye   || '',
+                    etherscan: localStorage.getItem(`tcmd_${userId}_etherscan_key`) || K.etherscan || '',
                 };
             }
         },
 
         async setApiKey(name, value) {
+            const userId = _uid();
             const val = (value || '').trim();
             if (!SUPABASE_READY) {
-                localStorage.setItem(`tcmd_${name}_key`, val);
+                // User-scoped key so dev keys entered by one user aren't visible to others
+                localStorage.setItem(`tcmd_${userId}_${name}_key`, val);
                 return;
             }
             try {
                 await sbUpsert('api_keys', { name, value: val, updated_at: new Date().toISOString() }, 'name');
             } catch (e) {
                 console.warn('[SupabaseDB] setApiKey failed, saving to localStorage:', e.message);
-                localStorage.setItem(`tcmd_${name}_key`, val);
+                localStorage.setItem(`tcmd_${userId}_${name}_key`, val);
             }
         },
 
         // ══════════════════════════════════════════════════════
-        // WATCHED WALLETS (with user_id)
+        // WATCHED WALLETS — strictly scoped by authenticated user
+        // ══════════════════════════════════════════════════════
+        // SECURITY: Every query MUST include user_id=eq.{userId} so that
+        // Row Level Security (RLS) on the Supabase side plus this client-side
+        // guard give two independent layers of isolation.
         // ══════════════════════════════════════════════════════
 
         async getWallets() {
-            if (!SUPABASE_READY) return null;
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                // localStorage fallback — scoped per user
+                try {
+                    return JSON.parse(localStorage.getItem(`tcmd_wallets_${userId}`) || '[]');
+                } catch { return []; }
+            }
             try {
-                return await sbGet('watched_wallets', 'order=created_at.desc');
-            } catch { return null; }
+                // Always filter by the authenticated user's id
+                return await sbGet('watched_wallets', `user_id=eq.${userId}&order=created_at.desc`);
+            } catch { return []; }
         },
 
         async addWallet({ chain, address, label }) {
             const userId = _uid();
-            if (!SUPABASE_READY) return null;
+            if (!SUPABASE_READY) {
+                const wallets = JSON.parse(localStorage.getItem(`tcmd_wallets_${userId}`) || '[]');
+                const w = { id: 'w_' + Date.now(), chain, address, label, user_id: userId, created_at: new Date().toISOString() };
+                wallets.push(w);
+                localStorage.setItem(`tcmd_wallets_${userId}`, JSON.stringify(wallets));
+                return w;
+            }
             try {
                 return await sbPost('watched_wallets', { chain, address, label, user_id: userId });
             } catch { return null; }
         },
 
         async deleteWallet(id) {
-            if (!SUPABASE_READY) return false;
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const wallets = JSON.parse(localStorage.getItem(`tcmd_wallets_${userId}`) || '[]')
+                    .filter(w => w.id !== id);
+                localStorage.setItem(`tcmd_wallets_${userId}`, JSON.stringify(wallets));
+                return true;
+            }
             try {
-                await sbDelete('watched_wallets', `id=eq.${id}`);
+                // Include user_id in the delete predicate — only deletes wallet if it belongs
+                // to the current user. This is a second security layer after Supabase RLS.
+                await sbDelete('watched_wallets', `id=eq.${id}&user_id=eq.${userId}`);
                 return true;
             } catch { return false; }
         }

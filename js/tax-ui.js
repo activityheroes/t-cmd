@@ -1374,14 +1374,15 @@ const TaxUI = (() => {
 
   // Price source → short label + colour for the confidence dot in price column
   const PRICE_SOURCE_LABELS = {
-    trade_exact:            { label: 'Exchange',   dot: '#22c55e' },
-    market_api_coingecko:   { label: 'CoinGecko',  dot: '#22c55e' },
-    swap_implied:           { label: 'Swap',        dot: '#a78bfa' },
-    pair_derived:           { label: 'Derived',     dot: '#a78bfa' },
-    stable_historical_fx:   { label: 'FX',          dot: '#34d399' },
-    stable_approx:          { label: 'Approx',      dot: '#fbbf24' },
-    manual:                 { label: 'Manual',      dot: '#60a5fa' },
-    missing:                { label: 'Missing',     dot: '#f87171' },
+    trade_exact:            { label: 'Exchange',     dot: '#22c55e' },
+    market_api_coingecko:   { label: 'CoinGecko',    dot: '#22c55e' },
+    market_api_dex:         { label: 'DEX (GT)',     dot: '#34d399' },  // GeckoTerminal
+    swap_implied:           { label: 'Swap derived', dot: '#a78bfa' },
+    pair_derived:           { label: 'Derived',      dot: '#a78bfa' },
+    stable_historical_fx:   { label: 'FX',           dot: '#34d399' },
+    stable_approx:          { label: 'Approx',       dot: '#fbbf24' },
+    manual:                 { label: 'Manual',       dot: '#60a5fa' },
+    missing:                { label: 'Missing',      dot: '#f87171' },
   };
 
   function renderTxRow(t) {
@@ -1548,16 +1549,22 @@ const TaxUI = (() => {
     const issues = TaxEngine.getReviewIssues(null, taxResult);
     const groups = groupByReason(issues);
 
-    // Severity buckets for the summary bar
-    const critical = issues.filter(i => ['negative_balance','missing_sek_price','unknown_asset','ambiguous_swap'].includes(i.reason)).length;
-    const warnings = issues.filter(i => ['duplicate','unmatched_transfer','outlier','split_trade'].includes(i.reason)).length;
-    const info = issues.length - critical - warnings;
+    // Severity buckets — use priority field set by engine when available
+    const k4Blockers = issues.filter(i => i.isK4Blocker || ['negative_balance','unknown_acquisition'].includes(i.reason)).length;
+    const critical   = issues.filter(i => i.priority === 'critical' || ['missing_sek_price','unknown_asset','ambiguous_swap'].includes(i.reason)).length;
+    const warnings   = issues.filter(i => ['duplicate','unmatched_transfer','outlier','split_trade'].includes(i.reason)).length;
+    const lowPri     = issues.filter(i => i.priority === 'low' || ['received_not_sold','spam_token'].includes(i.reason)).length;
+    const trueIssues = issues.length - lowPri;
+
+    // Count missing-price disposals (true K4 blockers) vs received-not-sold (informational)
+    const missingDisposals = issues.filter(i => i.reason === 'missing_sek_price' && i.isK4Blocker).length;
+    const receivedUnsold   = issues.filter(i => i.reason === 'received_not_sold').length;
 
     return `
       <div class="tax-page">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Review</h1>
-          <span class="tax-page-subtitle">${issues.length} exception${issues.length !== 1 ? 's' : ''} require attention</span>
+          <span class="tax-page-subtitle">${trueIssues} exception${trueIssues !== 1 ? 's' : ''} require attention${lowPri > 0 ? ` · ${lowPri} informational` : ''}</span>
           ${issues.length > 0 ? `
             <div class="tax-page-actions" style="gap:8px">
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Mark all OK</button>
@@ -1572,22 +1579,42 @@ const TaxUI = (() => {
             <div class="tax-review-done-sub">No exceptions. Tax calculations are based on complete data.</div>
           </div>
         ` : `
-          ${critical > 0 || warnings > 0 ? `
-          <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">
-            ${critical > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);color:#f87171;font-size:13px;font-weight:600">🔴 ${critical} Critical — affects tax accuracy</div>` : ''}
-            ${warnings > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24;font-size:13px;font-weight:600">🟡 ${warnings} Warnings — should be reviewed</div>` : ''}
-            ${info > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);color:#818cf8;font-size:13px;font-weight:600">🔵 ${info} Info — verify classification</div>` : ''}
-          </div>` : ''}
+          <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+            ${k4Blockers > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171;font-size:13px;font-weight:600">🔴 ${k4Blockers} K4 blocker${k4Blockers !== 1 ? 's' : ''} — missing price on disposal</div>` : ''}
+            ${warnings > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24;font-size:13px;font-weight:600">🟡 ${warnings} warnings</div>` : ''}
+            ${receivedUnsold > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);color:#818cf8;font-size:13px">📥 ${receivedUnsold} received-not-sold — not K4 blocking</div>` : ''}
+          </div>
 
           <div class="tax-info-box" style="margin-bottom:20px">
             <span>ℹ️</span>
-            <span>Only genuine exceptions are shown. Normal trades, transfers, and fees are classified automatically. Fix these items for an accurate K4 report.</span>
+            <span>Only genuine exceptions are shown. Spam airdrops and dust are auto-zeroed. <strong>K4 blockers are disposals (sales/trades) with no SEK price</strong> — fix these first. "Received-not-sold" items are informational only.</span>
           </div>
 
           <div class="tax-review-groups">
             ${groups.map(({ reason, meta, items }) => {
-              const isCritical = ['negative_balance','missing_sek_price','unknown_asset','ambiguous_swap'].includes(reason);
-              const borderColor = isCritical ? 'rgba(239,68,68,.25)' : 'rgba(99,102,241,.15)';
+              const isK4Critical = items.some(i => i.isK4Blocker) || ['negative_balance','unknown_acquisition'].includes(reason);
+              const isCritical   = isK4Critical || ['missing_sek_price','unknown_asset','ambiguous_swap'].includes(reason);
+              const isLowPri     = ['received_not_sold','spam_token'].includes(reason);
+              const borderColor  = isK4Critical ? 'rgba(239,68,68,.3)'
+                                 : isCritical   ? 'rgba(239,68,68,.2)'
+                                 : isLowPri     ? 'rgba(99,102,241,.1)'
+                                 : 'rgba(99,102,241,.15)';
+              const badgeBg    = isK4Critical ? 'rgba(239,68,68,.25)' : isLowPri ? 'rgba(99,102,241,.15)' : 'rgba(251,191,36,.15)';
+              const badgeColor = isK4Critical ? '#f87171' : isLowPri ? '#818cf8' : '#fbbf24';
+
+              // Per-group bulk action buttons
+              const bulkActions = (meta.bulkActions || []).map(action => {
+                switch (action) {
+                  case 'mark_spam':    return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkSpam('${reason}')">🚫 Mark all as spam</button>`;
+                  case 'enter_price':  return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkShowPriceSearch('${reason}')">💰 Batch price lookup</button>`;
+                  case 'mark_zero_cost': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkZeroCost('${reason}')">0️⃣ Set zero cost basis</button>`;
+                  case 'mark_income':  return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkReclassify('${reason}','income')">💼 Reclassify as income</button>`;
+                  case 'ignore_received': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Mark all OK</button>`;
+                  case 'confirm_spam': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Confirm all spam</button>`;
+                  default: return '';
+                }
+              }).join('');
+
               return `
               <div class="tax-review-group" style="border-color:${borderColor}">
                 <div class="tax-review-group-header">
@@ -1595,7 +1622,9 @@ const TaxUI = (() => {
                   <div style="flex:1">
                     <div class="tax-review-group-title">
                       ${meta.label}
-                      <span class="tax-section-count" style="background:${isCritical ? 'rgba(239,68,68,.2)' : 'rgba(99,102,241,.2)'}; color:${isCritical ? '#f87171' : '#818cf8'}">${items.length}</span>
+                      <span class="tax-section-count" style="background:${badgeBg};color:${badgeColor}">${items.length}</span>
+                      ${isK4Critical ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(239,68,68,.15);color:#f87171;margin-left:4px;font-weight:600">K4 BLOCKER</span>' : ''}
+                      ${isLowPri ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(99,102,241,.1);color:#818cf8;margin-left:4px">informational</span>' : ''}
                     </div>
                     <div class="tax-review-group-why">${meta.why}</div>
                   </div>
@@ -1603,15 +1632,18 @@ const TaxUI = (() => {
                 <div class="tax-review-fix-tip">
                   💡 ${meta.fix}
                   ${reason === 'duplicate' ? `<button class="tax-btn tax-btn-xs" style="margin-left:8px;background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteDuplicates()">🗑 Delete all duplicates</button>` : ''}
-                  ${reason === 'unknown_asset' ? `<button class="tax-btn tax-btn-xs tax-btn-ghost" style="margin-left:8px" onclick="TaxUI.markGroupSpam('${reason}')">🚫 Mark all as spam</button>` : ''}
+                  <span style="display:inline-flex;gap:6px;margin-left:8px">${bulkActions}</span>
                 </div>
                 <div class="tax-review-items">
-                  ${items.map(({ txn, reason: r }) => {
+                  ${items.map(({ txn, isK4Blocker: itemK4 }) => {
                     const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(txn.assetSymbol) : { symbol: txn.assetSymbol, name: '' };
                     const displaySym = td.symbol || txn.assetSymbol || '?';
                     const displayName = td.name || txn.assetName || '';
                     const acct = TaxEngine.getAccounts().find(a => a.id === txn.accountId);
                     const acctLabel = acct ? (acct.label || acct.type || acct.id.slice(-6)) : 'Unknown wallet';
+                    const confidenceDot = txn.priceConfidence === 'spam_zero' ? '🗑️'
+                      : txn.priceConfidence === 'received_unsold' ? '📥'
+                      : txn.priceConfidence === 'unknown_manual' ? '❓' : '';
                     return `
                     <div class="tax-review-item">
                       <div class="tax-ri-left" style="flex:1;min-width:0">
@@ -1622,9 +1654,12 @@ const TaxUI = (() => {
                         <span class="tax-badge" style="font-size:10px;opacity:.7">${acctLabel}</span>
                         ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
                         ${txn.category ? `<span class="tax-badge" style="font-size:10px">${txn.category}</span>` : ''}
+                        ${itemK4 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171">K4</span>` : ''}
+                        ${confidenceDot ? `<span title="Price confidence: ${txn.priceConfidence}" style="font-size:11px">${confidenceDot}</span>` : ''}
                       </div>
                       <div class="tax-ri-right">
                         <button class="tax-btn tax-btn-xs tax-btn-primary" onclick="TaxUI.editTx('${txn.id}')">Edit</button>
+                        <button class="tax-btn tax-btn-xs" style="color:#94a3b8" onclick="TaxUI.markSpam('${txn.id}')" title="Mark as spam (zero value)">🚫</button>
                         <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')">OK</button>
                         <button class="tax-btn tax-btn-xs" style="color:#f87171" onclick="TaxUI.deleteTx('${txn.id}')" title="Delete">🗑</button>
                       </div>
@@ -1644,11 +1679,17 @@ const TaxUI = (() => {
   function groupByReason(issues) {
     const groups = {};
     for (const issue of issues) {
-      if (!groups[issue.reason]) groups[issue.reason] = { reason: issue.reason, meta: issue.meta, items: [] };
+      if (!groups[issue.reason]) groups[issue.reason] = { reason: issue.reason, meta: issue.meta, items: [], hasK4: false };
       groups[issue.reason].items.push(issue);
+      if (issue.isK4Blocker) groups[issue.reason].hasK4 = true;
     }
-    // Return in priority order (same as engine's sort)
-    const ORDER = ['negative_balance','missing_sek_price','unknown_asset','duplicate','ambiguous_swap','unmatched_transfer','outlier','split_trade','unknown_contract','unsupported_defi','special_transaction','bridge_review','unclassified'];
+    // Return in priority order matching engine sort
+    const ORDER = [
+      'unknown_acquisition','negative_balance','missing_sek_price','unknown_asset',
+      'duplicate','ambiguous_swap','unmatched_transfer','outlier','split_trade',
+      'unknown_contract','unsupported_defi','special_transaction','bridge_review',
+      'unclassified','received_not_sold','spam_token',
+    ];
     return Object.values(groups).sort((a, b) => {
       const ai = ORDER.indexOf(a.reason); const bi = ORDER.indexOf(b.reason);
       return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
@@ -1975,6 +2016,97 @@ const TaxUI = (() => {
     showTaxToast('🚫', 'Marked as spam', `${affected.length} transactions excluded from calculations.`, 'success');
     render();
   }
+  // ── Bulk review actions ─────────────────────────────────────
+
+  // Mark a single transaction as spam + zero value (non-destructive — keeps the record)
+  function markSpam(id) {
+    TaxEngine.updateTransaction(id, {
+      category: 'spam',
+      priceSEKPerUnit: 0, costBasisSEK: 0,
+      priceSource: 'missing', priceConfidence: 'spam_zero',
+      needsReview: false, reviewReason: 'spam_token', userReviewed: true,
+    });
+    S.taxResult = null;
+    render();
+  }
+
+  // Mark all transactions in a review group as spam (zero value, excluded from K4)
+  function bulkMarkSpam(reason) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult);
+    const affected = issues.filter(i => i.reason === reason);
+    if (!affected.length) return;
+    if (!confirm(`Mark ${affected.length} transactions as spam / zero value?\nThey will be excluded from K4 calculations but kept for audit purposes.`)) return;
+    const ids = new Set(affected.map(i => i.txnId));
+    const updated = TaxEngine.getTransactions().map(t =>
+      ids.has(t.id) ? { ...t,
+        category: 'spam',
+        priceSEKPerUnit: 0, costBasisSEK: 0,
+        priceSource: 'missing', priceConfidence: 'spam_zero',
+        needsReview: false, reviewReason: 'spam_token', userReviewed: true,
+      } : t
+    );
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    showTaxToast('🚫', 'Marked as spam', `${affected.length} transactions set to zero value.`, 'success');
+    render();
+  }
+
+  // Mark all items in a reason group as reviewed (dismiss without editing)
+  function bulkMarkReviewed(reason) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult);
+    const affected = issues.filter(i => i.reason === reason);
+    if (!affected.length) return;
+    const ids = new Set(affected.map(i => i.txnId));
+    const updated = TaxEngine.getTransactions().map(t =>
+      ids.has(t.id) ? { ...t, needsReview: false, reviewReason: null, userReviewed: true } : t
+    );
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    showTaxToast('✅', 'Dismissed', `${affected.length} items marked as reviewed.`, 'success');
+    render();
+  }
+
+  // Set zero cost basis on all disposals in a group (when acquisition history is fully missing)
+  function bulkZeroCost(reason) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult);
+    const affected = issues.filter(i => i.reason === reason);
+    if (!affected.length) return;
+    if (!confirm(`Set zero cost basis for ${affected.length} transactions?\nThis means full proceeds will be treated as taxable gain (per Skatteverket rules when acquisition is unknown).`)) return;
+    const ids = new Set(affected.map(i => i.txnId));
+    const updated = TaxEngine.getTransactions().map(t => {
+      if (!ids.has(t.id)) return t;
+      return { ...t,
+        priceSEKPerUnit: t.priceSEKPerUnit || 0,
+        costBasisSEK: 0,
+        zeroCostBasis: true,
+        needsReview: false, reviewReason: null, userReviewed: true,
+      };
+    });
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    showTaxToast('0️⃣', 'Zero cost set', `${affected.length} transactions will use full proceeds as gain.`, 'info');
+    render();
+  }
+
+  // Reclassify all transactions in a reason group to a new category
+  function bulkReclassify(reason, newCategory) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult);
+    const affected = issues.filter(i => i.reason === reason);
+    if (!affected.length) return;
+    if (!confirm(`Reclassify ${affected.length} transactions as "${newCategory}"?`)) return;
+    const ids = new Set(affected.map(i => i.txnId));
+    const updated = TaxEngine.getTransactions().map(t =>
+      ids.has(t.id) ? { ...t,
+        category: newCategory,
+        needsReview: false, reviewReason: null, userReviewed: true,
+      } : t
+    );
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    showTaxToast('🔄', 'Reclassified', `${affected.length} transactions set to "${newCategory}".`, 'success');
+    render();
+  }
+
   function removeAccount(id) {
     const acc = TaxEngine.getAccounts().find(a => a.id === id);
     const txCount = TaxEngine.getTransactions().filter(t => t.accountId === id).length;
@@ -2354,7 +2486,9 @@ const TaxUI = (() => {
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
     toggleSelectAll, toggleSelectTx, deleteSelected, deleteAllFiltered, clearSelection,
-    markReviewed, markAllReviewed, markGroupSpam, deleteDuplicates, removeAccount, clearAllData,
+    markReviewed, markAllReviewed, markSpam,
+    markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify,
+    deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount,
     // Portfolio dashboard

@@ -1015,6 +1015,23 @@ const TaxEngine = (() => {
     MISSING:         'missing',            // All passes failed — manual review required
   };
 
+  // Price Confidence tiers — drive smart triage in getReviewIssues.
+  // Replaces the old binary priced/missing with five distinct tiers:
+  //   SPAM_ZERO       → auto-detected spam; zero value; not shown in K4 review
+  //   RECEIVED_UNSOLD → received and never disposed; informational only, not K4-blocking
+  //   UNKNOWN_MANUAL  → disposal or acquired asset with no price; K4 blocker; manual entry required
+  //   INFERRED_*      → priced via derivation or market API (already resolved, not shown in review)
+  //   EXACT           → exchange execution price (already resolved)
+  const PC = {
+    EXACT:           'exact',           // Level 1 — trade execution price
+    INFERRED_HIGH:   'inferred_high',   // Swap leg with stablecoin counterpart
+    INFERRED_MED:    'inferred_med',    // Swap leg with non-stable / pair-derived
+    INFERRED_LOW:    'inferred_low',    // Market API with far-date interpolation
+    SPAM_ZERO:       'spam_zero',       // Auto-detected spam → zero value, non-blocking
+    RECEIVED_UNSOLD: 'received_unsold', // Received but never disposed → informational
+    UNKNOWN_MANUAL:  'unknown_manual',  // True unknown → K4 blocker, manual entry required
+  };
+
   // Look up a SEK price from the daily-price cache for a symbol + date.
   // Checks CoinGecko cache (by ccId) first, then GeckoTerminal cache (by contractAddress).
   // Tries exact date then walks ±7 days (handles weekends / API gaps).
@@ -1355,6 +1372,51 @@ const TaxEngine = (() => {
     });
   }
 
+  // ── Smart missing-price helpers ────────────────────────────
+  // Build a set of canonical asset symbols that have at least one disposal
+  // (SELL, TRADE, NFT_SALE) anywhere in the transaction list.
+  // Used to distinguish "received but never sold" from "sold with no price history".
+  function buildDisposalSet(txns) {
+    const disposed = new Set();
+    for (const t of txns) {
+      if ([CAT.SELL, CAT.TRADE, CAT.NFT_SALE].includes(t.category)) {
+        disposed.add((t.assetSymbol || '').toUpperCase());
+      }
+    }
+    return disposed;
+  }
+
+  // Heuristic spam detector — returns true if this transaction looks like
+  // a worthless spam airdrop that should be auto-zeroed instead of reviewed.
+  // Does NOT override user-set categories or prices.
+  function isLikelySpamToken(t) {
+    if (t.priceSource === PS.MANUAL) return false; // user already decided
+    if (t.userReviewed) return false;
+
+    const sym  = (t.assetSymbol || '').toUpperCase();
+    const amt  = t.amount || 0;
+    const notes = (t.notes || t.description || '').toLowerCase();
+
+    // Already classified as spam by the classifier
+    if (t.category === CAT.SPAM) return true;
+
+    // Symbol is still a raw contract address (unresolved)
+    if (looksLikeContractAddress(sym)) return true;
+
+    // Notes contain spam patterns
+    if (SPAM_PATTERNS.some(p => p.test(notes))) return true;
+
+    // Extremely small dust amount (excludes major coins)
+    if (amt > 0 && amt < 0.000001 && !['BTC','ETH','SOL','BNB','USDT','USDC'].includes(sym)) return true;
+
+    // Typical spam airdrop: huge round number (≥1M) of an unknown token
+    if (amt >= 1_000_000 && amt % 1000 === 0
+        && [CAT.RECEIVE, CAT.AIRDROP].includes(t.category)
+        && !CC_IDS[sym] && !STABLES.has(sym)) return true;
+
+    return false;
+  }
+
   // Full pricing chain application
   // Pass 1: independent per-transaction pricing (CoinGecko + stablecoin + inline swap derivation)
   // Pass 2: cross-transaction derivation (same txHash + sibling prices) — up to 4 rounds
@@ -1364,12 +1426,38 @@ const TaxEngine = (() => {
     let result = txns.map(t => priceOneTxn(t, cache, fxByYear)); // Pass 1
     result = deriveFromContext(result, cache, fxByYear);           // Pass 2 (multi-round)
     result = priceFees(result, cache, fxByYear);                  // Pass 3
-    // Final: tag anything still unpriceable as missing — manual review as last resort
+    // Final: smart confidence triage — not all missing prices are equal
+    // Build disposal set so we can detect "received but never sold" tokens
+    const disposedSyms = buildDisposalSet(result);
     return result.map(t => {
       if (t.isInternalTransfer || !isTaxableCategory(t.category)) return t;
       if (!t.priceSEKPerUnit && !t.costBasisSEK) {
-        return { ...t, needsReview: true, reviewReason: 'missing_sek_price',
-                 priceSource: PS.MISSING, priceConfidence: null };
+        const sym = (t.assetSymbol || '').toUpperCase();
+        const isDisposal = [CAT.SELL, CAT.TRADE, CAT.NFT_SALE].includes(t.category);
+
+        // Group B — Auto-detected spam: zero value, non-blocking, don't clutter review
+        if (isLikelySpamToken(t)) {
+          return { ...t,
+            priceSEKPerUnit: 0, costBasisSEK: 0,
+            priceSource: PS.MISSING, priceConfidence: PC.SPAM_ZERO,
+            needsReview: false, reviewReason: 'spam_token',
+          };
+        }
+
+        // Group C — Received but never disposed: informational warning, NOT a K4 blocker
+        if (!isDisposal && !disposedSyms.has(sym)) {
+          return { ...t,
+            priceSource: PS.MISSING, priceConfidence: PC.RECEIVED_UNSOLD,
+            needsReview: true, reviewReason: 'received_not_sold',
+          };
+        }
+
+        // Group D — True unknown: disposal or acquired asset needed for K4 → manual review
+        return { ...t,
+          priceSource: PS.MISSING, priceConfidence: PC.UNKNOWN_MANUAL,
+          needsReview: true, reviewReason: 'missing_sek_price',
+          isK4Blocker: isDisposal,
+        };
       }
       // Ensure needsReview is cleared for priced transactions
       if (t.reviewReason === 'missing_sek_price' && (t.priceSEKPerUnit > 0 || t.costBasisSEK > 0)) {
@@ -1736,7 +1824,22 @@ const TaxEngine = (() => {
   // Called AFTER pipeline completes with full taxResult context.
   // ════════════════════════════════════════════════════════════
   const REVIEW_DESCRIPTIONS = {
-    missing_sek_price:    { label: 'Missing SEK price',          icon: '💰', why: 'Cannot calculate gain/loss without SEK value at time of transaction.', fix: 'Enter the market price in SEK on the transaction date.' },
+    // ── Missing price — split into tiers ───────────────────
+    // K4 blocker: disposal (sale/trade) with no SEK value
+    missing_sek_price:    { label: 'Missing price (K4 blocker)',  icon: '💰', priority: 'critical', isK4Blocker: true,
+      why: 'This disposal (sale or trade) has no SEK price — required for K4 gain/loss calculation.',
+      fix: 'Enter the market price in SEK on the transaction date. Check CoinMarketCap or CoinGecko historical data.',
+      bulkActions: ['enter_price', 'mark_zero_cost', 'mark_spam'] },
+    // Informational: received token that was never sold — not K4 blocking
+    received_not_sold:    { label: 'Received — never sold',       icon: '📥', priority: 'low', isK4Blocker: false,
+      why: 'This token was received but never sold. No SEK price was found, but it is not blocking your K4 since you have not disposed of it.',
+      fix: 'No action required. If this was income (staking reward, salary, referral bonus), reclassify as Income so it is included in your income tax calculation.',
+      bulkActions: ['mark_income', 'mark_spam', 'ignore_received'] },
+    // Informational: auto-detected spam token — already zeroed
+    spam_token:           { label: 'Spam / worthless token',      icon: '🗑️', priority: 'info', isK4Blocker: false,
+      why: 'Auto-detected as a spam airdrop or dust transaction — set to zero value and excluded from K4.',
+      fix: 'If this token actually has value, click "Override" to enter the correct SEK price.',
+      bulkActions: ['confirm_spam', 'override_price'] },
     unknown_asset:        { label: 'Unknown token',               icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
     unmatched_transfer:   { label: 'Unmatched transfer',          icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
     negative_balance:     { label: 'Incomplete buy history',      icon: '⚠️', why: 'More units sold than recorded acquired — some import history appears to be missing. Cost basis has been partially reconstructed.', fix: 'Import full transaction history for this asset from all sources (exchange CSVs, wallets, other chains).' },
@@ -1784,9 +1887,26 @@ const TaxEngine = (() => {
       if (t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
       if (flaggedIds.has(t.id)) continue;
 
-      // 1. Missing SEK price on taxable event
+      // 1. Missing SEK price on taxable event — split by confidence tier
       if (taxableCats.has(t.category) && !t.priceSEKPerUnit && !t.costBasisSEK) {
-        issues.push({ txnId: t.id, txn: t, reason: 'missing_sek_price', meta: REVIEW_DESCRIPTIONS.missing_sek_price });
+        const conf = t.priceConfidence;
+        const reason = t.reviewReason;
+
+        // Group B: spam_zero — already auto-zeroed, never surface in review
+        if (conf === PC.SPAM_ZERO || reason === 'spam_token') {
+          flaggedIds.add(t.id); continue;
+        }
+        // Group C: received but never sold — low-priority informational only
+        if (conf === PC.RECEIVED_UNSOLD || reason === 'received_not_sold') {
+          issues.push({ txnId: t.id, txn: t, reason: 'received_not_sold',
+            meta: REVIEW_DESCRIPTIONS.received_not_sold, priority: 'low', isK4Blocker: false });
+          flaggedIds.add(t.id); continue;
+        }
+        // Group D: true unknown — K4 blocker (disposals) or high-priority acquisition
+        const isDisposal = [CAT.SELL, CAT.TRADE, CAT.NFT_SALE].includes(t.category);
+        issues.push({ txnId: t.id, txn: t, reason: 'missing_sek_price',
+          meta: REVIEW_DESCRIPTIONS.missing_sek_price,
+          priority: isDisposal ? 'critical' : 'high', isK4Blocker: isDisposal });
         flaggedIds.add(t.id); continue;
       }
 
@@ -1863,10 +1983,11 @@ const TaxEngine = (() => {
     }
 
     // Sort: most critical first
+    // K4 blockers → high priority → informational → spam/info
     const ORDER = [
-      'unknown_acquisition',  // ← new: no cost basis at all
+      'unknown_acquisition',  // disposal with zero cost basis
       'negative_balance',     // partial history gap
-      'missing_sek_price',    // can't calculate gain/loss
+      'missing_sek_price',    // disposal with no price — K4 blocker
       'unknown_asset',        // token not resolved
       'duplicate',
       'ambiguous_swap',
@@ -1878,10 +1999,19 @@ const TaxEngine = (() => {
       'unsupported_defi',
       'special_transaction',
       'unclassified',
+      'received_not_sold',    // informational — received but never sold
+      'spam_token',           // auto-zeroed spam — lowest priority
     ];
+    // Within same reason, disposals (critical) come before acquisitions (high)
     issues.sort((a, b) => {
       const ai = ORDER.indexOf(a.reason); const bi = ORDER.indexOf(b.reason);
-      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      const rankA = ai === -1 ? 99 : ai;
+      const rankB = bi === -1 ? 99 : bi;
+      if (rankA !== rankB) return rankA - rankB;
+      // Tie-break: K4-blocking disposals before non-blocking acquisitions
+      const aK4 = a.isK4Blocker ? 0 : 1;
+      const bK4 = b.isK4Blocker ? 0 : 1;
+      return aK4 - bK4;
     });
 
     return issues;
@@ -3232,7 +3362,7 @@ const TaxEngine = (() => {
 
   // ── Public API ────────────────────────────────────────────
   return {
-    CAT, PS, REVIEW_DESCRIPTIONS,
+    CAT, PS, PC, REVIEW_DESCRIPTIONS,
     // Settings
     getSettings, saveSettings, loadSettings,
     // Accounts

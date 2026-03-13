@@ -30,7 +30,13 @@ const AuthManager = (() => {
     getUser() { return getSession(); },
     isAdmin() { const s = getSession(); return s?.role === 'admin'; },
     hasFeature(f) { const s = getSession(); return !!(s?.features?.[f]); },
-    logout() { clearSession(); },
+    logout() {
+      clearSession();
+      // Wipe per-user transaction cache so the next user cannot see stale data
+      if (typeof TaxEngine !== 'undefined' && TaxEngine.clearUserCache) {
+        TaxEngine.clearUserCache();
+      }
+    },
 
     // ── Async auth ─────────────────────────────────────────
     async login(email, password) {
@@ -41,6 +47,8 @@ const AuthManager = (() => {
         if (user.status === 'pending') return { success: false, error: 'pending', msg: 'Your account is awaiting admin approval.' };
         if (user.status === 'disabled') return { success: false, error: 'Account is suspended. Contact admin.' };
         setSession(user);
+        // Clear stale cache from any previously logged-in user
+        if (typeof TaxEngine !== 'undefined' && TaxEngine.clearUserCache) TaxEngine.clearUserCache();
         return { success: true, user };
       } catch (e) {
         console.error('Login error:', e);

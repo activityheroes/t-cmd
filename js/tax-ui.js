@@ -2058,6 +2058,61 @@ const TaxUI = (() => {
     render();
   }
 
+  // Re-run the SEK pricing step for all transactions in a review group.
+  // This hits CoinGecko / CoinCap / GeckoTerminal for the affected symbols
+  // and saves any prices found, then re-renders the review list.
+  async function bulkShowPriceSearch(reason) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult);
+    const affected = issues.filter(i => i.reason === reason);
+    if (!affected.length) {
+      showTaxToast('ℹ️', 'Nothing to price', 'No transactions found for this group.', 'info');
+      return;
+    }
+
+    const ids = new Set(affected.map(i => i.txnId));
+    const txnsToPrice = TaxEngine.getTransactions().filter(t => ids.has(t.id));
+    const symbols = [...new Set(txnsToPrice.map(t => t.assetSymbol).filter(Boolean))];
+
+    showTaxToast('⏳', 'Looking up prices…',
+      `Fetching SEK prices for ${symbols.length} symbol${symbols.length !== 1 ? 's' : ''}: ${symbols.slice(0, 5).join(', ')}${symbols.length > 5 ? '…' : ''}`,
+      'info');
+
+    try {
+      // Run just the price-fetch step on the affected transactions.
+      // fetchAllSEKPrices mutates the txn objects in-place, so we pass
+      // copies and merge the updated prices back by id.
+      const priced = await TaxEngine.fetchAllSEKPrices(txnsToPrice, (pct) => {
+        // Could update a progress indicator here — for now just a console log
+        if (pct % 20 === 0) console.log(`[BulkPrice] ${pct}%`);
+      });
+
+      // Merge updated prices back into the full transaction list
+      const pricedMap = new Map((priced || txnsToPrice).map(t => [t.id, t]));
+      const allTxns = TaxEngine.getTransactions().map(t =>
+        pricedMap.has(t.id) ? pricedMap.get(t.id) : t
+      );
+      TaxEngine.saveTransactions(allTxns);
+
+      // Count how many actually got a price
+      const found = (priced || txnsToPrice).filter(t => (t.priceSEKPerUnit || 0) > 0).length;
+      const still = affected.length - found;
+
+      S.taxResult = null;
+      showTaxToast(
+        found > 0 ? '✅' : '⚠️',
+        found > 0 ? `Found ${found} price${found !== 1 ? 's' : ''}` : 'No new prices found',
+        still > 0
+          ? `${still} transaction${still !== 1 ? 's' : ''} still need manual entry — check CoinMarketCap or CoinGecko for the date of each trade.`
+          : 'All prices resolved! Re-run the pipeline to update K4.',
+        found > 0 ? 'success' : 'warning'
+      );
+      render();
+    } catch (e) {
+      console.error('[BulkPrice]', e);
+      showTaxToast('❌', 'Price lookup failed', e.message, 'error');
+    }
+  }
+
   // Mark all transactions in a review group as spam (zero value, excluded from K4)
   function bulkMarkSpam(reason) {
     const issues = TaxEngine.getReviewIssues(null, S.taxResult);
@@ -2547,7 +2602,7 @@ const TaxUI = (() => {
     editTx, closeEdit, saveEdit, deleteTx,
     toggleSelectAll, toggleSelectTx, deleteSelected, deleteAllFiltered, clearSelection,
     markReviewed, markAllReviewed, markSpam,
-    markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify,
+    markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
     deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, manualCloudSync,

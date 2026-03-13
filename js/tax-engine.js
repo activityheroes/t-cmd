@@ -255,7 +255,186 @@ const TaxEngine = (() => {
   // AUTO-CLASSIFICATION ENGINE
   // ════════════════════════════════════════════════════════════
 
-  const SPAM_PATTERNS = [/airdrop.*claim/i, /free.*token/i, /visit.*to.*claim/i, /reward.*claim/i];
+  const SPAM_PATTERNS = [/airdrop.*claim/i, /free.*token/i, /visit.*to.*claim/i, /reward.*claim/i,
+    /\$\d+.*airdrop/i, /claim.*reward/i, /visit.*site/i, /connect.*wallet/i, /whitelist/i];
+
+  // ── Spam / scam token symbol heuristics ─────────────────
+  // A symbol is "contract-like" if it looks like an unresolved address.
+  // ETH: starts with 0x, Solana: base58 string > 12 chars, or truncated 8-char hex prefix
+  function looksLikeContractAddress(sym) {
+    if (!sym) return false;
+    if (sym.startsWith('0x') && sym.length > 10) return true;      // ETH address
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(sym)) return true;     // Full Solana mint
+    if (/^[A-F0-9]{8}$/.test(sym.toUpperCase())) return true;       // 8-char hex prefix
+    return false;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // STEP 1 — DECODE ON-CHAIN EVENTS
+  // Fix raw blockchain events BEFORE classification:
+  // • Merge split-swap rows (same txHash, multiple asset transfers)
+  // • Detect ETH ↔ token patterns
+  // • Tag transactions with wallet + blockchain metadata
+  // ════════════════════════════════════════════════════════════
+  function decodeOnChainEvents(txns) {
+    // Group by txHash (only relevant for on-chain sources)
+    const byHash = {};
+    for (const t of txns) {
+      if (!t.txHash || t.txHash.startsWith('manual_') || t.manualCategory) continue;
+      (byHash[t.txHash] = byHash[t.txHash] || []).push(t);
+    }
+
+    const toRemove = new Set();
+    const toAdd = [];
+
+    for (const [hash, group] of Object.entries(byHash)) {
+      if (group.length < 2) continue;
+
+      // Skip if any are already manually classified or from exchange CSVs
+      if (group.some(t => t.manualCategory || t.source?.includes('_csv'))) continue;
+
+      // Detect split swaps: one group has one SEND and one RECEIVE of DIFFERENT assets
+      const sends = group.filter(t =>
+        t.rawType === 'send' || t.rawType === 'transfer_out' || t.category === CAT.SEND || t.category === CAT.TRANSFER_OUT
+      );
+      const receives = group.filter(t =>
+        t.rawType === 'receive' || t.rawType === 'transfer_in' || t.category === CAT.RECEIVE || t.category === CAT.TRANSFER_IN
+      );
+
+      if (sends.length >= 1 && receives.length >= 1) {
+        const sendSym = sends[0].assetSymbol;
+        const recvSym = receives[receives.length - 1].assetSymbol; // last received = final token
+
+        if (sendSym && recvSym && sendSym !== recvSym) {
+          // Merge into one TRADE event — remove all sub-rows, add one merged row
+          const totalSentAmt = sends.reduce((s, t) => s + (t.amount || 0), 0);
+          const totalRecvAmt = receives.reduce((s, t) => s + (t.amount || 0), 0);
+          const totalFee = group.reduce((s, t) => s + (t.feeSEK || 0), 0);
+          const date = group.reduce((a, b) => a.date < b.date ? a : b).date;
+
+          for (const t of group) toRemove.add(t.id);
+          toAdd.push(normalizeTransaction({
+            id: 'dec_' + hash.slice(0, 12) + '_' + Math.random().toString(36).slice(2, 6),
+            txHash: hash,
+            date,
+            type: 'swap',
+            assetSymbol: sendSym,
+            assetName: sends[0].assetName || sendSym,
+            amount: totalSentAmt,
+            inAsset: recvSym,
+            inAmount: totalRecvAmt,
+            feeSEK: totalFee,
+            needsReview: sends[0].needsReview && receives[0].needsReview,
+            notes: `Decoded swap from ${group.length} sub-events`,
+          }, sends[0].accountId, sends[0].source));
+        }
+      }
+    }
+
+    // Apply merges
+    if (toAdd.length > 0 || toRemove.size > 0) {
+      const result = txns.filter(t => !toRemove.has(t.id));
+      return [...result, ...toAdd];
+    }
+    return txns;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // STEP 2 — RESOLVE TOKEN METADATA
+  // Batch-resolve unknown token symbols to human-readable names.
+  // Runs BEFORE classification so detectCategory() has clean symbols.
+  // ════════════════════════════════════════════════════════════
+  async function resolveAllTokenMetadata(txns, onProgress) {
+    // Collect symbols that look like contract addresses or are unknown
+    const unknownSymbols = [...new Set(
+      txns
+        .map(t => t.assetSymbol)
+        .filter(s => s && (looksLikeContractAddress(s) || !TOKEN_DISPLAY_NAMES[s.toUpperCase()]))
+    )];
+
+    if (!unknownSymbols.length) return txns;
+    if (onProgress) onProgress({ step: 'tokens', msg: `Resolving ${unknownSymbols.length} unknown token symbols…` });
+
+    const resolvedCache = await resolveUnknownTokenNames(unknownSymbols);
+
+    // Also resolve inAsset symbols for trades
+    const inAssetSymbols = [...new Set(
+      txns.map(t => t.inAsset).filter(s => s && looksLikeContractAddress(s))
+    )];
+    if (inAssetSymbols.length) await resolveUnknownTokenNames(inAssetSymbols);
+
+    // Reload cache after DexScreener fills it
+    let nameCache = {};
+    try { nameCache = JSON.parse(localStorage.getItem('tcmd_token_names') || '{}'); } catch {}
+
+    return txns.map(t => {
+      let sym = t.assetSymbol || '';
+      let name = t.assetName || '';
+      let coinGeckoId = t.coinGeckoId;
+
+      // 1. Known mint → resolve to symbol
+      if (KNOWN_MINTS[sym]) { sym = KNOWN_MINTS[sym]; }
+      // 2. 8-char prefix lookup
+      const prefixResolved = MINT_PREFIX_TO_SYM[sym.toUpperCase()];
+      if (prefixResolved) { sym = prefixResolved; }
+      // 3. DexScreener cache
+      const cached = nameCache[sym.toUpperCase()];
+      if (cached) { sym = cached.symbol || sym; name = cached.name || name; }
+      // 4. Static display names
+      const staticName = TOKEN_DISPLAY_NAMES[sym.toUpperCase()];
+      if (staticName && !name) name = staticName;
+      // 5. CoinGecko ID assignment
+      if (!coinGeckoId) coinGeckoId = CC_IDS[sym.toUpperCase()] || null;
+
+      // Resolve inAsset (trade "received" side) the same way
+      let inAsset = t.inAsset || '';
+      if (inAsset) {
+        if (KNOWN_MINTS[inAsset]) inAsset = KNOWN_MINTS[inAsset];
+        const inPrefix = MINT_PREFIX_TO_SYM[inAsset.toUpperCase()];
+        if (inPrefix) inAsset = inPrefix;
+        const inCached = nameCache[inAsset.toUpperCase()];
+        if (inCached) inAsset = inCached.symbol || inAsset;
+      }
+
+      return { ...t, assetSymbol: sym, assetName: name, coinGeckoId, inAsset: inAsset || t.inAsset };
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // STEP 3 — DETECT SPAM TOKENS
+  // Mark spam BEFORE classification to avoid polluting K4.
+  // ════════════════════════════════════════════════════════════
+  function detectSpamTokens(txns) {
+    return txns.map(t => {
+      if (t.manualCategory || t.userReviewed) return t;
+      const sym = (t.assetSymbol || '').toUpperCase();
+      const notes = (t.notes || t.assetName || '').toLowerCase();
+      const amount = t.amount || 0;
+
+      let isSpam = false;
+
+      // 1. Explicit spam patterns in name/notes
+      if (SPAM_PATTERNS.some(p => p.test(notes))) isSpam = true;
+      // 2. Unresolved contract address as symbol
+      if (!isSpam && looksLikeContractAddress(sym)) isSpam = true;
+      // 3. Dust amounts with no known price and not a major asset
+      const isMajor = ['BTC','ETH','SOL','BNB','USDC','USDT','MATIC','AVAX','ARB','OP'].includes(sym);
+      if (!isSpam && !isMajor && amount > 0 && amount < 0.000001) isSpam = true;
+      // 4. Zero cost + zero price + not staking/income type
+      if (!isSpam && !t.priceSEKPerUnit && !t.costBasisSEK && !t.coinGeckoId && !STABLES.has(sym)) {
+        // Only flag receive/transfer_in as potential spam if amount is oddly round or tiny
+        if (t.rawType === 'receive' || t.rawType === 'transfer_in') {
+          const isOddlyRound = Number.isInteger(amount) && amount >= 1000000;
+          if (isOddlyRound) isSpam = true;
+        }
+      }
+
+      if (isSpam && t.category !== CAT.SPAM) {
+        return { ...t, category: CAT.SPAM, autoClassified: true, needsReview: false };
+      }
+      return t;
+    });
+  }
 
   function autoClassifyAll(txns) {
     return txns.map(t => {
@@ -665,7 +844,11 @@ const TaxEngine = (() => {
 
   // ════════════════════════════════════════════════════════════
   // FULL IMPORT PIPELINE
-  // After every import: classify → match → price → recalculate
+  // Correct order: decode → resolve tokens → detect spam →
+  //   dedup → match transfers → classify → fetch prices →
+  //   detect negatives → save → compute tax → review issues
+  // Each transaction keeps its accountId/walletId throughout —
+  // assets are NEVER aggregated before tax calculations.
   // ════════════════════════════════════════════════════════════
   let _pipelineRunning = false;
 
@@ -680,40 +863,85 @@ const TaxEngine = (() => {
         if (opts.onProgress) opts.onProgress({ step, pct, msg });
       };
 
-      // Step 1 – Auto-classify
-      emit('classify', 8, 'Classifying transactions…');
       let txns = getTransactions();
-      txns = autoClassifyAll(txns);
+
+      // ── Step 1: Decode on-chain events ────────────────────
+      // Merge split swap rows (same txHash, different assets) into
+      // single TRADE events BEFORE anything else runs.
+      emit('decode', 5, 'Decoding on-chain events…');
+      txns = decodeOnChainEvents(txns);
       await tick();
 
-      // Step 2 – Detect cross-source duplicates
-      emit('dedup', 18, 'Detecting duplicate transactions…');
+      // ── Step 2: Resolve token metadata ────────────────────
+      // Replace contract addresses with human-readable symbols/names.
+      // This must run before classification so detectCategory() sees
+      // "USDC" not "EPjFWdd..." and "JUP" not "JUPyiwry...".
+      emit('tokens', 12, 'Resolving token names…');
+      txns = await resolveAllTokenMetadata(txns, (p) => emit('tokens', 12, p.msg));
+      await tick();
+
+      // ── Step 3: Detect spam tokens ────────────────────────
+      // Mark dust amounts, scam airdrop patterns, and unresolved
+      // contract-address symbols as SPAM before classification.
+      emit('spam', 20, 'Detecting spam tokens…');
+      txns = detectSpamTokens(txns);
+      await tick();
+
+      // ── Step 4: Detect cross-source duplicates ────────────
+      // Same real-world transaction imported from multiple sources
+      // (e.g. both wallet API and exchange CSV).
+      emit('dedup', 28, 'Detecting duplicate transactions…');
       txns = deduplicateTransactions(txns);
       await tick();
 
-      // Step 3 – Match internal transfers
-      emit('transfer', 28, 'Matching internal transfers…');
+      // ── Step 5: Match internal transfers ──────────────────
+      // Pair SEND ↔ RECEIVE across user's own wallets/exchanges.
+      // Matched pairs are marked isInternalTransfer = true (non-taxable).
+      emit('transfer', 36, 'Matching internal transfers…');
       txns = matchTransfers(txns);
       await tick();
 
-      // Step 4 – Fetch missing SEK prices
-      emit('price', 38, 'Fetching historical SEK prices…');
-      txns = await fetchAllSEKPrices(txns, (p) => {
-        emit('price', 38 + Math.round(p.pct * 0.3), p.msg);
-      });
+      // ── Step 6: Classify all transactions ─────────────────
+      // Now that tokens are resolved and transfers are matched,
+      // categorize each tx (buy/sell/trade/income/fee/staking/…).
+      emit('classify', 44, 'Classifying transactions…');
+      txns = autoClassifyAll(txns);
+      await tick();
 
-      // Step 5 – Save enriched transactions
-      emit('save', 70, 'Saving…');
+      // ── Step 7: Assign SEK prices ─────────────────────────
+      // Fetch historical USD/SEK prices for every taxable transaction.
+      // Stablecoins use fixed rates; unknown assets stay at 0 and are
+      // flagged in the review queue.
+      emit('price', 52, 'Fetching historical SEK prices…');
+      txns = await fetchAllSEKPrices(txns, (p) => {
+        emit('price', 52 + Math.round(p.pct * 0.2), p.msg);
+      });
+      await tick();
+
+      // ── Step 8: Detect negative balance indicators ────────
+      // Scan for assets that go negative (missing import history).
+      // These are tagged on the causing transactions before saving.
+      emit('balance', 74, 'Checking for missing history…');
+      txns = detectNegativeBalances(txns);
+      await tick();
+
+      // ── Step 9: Save enriched transactions ────────────────
+      emit('save', 80, 'Saving…');
       saveTransactions(txns);
       await tick();
 
-      // Step 6 – Compute tax for current year
-      emit('tax', 78, 'Computing Swedish tax (Genomsnittsmetoden)…');
+      // ── Step 10: Compute tax (Genomsnittsmetoden) ─────────
+      // Process all history → disposals → K4 rows → aggregate.
+      // Per-asset cost basis is computed per wallet-linked transactions
+      // NOT from globally merged totals.
+      emit('tax', 88, 'Computing Swedish tax (Genomsnittsmetoden)…');
       const settings = getSettings();
       const taxResult = computeTaxYear(settings.taxYear, txns);
-      const reviewIssues = getReviewIssues(txns);
 
-      emit('done', 100, 'Done!');
+      // ── Step 11: Collect review issues ────────────────────
+      const reviewIssues = getReviewIssues(txns, taxResult);
+
+      emit('done', 100, `Done — ${txns.length.toLocaleString()} transactions, ${reviewIssues.length} issues`);
 
       const result = {
         totalTxns: txns.length,
@@ -735,29 +963,168 @@ const TaxEngine = (() => {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   // ════════════════════════════════════════════════════════════
-  // REVIEW ISSUES — exceptions only
+  // STEP 8 — NEGATIVE BALANCE DETECTION
+  // Simulate running holdings forward; any asset that goes
+  // negative was sold before it was bought (missing history).
+  // Tags the offending disposal transactions for review.
+  // ════════════════════════════════════════════════════════════
+  function detectNegativeBalances(txns) {
+    const sorted = [...txns].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const qty = {};  // sym → running qty (per all wallets combined for this check)
+    const negativeSyms = new Set();
+
+    for (const t of sorted) {
+      if (t.isInternalTransfer || t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
+      const sym = t.assetSymbol;
+      if (!sym) continue;
+      if (!qty[sym]) qty[sym] = 0;
+
+      switch (t.category) {
+        case CAT.BUY: case CAT.RECEIVE: case CAT.TRANSFER_IN: case CAT.INCOME: case CAT.STAKING:
+          qty[sym] += t.amount || 0;
+          if (t.inAsset && t.inAmount) {
+            if (!qty[t.inAsset]) qty[t.inAsset] = 0;
+            qty[t.inAsset] += t.inAmount;
+          }
+          break;
+        case CAT.SELL: case CAT.SEND: case CAT.TRANSFER_OUT: case CAT.FEE:
+          qty[sym] -= t.amount || 0;
+          if (qty[sym] < -0.0001) negativeSyms.add(sym);
+          break;
+        case CAT.TRADE:
+          qty[sym] -= t.amount || 0;
+          if (qty[sym] < -0.0001) negativeSyms.add(sym);
+          if (t.inAsset && t.inAmount) {
+            if (!qty[t.inAsset]) qty[t.inAsset] = 0;
+            qty[t.inAsset] += t.inAmount;
+          }
+          break;
+      }
+    }
+
+    if (!negativeSyms.size) return txns;
+
+    // Tag the disposal transactions for assets with negative balances
+    return txns.map(t => {
+      if (!negativeSyms.has(t.assetSymbol)) return t;
+      if (![CAT.SELL, CAT.TRADE, CAT.SEND].includes(t.category)) return t;
+      if (t.manualCategory || t.userReviewed) return t;
+      return { ...t, needsReview: true, reviewReason: 'negative_balance' };
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // REVIEW ISSUES
+  // Comprehensive detection of all issue types.
+  // Called AFTER pipeline completes with full taxResult context.
   // ════════════════════════════════════════════════════════════
   const REVIEW_DESCRIPTIONS = {
-    missing_sek_price: { label: 'Missing SEK price', icon: '💰', why: 'Cannot calculate gain/loss without SEK value at time of transaction.', fix: 'Enter the market price in SEK on the transaction date.' },
-    unknown_asset: { label: 'Unknown asset', icon: '❓', why: 'No price feed found for this token.', fix: 'Enter the price manually or mark as spam if worthless.' },
-    unmatched_transfer: { label: 'Unmatched transfer', icon: '🔗', why: 'This transfer could not be matched to an incoming/outgoing in your other accounts. May cause incorrect cost basis.', fix: 'Connect the other account or mark as external.' },
-    negative_balance: { label: 'Negative balance', icon: '⚠️', why: 'More units sold than found in history — missing buy transactions.', fix: 'Import the full history for this asset.' },
-    duplicate: { label: 'Possible duplicate', icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one if it is a duplicate.' },
-    unclassified: { label: 'Unclassified', icon: '🏷️', why: 'Could not auto-classify this transaction type.', fix: 'Select the correct category.' },
-    ambiguous_swap: { label: 'Ambiguous swap', icon: '↔️', why: 'Outgoing amount found but incoming asset/amount unknown.', fix: 'Enter the received asset and amount.' },
-    unsupported_defi: { label: 'Unsupported DeFi', icon: '🧩', why: 'This appears to be a complex DeFi interaction (lending, LP, vault, etc.) that cannot be auto-classified.', fix: 'Classify manually as buy/sell/income/ignore.' },
-    bridge_review: { label: 'Bridge transaction', icon: '🌉', why: 'Cross-chain bridge detected. Verify the corresponding deposit arrived.', fix: 'Confirm it is a non-taxable transfer or reclassify.' },
+    missing_sek_price:   { label: 'Missing SEK price',       icon: '💰', why: 'Cannot calculate gain/loss without SEK value at time of transaction.', fix: 'Enter the market price in SEK on the transaction date.' },
+    unknown_asset:       { label: 'Unknown token',            icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
+    unmatched_transfer:  { label: 'Unmatched transfer',       icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
+    negative_balance:    { label: 'Missing buy history',      icon: '⚠️', why: 'More units sold than found in import history — cost basis will be incorrect.', fix: 'Import the full transaction history for this asset from all sources.' },
+    duplicate:           { label: 'Possible duplicate',       icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one copy.' },
+    unclassified:        { label: 'Unclassified',             icon: '🏷️', why: 'Could not determine what type of transaction this is.', fix: 'Select the correct category manually.' },
+    ambiguous_swap:      { label: 'Incomplete swap',          icon: '↔️', why: 'Only one side of a swap was found — missing received asset or amount.', fix: 'Enter the received asset and amount on this transaction.' },
+    unsupported_defi:    { label: 'Complex DeFi interaction', icon: '🧩', why: 'This is a DeFi interaction (lending, LP, vault, etc.) that cannot be auto-classified.', fix: 'Classify manually as buy/sell/income/fee/ignore.' },
+    bridge_review:       { label: 'Bridge transaction',       icon: '🌉', why: 'Cross-chain bridge detected. The funds may arrive on another chain — verify it was an internal transfer.', fix: 'Confirm non-taxable transfer or reclassify.' },
+    special_transaction: { label: 'Special transaction',      icon: '⭐', why: 'Staking, LP, NFT, or airdrop transactions have special Swedish tax treatment.', fix: 'Verify classification is correct for your situation.' },
+    unknown_contract:    { label: 'Unknown contract',         icon: '🤖', why: 'Interaction with an unrecognised smart contract — could be anything from an airdrop claim to a DeFi protocol.', fix: 'Investigate on a blockchain explorer and classify manually.' },
+    outlier:             { label: 'Outlier / sanity check',   icon: '📊', why: 'This transaction has an unusually large gain/loss or an extreme price vs market value.', fix: 'Verify the SEK price is correct at the transaction date.' },
+    split_trade:         { label: 'Possible split trade',     icon: '🔀', why: 'Multiple transactions near the same time may represent a single trade reported as separate rows.', fix: 'Check if these should be merged into one trade.' },
   };
 
-  function getReviewIssues(txns) {
+  function getReviewIssues(txns, taxResult) {
     if (!txns) txns = getTransactions();
-    return txns.filter(t => t.needsReview && t.reviewReason)
-      .map(t => ({
-        txnId: t.id,
-        txn: t,
-        reason: t.reviewReason,
+    const issues = [];
+    const txById = new Map(txns.map(t => [t.id, t]));
+
+    // ── Pass 1: Flag-based issues (set during pipeline) ──
+    for (const t of txns) {
+      if (!t.needsReview || !t.reviewReason) continue;
+      if (t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
+      if (t.isDuplicate) {
+        issues.push({ txnId: t.id, txn: t, reason: 'duplicate', meta: REVIEW_DESCRIPTIONS.duplicate });
+        continue;
+      }
+      issues.push({
+        txnId: t.id, txn: t, reason: t.reviewReason,
         meta: REVIEW_DESCRIPTIONS[t.reviewReason] || { label: t.reviewReason, icon: '⚠️', why: '', fix: '' },
-      }));
+      });
+    }
+
+    const flaggedIds = new Set(issues.map(i => i.txnId));
+
+    // ── Pass 2: Structural checks (independent of per-tx flags) ──
+    const taxableCats = new Set([CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY, CAT.STAKING, CAT.NFT_SALE]);
+
+    for (const t of txns) {
+      if (t.userReviewed || t.isInternalTransfer) continue;
+      if (t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
+      if (flaggedIds.has(t.id)) continue;
+
+      // 1. Missing SEK price on taxable event
+      if (taxableCats.has(t.category) && !t.priceSEKPerUnit && !t.costBasisSEK) {
+        issues.push({ txnId: t.id, txn: t, reason: 'missing_sek_price', meta: REVIEW_DESCRIPTIONS.missing_sek_price });
+        flaggedIds.add(t.id); continue;
+      }
+
+      // 2. Unknown token (contract address still showing or no name/CoinGecko ID)
+      if (taxableCats.has(t.category) && !t.coinGeckoId && !STABLES.has(t.assetSymbol)) {
+        if (looksLikeContractAddress(t.assetSymbol) || (!t.assetName && !TOKEN_DISPLAY_NAMES[t.assetSymbol?.toUpperCase()])) {
+          issues.push({ txnId: t.id, txn: t, reason: 'unknown_asset', meta: REVIEW_DESCRIPTIONS.unknown_asset });
+          flaggedIds.add(t.id); continue;
+        }
+      }
+
+      // 3. Unmatched external transfer (SEND/RECEIVE not paired, potentially taxable)
+      if ((t.category === CAT.SEND || t.category === CAT.TRANSFER_OUT) && !t.matchedTxId && !t.isInternalTransfer) {
+        issues.push({ txnId: t.id, txn: t, reason: 'unmatched_transfer', meta: REVIEW_DESCRIPTIONS.unmatched_transfer });
+        flaggedIds.add(t.id); continue;
+      }
+
+      // 4. Special transactions (staking, NFT, bridge, airdrop)
+      if ([CAT.STAKING, CAT.NFT_SALE, CAT.BRIDGE].includes(t.category)) {
+        issues.push({ txnId: t.id, txn: t, reason: 'special_transaction', meta: REVIEW_DESCRIPTIONS.special_transaction });
+        flaggedIds.add(t.id); continue;
+      }
+
+      // 5. Unknown contract interaction
+      if (t.category === CAT.DEFI_UNKNOWN) {
+        issues.push({ txnId: t.id, txn: t, reason: 'unknown_contract', meta: REVIEW_DESCRIPTIONS.unknown_contract });
+        flaggedIds.add(t.id); continue;
+      }
+
+      // 6. Incomplete swap (TRADE but no inAsset or inAmount)
+      if (t.category === CAT.TRADE && (!t.inAsset || !t.inAmount)) {
+        issues.push({ txnId: t.id, txn: t, reason: 'ambiguous_swap', meta: REVIEW_DESCRIPTIONS.ambiguous_swap });
+        flaggedIds.add(t.id); continue;
+      }
+    }
+
+    // ── Pass 3: Outlier detection using disposal results ──
+    if (taxResult?.disposals) {
+      for (const d of taxResult.disposals) {
+        if (flaggedIds.has(d.id)) continue;
+        const t = txById.get(d.id);
+        if (!t || t.userReviewed) continue;
+        // Flag extreme gain/loss: gain > 10× cost basis is suspicious
+        const ratio = d.costBasisSEK > 0 ? d.gainLossSEK / d.costBasisSEK : 0;
+        if (Math.abs(ratio) > 10 && Math.abs(d.gainLossSEK) > 1000) {
+          issues.push({ txnId: d.id, txn: t, reason: 'outlier', meta: REVIEW_DESCRIPTIONS.outlier });
+          flaggedIds.add(d.id);
+        }
+      }
+    }
+
+    // Sort: most critical first (missing price → unknown → negative_balance → others)
+    const ORDER = ['negative_balance', 'missing_sek_price', 'unknown_asset', 'duplicate', 'ambiguous_swap', 'unmatched_transfer', 'outlier', 'split_trade', 'unknown_contract', 'unsupported_defi', 'special_transaction', 'bridge_review', 'unclassified'];
+    issues.sort((a, b) => {
+      const ai = ORDER.indexOf(a.reason); const bi = ORDER.indexOf(b.reason);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
+
+    return issues;
   }
 
   // ════════════════════════════════════════════════════════════
@@ -1978,8 +2345,12 @@ const TaxEngine = (() => {
     normalizeTransaction,
     // Pipeline
     runPipeline, Events,
+    // Pipeline steps (exposed for testing / manual re-run)
+    decodeOnChainEvents, resolveAllTokenMetadata, detectSpamTokens,
+    deduplicateTransactions, matchTransfers, autoClassifyAll,
+    detectNegativeBalances,
     // Classification
-    autoClassifyAll, matchTransfers, deduplicateTransactions,
+    looksLikeContractAddress,
     // Re-sync
     resyncAccount,
     // Prices

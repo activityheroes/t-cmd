@@ -64,7 +64,12 @@ const TaxEngine = (() => {
 
   // ── Settings ──────────────────────────────────────────────
   function getSettings() {
-    const def = { currency:'SEK', taxYear: new Date().getFullYear()-1, country:'SE', method:'genomsnittsmetoden' };
+    const def = {
+      currency: 'SEK', taxYear: new Date().getFullYear()-1,
+      country: 'SE', method: 'genomsnittsmetoden',
+      userName:     '',   // Namn — shown in K4 PDF header
+      personnummer: '',   // Personnummer YYYYMMDD-XXXX — shown in K4 PDF header
+    };
     try { return { ...def, ...JSON.parse(localStorage.getItem(LS.SETTINGS)||'{}') }; }
     catch { return def; }
   }

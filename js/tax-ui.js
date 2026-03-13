@@ -886,37 +886,38 @@ const TaxUI = (() => {
 
         ${accounts.length > 0 ? `
         <div class="tax-section">
-          <div class="tax-section-header"><h2>Connected</h2><span class="tax-section-count">${accounts.length}</span></div>
-          <div class="tax-table-wrap"><table class="tax-table">
-            <thead><tr><th>Account</th><th>Type</th><th>Status</th><th class="ta-r">Transactions</th><th>Date range</th><th></th></tr></thead>
-            <tbody>
-              ${accounts.map(acc => {
-                const st  = TaxEngine.getImportStatus(acc.id);
-                const cnt = txns.filter(t => t.accountId === acc.id).length;
-                const src = SOURCES.find(s => s.type === acc.type) || { icon:'📂', name:acc.type };
-                return `<tr>
-                  <td>
-                    <div class="tax-asset-cell">
-                      <span>${src.icon}</span>
-                      <div>
-                        <div class="tax-acc-name">${acc.label || acc.type}</div>
-                        ${acc.address ? `<div class="tax-acc-addr">${acc.address.slice(0,10)}…${acc.address.slice(-6)}</div>` : ''}
-                      </div>
+          <div class="tax-section-header"><h2>Connected Accounts</h2><span class="tax-section-count">${accounts.length}</span></div>
+          <div class="tax-accounts-list">
+            ${accounts.map(acc => {
+              const st   = TaxEngine.getImportStatus(acc.id);
+              const cnt  = txns.filter(t => t.accountId === acc.id).length;
+              const src  = SOURCES.find(s => s.type === acc.type) || { icon:'📂', name:acc.type, color:'#64748b' };
+              const isWallet = acc.type === 'phantom' || acc.type === 'metamask' ||
+                               acc.source === 'solana_wallet' || acc.source === 'eth_wallet';
+              const lastSync = acc.lastSyncAt
+                ? timeAgoShort(acc.lastSyncAt)
+                : (st.status === 'synced' ? 'Synced' : 'Never synced');
+              return `
+                <div class="tax-acc-card">
+                  <div class="tax-acc-card-icon" style="background:${src.color}22;border-color:${src.color}44">${src.icon}</div>
+                  <div class="tax-acc-card-body">
+                    <div class="tax-acc-card-name">${acc.label || src.name}</div>
+                    ${acc.address ? `<div class="tax-acc-card-addr">${acc.address.slice(0,12)}…${acc.address.slice(-6)}</div>` : ''}
+                    <div class="tax-account-meta">
+                      ${renderImportStatus(st)}
+                      <span class="tax-acc-meta-sep">·</span>
+                      <span class="tax-muted">${cnt.toLocaleString()} txns</span>
+                      <span class="tax-acc-meta-sep">·</span>
+                      <span class="tax-muted">${lastSync}</span>
                     </div>
-                  </td>
-                  <td><span class="tax-badge">${src.name}</span></td>
-                  <td>${renderImportStatus(st)}</td>
-                  <td class="ta-r tax-mono">${cnt.toLocaleString()}</td>
-                  <td class="tax-muted tax-nowrap" style="font-size:11px">
-                    ${st.startDate ? fmtDate(st.startDate)+' → '+fmtDate(st.endDate||new Date().toISOString()) : '—'}
-                  </td>
-                  <td class="ta-r">
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.removeAccount('${acc.id}')">Remove</button>
-                  </td>
-                </tr>`;
-              }).join('')}
-            </tbody>
-          </table></div>
+                  </div>
+                  <div class="tax-acc-card-actions">
+                    ${isWallet ? `<button class="tax-btn tax-btn-xs tax-btn-primary" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-import full history">🔄 Sync</button>` : `<span class="tax-muted" style="font-size:11px">Re-upload CSV to refresh</span>`}
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost tax-btn-danger" onclick="TaxUI.removeAccount('${acc.id}')">Remove</button>
+                  </div>
+                </div>`;
+            }).join('')}
+          </div>
         </div>` : ''}
 
         ${renderImportModal()}
@@ -1265,6 +1266,23 @@ const TaxUI = (() => {
   // ════════════════════════════════════════════════════════════
   function renderReview() {
     const issues = TaxEngine.getReviewIssues();
+
+    // Per-reason counts for the stats bar
+    const reasonCounts = {};
+    issues.forEach(i => { reasonCounts[i.reason] = (reasonCounts[i.reason]||0) + 1; });
+    const REASON_CHIP = {
+      missing_sek_price:  '💰 Missing price',
+      unknown_asset:      '❓ Unknown asset',
+      unmatched_transfer: '🔗 Unmatched transfer',
+      negative_balance:   '📉 Negative balance',
+      duplicate:          '♊ Duplicate',
+      ambiguous_swap:     '🔀 Ambiguous swap',
+      unclassified:       '🏷 Unclassified',
+    };
+    const statsChips = Object.entries(reasonCounts)
+      .map(([r, n]) => `<span class="tax-rs-chip">${REASON_CHIP[r]||r}: <strong>${n}</strong></span>`)
+      .join('');
+
     return `
       <div class="tax-page">
         <div class="tax-page-header">
@@ -1280,6 +1298,14 @@ const TaxUI = (() => {
             <div class="tax-review-done-sub">No exceptions. Tax calculations are based on complete data.</div>
           </div>
         ` : `
+          <div class="tax-review-stats">
+            <div class="tax-rs-header">
+              <span class="tax-rs-badge">${issues.length}</span>
+              <span class="tax-rs-title">issues to resolve for an accurate tax report</span>
+            </div>
+            <div class="tax-rs-chips">${statsChips}</div>
+          </div>
+
           <div class="tax-info-box" style="margin-bottom:20px">
             <span>ℹ️</span>
             <span>Only genuine exceptions are shown here. Normal trades, transfers, and fees are classified automatically. Fix these ${issues.length} items for an accurate tax result.</span>
@@ -1339,12 +1365,38 @@ const TaxUI = (() => {
     const k4             = TaxEngine.generateK4Report(result);
     const issues         = TaxEngine.getReviewIssues().length;
     const deductibleLoss = summary.deductibleLoss || (summary.totalLosses * 0.70);
+    const settings       = TaxEngine.getSettings();
+    const hasProfile     = !!(settings.userName && settings.personnummer);
 
     return `
       <div class="tax-page">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Tax Reports</h1>
           <span class="tax-page-subtitle">${S.taxYear} — Skatteverket K4</span>
+        </div>
+
+        <!-- ── Profile form (Namn + Personnummer for K4 header) ── -->
+        <div class="tax-profile-inline ${hasProfile ? 'tax-profile-ok' : 'tax-profile-required'}">
+          <div class="tax-profile-head" onclick="this.parentElement.classList.toggle('tax-profile-open')">
+            <span>${hasProfile ? '✅' : '⚠️'}</span>
+            <span class="tax-profile-headtitle">
+              ${hasProfile
+                ? `Deklarant: <strong>${settings.userName}</strong> · ${settings.personnummer}`
+                : 'Fyll i namn och personnummer för att kunna ladda ner K4 PDF'}
+            </span>
+            <span class="tax-profile-toggle">${hasProfile ? '✏️' : '＋'}</span>
+          </div>
+          <div class="tax-profile-body">
+            <div class="tax-profile-row">
+              <label class="tax-label">Namn</label>
+              <input id="tax-pf-name" class="tax-input" value="${settings.userName||''}" placeholder="Anna Andersson">
+            </div>
+            <div class="tax-profile-row">
+              <label class="tax-label">Personnummer</label>
+              <input id="tax-pf-pnr" class="tax-input" value="${settings.personnummer||''}" placeholder="19890101-1234">
+            </div>
+            <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.saveProfile()">💾 Spara</button>
+          </div>
         </div>
 
         ${issues > 0 ? `
@@ -1396,9 +1448,9 @@ const TaxUI = (() => {
             <h2>K4 Sektion D — Kryptovalutor</h2>
             ${k4.formsNeeded>1?`<span class="tax-badge" style="background:rgba(99,102,241,.15);color:#818cf8">${k4.formsNeeded} blanketter</span>`:''}
             <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
-              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4CSV()">⬇ K4 CSV (SKV 2104-D)</button>
+              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4PDF()" title="${hasProfile ? 'Ladda ner K4 som PDF' : 'Fyll i namn och personnummer ovan först'}">⬇ K4 PDF</button>
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.downloadK4CSV()">⬇ K4 CSV (SKV 2104-D)</button>
               <button class="tax-btn tax-btn-sm tax-btn-secondary" onclick="TaxUI.downloadAuditCSV()">⬇ Transaktionslogg</button>
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.printReport()">🖨 Skriv ut</button>
             </div>
           </div>
 
@@ -1646,6 +1698,89 @@ const TaxUI = (() => {
   }
   function printReport() { window.print(); }
 
+  async function downloadK4PDF() {
+    const settings = TaxEngine.getSettings();
+    if (!settings.userName || !settings.personnummer) {
+      // Expand the profile form and highlight it
+      const pf = document.querySelector('.tax-profile-inline');
+      if (pf) { pf.classList.add('tax-profile-open', 'tax-profile-shake'); setTimeout(()=>pf.classList.remove('tax-profile-shake'),600); }
+      showTaxToast('⚠️','Profile required','Enter Namn and Personnummer in the form above to generate the PDF.','warning');
+      return;
+    }
+    if (typeof K4PdfFiller === 'undefined') {
+      showTaxToast('❌','PDF library not loaded','Reload the page and try again.','error');
+      return;
+    }
+    try {
+      showTaxToast('⏳','Generating K4 PDF…','','info');
+      const result  = getOrComputeTaxResult();
+      const k4      = TaxEngine.generateK4Report(result);
+      const userInfo = { name: settings.userName, pnr: settings.personnummer, year: S.taxYear };
+      const buf     = await K4PdfFiller.generate(k4, userInfo);
+      const blob    = new Blob([buf], { type:'application/pdf' });
+      const url     = URL.createObjectURL(blob);
+      const a       = document.createElement('a');
+      const pnrSafe = settings.personnummer.replace(/[^0-9]/g,'');
+      a.href     = url;
+      a.download = `K4_${S.taxYear}_${pnrSafe}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showTaxToast('✅','K4 PDF downloaded',`K4_${S.taxYear}_${pnrSafe}.pdf`);
+    } catch (e) {
+      showTaxToast('❌','PDF generation failed', e.message, 'error');
+    }
+  }
+
+  function saveProfile() {
+    const name = document.getElementById('tax-pf-name')?.value?.trim() || '';
+    const pnr  = document.getElementById('tax-pf-pnr')?.value?.trim()  || '';
+    TaxEngine.saveSettings({ ...TaxEngine.getSettings(), userName: name, personnummer: pnr });
+    // Collapse the profile form
+    document.querySelector('.tax-profile-inline')?.classList.remove('tax-profile-open');
+    reRenderMain();
+    showTaxToast('✅','Profile saved', name ? `${name} · ${pnr}` : '');
+  }
+
+  async function resyncAccount(accountId) {
+    const acc = TaxEngine.getAccounts().find(a => a.id === accountId);
+    if (!acc) return;
+
+    const card = document.querySelector(`[data-acc-id="${accountId}"]`);
+
+    // Show syncing badge on card
+    const statusEl = card?.querySelector('.tax-status-pill');
+    if (statusEl) statusEl.outerHTML = `<span class="tax-status-pill" style="color:#818cf8">⏳ Syncing…</span>`;
+
+    const chain = (acc.type === 'metamask' || acc.source === 'eth_wallet') ? 'eth' : 'sol';
+    const addr  = acc.address;
+    if (!addr) { showTaxToast('⚠️','No address stored for this account'); return; }
+
+    let res;
+    try {
+      const onProgress = p => showTaxToast('⏳', 'Syncing…', p.msg, 'info');
+      res = chain === 'eth'
+        ? await TaxEngine.importEthWallet(addr, accountId, onProgress)
+        : await TaxEngine.importSolanaWallet(addr, accountId, onProgress);
+    } catch (e) {
+      TaxEngine.updateAccount(accountId, { syncStatus:'failed' });
+      showTaxToast('❌','Sync failed', e.message, 'error');
+      render(); return;
+    }
+
+    if (res.error && !res.txns?.length) {
+      TaxEngine.updateAccount(accountId, { syncStatus:'failed' });
+      showTaxToast('❌','Sync failed', res.error, 'error');
+      render(); return;
+    }
+
+    const added = TaxEngine.addTransactions(res.txns || []);
+    TaxEngine.updateAccount(accountId, { lastSyncAt: new Date().toISOString(), syncStatus:'synced' });
+    S.taxResult = null;
+    render();
+    showTaxToast('✅', `Synced ${acc.label || acc.type}`, `${added} new transactions · Total fetched: ${res.totalFetched||0}`);
+    setTimeout(triggerPipeline, 500);
+  }
+
   // ── Helpers ───────────────────────────────────────────────
   function getOrComputeTaxResult() {
     if (!S.taxResult || S.taxResult.year !== S.taxYear) {
@@ -1687,6 +1822,16 @@ const TaxUI = (() => {
   }
 
   function fmtDate(iso) { if(!iso) return '—'; return new Date(iso).toLocaleDateString('sv-SE'); }
+
+  function timeAgoShort(iso) {
+    if (!iso) return 'Never synced';
+    const secs = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (secs < 60)   return 'Just now';
+    if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
+    if (secs < 604800) return `${Math.floor(secs/86400)}d ago`;
+    return fmtDate(iso);
+  }
   function fmtDateShort(iso) {
     if (!iso) return '—';
     const d = new Date(iso);
@@ -1774,7 +1919,8 @@ const TaxUI = (() => {
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
     markReviewed, markAllReviewed, removeAccount,
-    downloadK4CSV, downloadAuditCSV, printReport,
+    downloadK4CSV, downloadAuditCSV, downloadK4PDF, printReport,
+    saveProfile, resyncAccount,
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns

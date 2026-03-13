@@ -124,6 +124,88 @@ const TaxEngine = (() => {
     SupabaseDB.setUserData('tax_settings', s).catch(e => console.warn('[TaxEngine] saveSettings:', e.message));
   }
 
+  // ── One-time migration from the legacy 'anon' namespace ──
+  // Before the _uid() bug fix, every user resolved to 'anon' and data was
+  // stored under tcmd_anon_* keys / tcmd_tax_anon IDB.
+  // This migration runs once per user after the fix:
+  //   • If the user's own scoped key is empty AND the anon key has data →
+  //     copy anon data to the user's scoped key and DELETE the anon key so
+  //     no second user can claim the same data.
+  //   • If both are empty or the user already has their own data → no-op.
+  async function _migrateAnonData(uid) {
+    if (!uid || uid === 'anon') return;
+    const migrationFlag = `tcmd_${uid}_anonMigrated`;
+    if (localStorage.getItem(migrationFlag)) return; // already done
+    localStorage.setItem(migrationFlag, '1');
+
+    const KEYS = ['tax_accounts', 'tax_settings', 'tax_import_status'];
+    for (const key of KEYS) {
+      const userKey = `tcmd_${uid}_${key}`;
+      const anonKey = `tcmd_anon_${key}`;
+      const userHasData = localStorage.getItem(userKey);
+      const anonData    = localStorage.getItem(anonKey);
+      if (!userHasData && anonData && anonData !== 'null' && anonData !== '[]' && anonData !== '{}') {
+        console.log(`[TaxEngine] Migrating ${anonKey} → ${userKey}`);
+        localStorage.setItem(userKey, anonData);
+        localStorage.removeItem(anonKey); // prevent other users from claiming it
+      } else if (anonData) {
+        // Anon key exists but user already has their own data — just clear the anon key
+        localStorage.removeItem(anonKey);
+      }
+    }
+
+    // IDB migration: if tcmd_tax_anon has transactions and the user's DB is empty → migrate
+    try {
+      const anonTxns = await new Promise(res => {
+        const req = indexedDB.open('tcmd_tax_anon', 1);
+        req.onsuccess = e => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('transactions')) { db.close(); res([]); return; }
+          const tx = db.transaction('transactions', 'readonly');
+          tx.objectStore('transactions').getAll().onsuccess = ev => {
+            db.close(); res(ev.target.result || []);
+          };
+        };
+        req.onerror = () => res([]);
+      });
+      if (anonTxns.length > 0) {
+        const userDbName = `tcmd_tax_${uid}`;
+        const userTxns = await new Promise(res => {
+          const req = indexedDB.open(userDbName, 1);
+          req.onupgradeneeded = e => e.target.result.createObjectStore('transactions', { keyPath: 'id' });
+          req.onsuccess = e => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('transactions')) { db.close(); res([]); return; }
+            db.transaction('transactions', 'readonly').objectStore('transactions').getAll()
+              .onsuccess = ev => { db.close(); res(ev.target.result || []); };
+          };
+          req.onerror = () => res([]);
+        });
+        if (userTxns.length === 0) {
+          // User's DB is empty — migrate anon transactions to their scoped DB
+          console.log(`[TaxEngine] Migrating ${anonTxns.length} transactions from tcmd_tax_anon → ${userDbName}`);
+          const req = indexedDB.open(userDbName, 1);
+          req.onsuccess = e => {
+            const db = e.target.result;
+            const tx = db.transaction('transactions', 'readwrite');
+            const store = tx.objectStore('transactions');
+            anonTxns.forEach(t => store.put(t));
+            tx.oncomplete = () => {
+              db.close();
+              // Delete the anon database to prevent other users claiming it
+              indexedDB.deleteDatabase('tcmd_tax_anon');
+            };
+          };
+        } else {
+          // User already has data — just wipe anon DB
+          indexedDB.deleteDatabase('tcmd_tax_anon');
+        }
+      }
+    } catch (e) {
+      console.warn('[TaxEngine] IDB migration error:', e.message);
+    }
+  }
+
   // ── Accounts (in-memory cache loaded from Supabase) ──────
   let _accountsCache = [];
   function getAccounts() { return _accountsCache; }
@@ -260,6 +342,10 @@ const TaxEngine = (() => {
       clearUserCache();
     }
     if (_txCache !== null) return;  // already loaded for this user
+
+    // Run one-time migration from the legacy 'anon' namespace (see _migrateAnonData above).
+    // Only runs once per user (guarded by a migration flag in localStorage).
+    await _migrateAnonData(currentUid);
     _idbLastUserId = currentUid;
     _txCache = await idbLoadAll();
     // One-time migration: if IDB is empty, check legacy (un-scoped) localStorage key

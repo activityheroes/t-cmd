@@ -1926,12 +1926,18 @@ const App = {
       }
     });
 
-    // Show admin nav tab for admin users (the old icon button is now redundant but kept for compat)
+    // Show admin nav tab only for admin users; explicitly hide it for everyone else.
+    // Must always set display (not just conditionally show) so that any leftover
+    // state from a previous admin session is reset on each fresh login.
+    const adminNavTab = document.getElementById('nav-tab-admin');
+    const adminBtn    = document.getElementById('admin-btn');
     if (AuthManager.isAdmin()) {
-      const adminNavTab = document.getElementById('nav-tab-admin');
       if (adminNavTab) adminNavTab.style.display = '';
-      const adminBtn = document.getElementById('admin-btn');
-      if (adminBtn) adminBtn.style.display = 'none'; // replaced by nav tab
+      if (adminBtn)    adminBtn.style.display = 'none'; // replaced by nav tab
+    } else {
+      // Non-admin: hide both the nav tab and the legacy icon button completely
+      if (adminNavTab) adminNavTab.style.display = 'none';
+      if (adminBtn)    adminBtn.style.display = 'none';
     }
 
     // Logout
@@ -1942,9 +1948,9 @@ const App = {
       showAuthPage('login');
     });
 
-    // User display
+    // User display — read from fresh session so name is always current user's
     const userEl = document.getElementById('nav-user-name');
-    if (userEl && user) userEl.textContent = user.name;
+    if (userEl && user) userEl.textContent = user.name || user.email || 'User';
   },
 
   setupDrawer() {

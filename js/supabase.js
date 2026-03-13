@@ -91,8 +91,13 @@ const SupabaseDB = (() => {
     }
 
     // ── Helper: get current user ID ──────────────────────────
+    // CRITICAL: the session object uses 'userId' (not 'id').
+    // setSession() stores: { userId: user.id, role, name, email, features }
+    // Reading .id returned undefined for every user → everyone resolved to 'anon'
+    // → all users shared identical tcmd_anon_* localStorage keys and
+    //   the same tcmd_tax_anon IndexedDB → cross-user data leakage.
     function _uid() {
-        try { return AuthManager.getUser()?.id || 'anon'; } catch { return 'anon'; }
+        try { return AuthManager.getUser()?.userId || 'anon'; } catch { return 'anon'; }
     }
 
     // ── Public API ────────────────────────────────────────────

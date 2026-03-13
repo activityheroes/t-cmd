@@ -242,6 +242,9 @@ const TaxEngine = (() => {
       reviewReason: raw.reviewReason || null,
       notes: raw.notes || '',
       rawType,        // stored for re-classification; no full _raw object saved
+      // Exchange execution price (Level 1 pricing)
+      rawTradePrice: parseFloat(raw.rawTradePrice) || null,
+      rawTradeCurrency: (raw.rawTradeCurrency || '').toUpperCase() || null,
     };
   }
 
@@ -782,6 +785,20 @@ const TaxEngine = (() => {
 
   // Price one transaction through the full fallback chain.
   // Returns an updated transaction object with price metadata set.
+  // Helper: get SEK value for a symbol+amount using any available source
+  // Used inline within the derivation passes
+  function getSEKValue(sym, amt, date, cache, fxByYear) {
+    if (!sym || !amt) return null;
+    sym = sym.toUpperCase();
+    if (STABLES.has(sym)) {
+      const EUR_STABLES = new Set(['EUROC', 'EURC', 'EURT', 'EURS']);
+      const rate = historicalFX(date, fxByYear) || STABLE_SEK.USD;
+      return EUR_STABLES.has(sym) ? rate * (STABLE_SEK.EUR / STABLE_SEK.USD) * amt : rate * amt;
+    }
+    const cached = lookupCachedSEK(sym, date, cache);
+    return cached ? cached * amt : null;
+  }
+
   function priceOneTxn(t, cache, fxByYear) {
     // Never overwrite manual prices
     if (t.priceSource === PS.MANUAL || t.manualCategory) return t;
@@ -790,34 +807,69 @@ const TaxEngine = (() => {
       return { ...t, priceSEKPerUnit: 0, costBasisSEK: 0,
                priceSource: PS.TRADE_EXACT, priceConfidence: 'high' };
     }
-    // Non-taxable categories: skip
-    if (!isTaxableCategory(t.category)) return t;
+    // Non-taxable / spam: skip
+    if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) return t;
 
     const sym  = (t.assetSymbol || '').toUpperCase();
     const date = (t.date || '').slice(0, 10);
     const amt  = t.amount || 0;
 
     // ── Already priced ─────────────────────────────────────
-    if (t.priceSEKPerUnit > 0) {
+    if (t.priceSEKPerUnit > 0 && t.priceSource !== PS.MISSING) {
       return {
         ...t,
         costBasisSEK: t.costBasisSEK || t.priceSEKPerUnit * amt,
         priceSource:     t.priceSource     || PS.TRADE_EXACT,
         priceConfidence: t.priceConfidence || 'high',
+        needsReview: false, reviewReason: null,
       };
     }
 
-    // ── Level 1: Exchange-reported execution price ─────────
-    // Exchange CSV parsers can set rawTradePrice (in USD or SEK)
+    // ── Level 1: Direct exchange execution price ──────────
+    // Exchange CSV parsers store rawTradePrice (in USD/EUR/quote currency)
     if (t.rawTradePrice && t.rawTradeCurrency) {
       const raw = parseFloat(t.rawTradePrice) || 0;
       if (raw > 0) {
         const fx   = historicalFX(date, fxByYear) || STABLE_SEK.USD;
         const price = t.rawTradeCurrency === 'SEK' ? raw : raw * fx;
-        return {
+        if (price > 0) return {
           ...t,
           priceSEKPerUnit: price, costBasisSEK: price * amt,
           priceSource: PS.TRADE_EXACT, priceConfidence: 'high',
+          needsReview: false, reviewReason: null,
+        };
+      }
+    }
+
+    // ── Level 2: Inline swap leg derivation ───────────────
+    // If this transaction has BOTH outgoing + incoming asset (TRADE / BUY / SELL
+    // with inAsset+inAmount set), derive value from the known side immediately.
+    // This handles: Binance BUY/SELL CSV rows, on-chain swaps, exchange pairs.
+    const inSym = (t.inAsset || '').toUpperCase();
+    const inAmt = t.inAmount || 0;
+    if (inSym && inAmt > 0) {
+      // 2a. In-side is stablecoin → its SEK value is the proceeds/cost
+      const inSEK = getSEKValue(inSym, inAmt, date, cache, fxByYear);
+      if (inSEK && inSEK > 0 && amt > 0) {
+        return {
+          ...t,
+          priceSEKPerUnit: inSEK / amt, costBasisSEK: inSEK,
+          priceSource: PS.SWAP_IMPLIED, priceConfidence: STABLES.has(inSym) ? 'high' : 'medium',
+          priceDerivedFromOtherLeg: true,
+          needsReview: false, reviewReason: null,
+        };
+      }
+    }
+    // For SELL/BUY: the "out" side might be priced and "in" side is the unknown
+    // i.e. selling unknown → receiving stablecoin. Treat them the same way.
+    if (t.category === CAT.SELL && inSym && inAmt > 0) {
+      const receivedSEK = getSEKValue(inSym, inAmt, date, cache, fxByYear);
+      if (receivedSEK && receivedSEK > 0 && amt > 0) {
+        return {
+          ...t,
+          priceSEKPerUnit: receivedSEK / amt, costBasisSEK: receivedSEK,
+          priceSource: PS.SWAP_IMPLIED, priceConfidence: 'high',
+          priceDerivedFromOtherLeg: true,
           needsReview: false, reviewReason: null,
         };
       }
@@ -840,10 +892,8 @@ const TaxEngine = (() => {
     if (STABLES.has(sym)) {
       const EUR_STABLES = new Set(['EUROC', 'EURC', 'EURT', 'EURS']);
       const isEUR = EUR_STABLES.has(sym);
-      // Try historical FX first
       const usdSEK = historicalFX(date, fxByYear);
       if (usdSEK) {
-        // EUR stables: also need EUR/USD rate — approximate via fixed ratio
         const price = isEUR ? usdSEK * (STABLE_SEK.EUR / STABLE_SEK.USD) : usdSEK;
         return {
           ...t,
@@ -862,84 +912,143 @@ const TaxEngine = (() => {
       };
     }
 
-    // Mark for swap-derivation pass
+    // Mark for cross-transaction derivation passes
     return { ...t, priceSource: PS.MISSING, priceConfidence: null };
   }
 
-  // Pass 2: Swap leg derivation
-  // For TRADE transactions still unpriced, try to derive value from the
-  // other side of the swap (e.g. unknown token → 350 USDC → derive SEK from USDC).
-  function deriveSwapPrices(txns) {
-    // Build a quick price lookup by id
-    const byId = new Map(txns.map(t => [t.id, t]));
-
-    return txns.map(t => {
-      if (t.category !== CAT.TRADE) return t;
-      // Already priced — only check if costBasisSEK also needs filling
-      if (t.priceSEKPerUnit > 0 && t.priceSource !== PS.MISSING) {
-        return t.costBasisSEK > 0 ? t : { ...t, costBasisSEK: t.priceSEKPerUnit * (t.amount || 0) };
+  // Pass 2: Cross-transaction derivation
+  // For still-unpriced transactions, try to derive from:
+  // (a) same txHash group — RECEIVE paired with SEND in same on-chain tx
+  // (b) priced sibling transaction with same asset (nearby date)
+  // Runs MULTIPLE rounds until no more prices can be resolved (chain-derive).
+  function deriveFromContext(txns, cache, fxByYear) {
+    // Group by txHash for same-event derivation
+    const byHash = {};
+    for (const t of txns) {
+      if (t.txHash && !t.txHash.startsWith('manual_')) {
+        (byHash[t.txHash] = byHash[t.txHash] || []).push(t);
       }
+    }
 
-      const inSym  = (t.inAsset  || '').toUpperCase();
-      const outSym = (t.assetSymbol || '').toUpperCase();
-      const inAmt  = t.inAmount || 0;
-      const outAmt = t.amount   || 0;
+    // Build symbol → best price map (most recent price wins for each symbol)
+    // Used to derive RECEIVE prices from symbol's known price on same/nearby date
+    const symPriceCache = new Map(); // "SYM|YYYY-MM-DD" → SEK unit price
 
-      // ── Case A: IN side is a stablecoin — derive OUT price ─
-      if (inSym && inAmt > 0 && STABLES.has(inSym)) {
-        // Use the SEK price we already stamped on inSym (or approx)
-        const inUnitPrice = byId.get(t.id)?._inSEK  // if pre-stamped
-          || (STABLES.has(inSym) ? STABLE_SEK.USD : null);  // fallback approx
-        const inSEK = inUnitPrice ? inUnitPrice * inAmt : null;
-        if (inSEK && outAmt > 0) {
-          const outPricePer = inSEK / outAmt;
+    function buildSymPriceCache(txns) {
+      symPriceCache.clear();
+      for (const t of txns) {
+        if (!t.priceSEKPerUnit || t.priceSource === PS.MISSING) continue;
+        const key = `${t.assetSymbol?.toUpperCase()}|${(t.date || '').slice(0, 10)}`;
+        if (!symPriceCache.has(key)) symPriceCache.set(key, t.priceSEKPerUnit);
+      }
+    }
+
+    function nearestSymPrice(sym, date) {
+      if (!sym || !date) return null;
+      sym = sym.toUpperCase();
+      // Exact date
+      const exact = symPriceCache.get(`${sym}|${date}`);
+      if (exact) return exact;
+      // Walk ±7 days in sorted keys
+      const base = new Date(date);
+      for (let d = 1; d <= 7; d++) {
+        for (const sign of [1, -1]) {
+          const dd = new Date(base);
+          dd.setUTCDate(dd.getUTCDate() + sign * d);
+          const v = symPriceCache.get(`${sym}|${dd.toISOString().slice(0,10)}`);
+          if (v) return v;
+        }
+      }
+      return null;
+    }
+
+    let changed = true;
+    let rounds = 0;
+
+    while (changed && rounds < 4) {
+      changed = false;
+      rounds++;
+      buildSymPriceCache(txns);
+
+      txns = txns.map(t => {
+        if (t.priceSource !== PS.MISSING && t.priceSEKPerUnit > 0) return t;
+        if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) return t;
+        if (t.isInternalTransfer) return t;
+
+        const sym  = (t.assetSymbol || '').toUpperCase();
+        const inSym = (t.inAsset || '').toUpperCase();
+        const date = (t.date || '').slice(0, 10);
+        const amt  = t.amount || 0;
+        const inAmt = t.inAmount || 0;
+
+        // ── 2a: Same txHash group derivation ──────────────
+        const hashGroup = t.txHash && !t.txHash.startsWith('manual_') ? (byHash[t.txHash] || []) : [];
+        const pricedInGroup = hashGroup.filter(x => x.id !== t.id && x.priceSEKPerUnit > 0 && x.priceSource !== PS.MISSING);
+
+        if (pricedInGroup.length > 0) {
+          // Find the best-priced counterpart in same hash
+          const counterpart = pricedInGroup[0];
+          if (counterpart.priceSEKPerUnit > 0 && amt > 0) {
+            const derivedPrice = counterpart.priceSEKPerUnit;
+            changed = true;
+            return {
+              ...t,
+              priceSEKPerUnit: derivedPrice, costBasisSEK: derivedPrice * amt,
+              priceSource: PS.SWAP_IMPLIED, priceConfidence: 'medium',
+              priceDerivedFromOtherLeg: true,
+              needsReview: false, reviewReason: null,
+            };
+          }
+        }
+
+        // ── 2b: Inline inAsset derivation (from priced inAsset) ─
+        if (inSym && inAmt > 0) {
+          const inPrice = nearestSymPrice(inSym, date)
+            || getSEKValue(inSym, 1, date, cache, fxByYear);  // unit price via FX
+          if (inPrice && inPrice > 0 && amt > 0) {
+            const totalSEK = inPrice * inAmt;
+            changed = true;
+            return {
+              ...t,
+              priceSEKPerUnit: totalSEK / amt, costBasisSEK: totalSEK,
+              priceSource: PS.SWAP_IMPLIED,
+              priceConfidence: STABLES.has(inSym) ? 'high' : 'medium',
+              priceDerivedFromOtherLeg: true,
+              needsReview: false, reviewReason: null,
+            };
+          }
+        }
+
+        // ── 2c: Asset symbol lookup from priced sibling ─────
+        // RECEIVE of ROOT after selling SOL → use SOL price to derive ROOT cost
+        const nearPrice = nearestSymPrice(sym, date);
+        if (nearPrice && nearPrice > 0 && amt > 0) {
+          changed = true;
           return {
             ...t,
-            priceSEKPerUnit: outPricePer, costBasisSEK: inSEK,
-            priceSource: PS.SWAP_IMPLIED, priceConfidence: 'high',
-            priceDerivedFromOtherLeg: true,
+            priceSEKPerUnit: nearPrice, costBasisSEK: nearPrice * amt,
+            priceSource: PS.MARKET_API, priceConfidence: 'medium',
             needsReview: false, reviewReason: null,
           };
         }
-      }
 
-      // ── Case B: IN side has a CoinGecko price already ─────
-      if (inSym && inAmt > 0) {
-        const sibling = [...byId.values()].find(x =>
-          x.id !== t.id &&
-          x.assetSymbol?.toUpperCase() === inSym &&
-          x.priceSEKPerUnit > 0 &&
-          Math.abs(new Date(x.date) - new Date(t.date)) < 48 * 3600 * 1000
-        );
-        if (sibling?.priceSEKPerUnit && outAmt > 0) {
-          const totalSEK = sibling.priceSEKPerUnit * inAmt;
-          return {
-            ...t,
-            priceSEKPerUnit: totalSEK / outAmt, costBasisSEK: totalSEK,
-            priceSource: PS.SWAP_IMPLIED, priceConfidence: 'medium',
-            priceDerivedFromOtherLeg: true,
-            needsReview: false, reviewReason: null,
-          };
-        }
-      }
+        return t;
+      });
+    }
 
-      // ── Case C: OUT side is known, derive IN unit price ───
-      // (Already priced on the OUT side — just fill in costBasisSEK cleanly)
-      if (t.priceSEKPerUnit > 0 && outAmt > 0) {
-        return {
-          ...t,
-          costBasisSEK: t.priceSEKPerUnit * outAmt,
-          priceConfidence: t.priceConfidence || 'medium',
-          needsReview: false, reviewReason: null,
-        };
-      }
-
-      return t;
-    });
+    return txns;
   }
 
   // Pass 3: Price fee rows using the same-date price of the fee asset
   function priceFees(txns, cache, fxByYear) {
+    // Build a quick symbol-price map from already-priced transactions
+    const symPriceMap = new Map();
+    for (const t of txns) {
+      if (t.priceSEKPerUnit > 0 && t.priceSource !== PS.MISSING) {
+        const key = `${t.assetSymbol?.toUpperCase()}|${(t.date || '').slice(0, 10)}`;
+        if (!symPriceMap.has(key)) symPriceMap.set(key, t.priceSEKPerUnit);
+      }
+    }
     return txns.map(t => {
       if (t.category !== CAT.FEE) return t;
       if ((t.feeSEK > 0 || t.priceSEKPerUnit > 0) && t.priceSource !== PS.MISSING) return t;
@@ -947,6 +1056,7 @@ const TaxEngine = (() => {
       const date = (t.date || '').slice(0, 10);
       const amt  = t.amount || 0;
       const price = lookupCachedSEK(sym, date, cache)
+        || symPriceMap.get(`${sym}|${date}`)
         || (STABLES.has(sym) ? (historicalFX(date, fxByYear) || stableSEKPrice(sym)) : null);
       if (!price) return t;
       return {
@@ -961,17 +1071,25 @@ const TaxEngine = (() => {
     });
   }
 
-  // Full 3-pass pricing application
+  // Full pricing chain application
+  // Pass 1: independent per-transaction pricing (CoinGecko + stablecoin + inline swap derivation)
+  // Pass 2: cross-transaction derivation (same txHash + sibling prices) — up to 4 rounds
+  // Pass 3: fee row pricing
+  // Final: tag any remaining unpriced taxable transactions for manual review
   function applyPricingChain(txns, cache, fxByYear) {
     let result = txns.map(t => priceOneTxn(t, cache, fxByYear)); // Pass 1
-    result = deriveSwapPrices(result);                             // Pass 2
+    result = deriveFromContext(result, cache, fxByYear);           // Pass 2 (multi-round)
     result = priceFees(result, cache, fxByYear);                  // Pass 3
-    // Final: tag anything still unpriceable for manual review
+    // Final: tag anything still unpriceable as missing — manual review as last resort
     return result.map(t => {
       if (t.isInternalTransfer || !isTaxableCategory(t.category)) return t;
       if (!t.priceSEKPerUnit && !t.costBasisSEK) {
         return { ...t, needsReview: true, reviewReason: 'missing_sek_price',
                  priceSource: PS.MISSING, priceConfidence: null };
+      }
+      // Ensure needsReview is cleared for priced transactions
+      if (t.reviewReason === 'missing_sek_price' && (t.priceSEKPerUnit > 0 || t.costBasisSEK > 0)) {
+        return { ...t, needsReview: false, reviewReason: null };
       }
       return t;
     });
@@ -1780,35 +1898,87 @@ const TaxEngine = (() => {
     return rows.map(r => {
       const side = (r['Side'] || r['Type'] || '').toUpperCase();
       const pair = r['Pair'] || r['Symbol'] || '';
-      const base = pair.replace(/USDT$|BUSD$|EUR$|BTC$|ETH$|BNB$/, '').toUpperCase() || (r['Coin'] || r['Asset'] || '').toUpperCase();
-      const qty = parseFloat(r['Executed'] || r['Amount'] || r['Quantity'] || 0);
+      // Extract quote asset from trading pair (e.g. BTCUSDT → USDT, ETHBTC → BTC)
+      const quoteMatch = pair.match(/(USDT|BUSD|USDC|TUSD|USDP|EUR|USD|BTC|ETH|BNB)$/i);
+      const quoteAsset = (quoteMatch ? quoteMatch[1] : (r['Quote Asset'] || 'USDT')).toUpperCase();
+      const base = pair.replace(new RegExp(quoteAsset + '$', 'i'), '').toUpperCase()
+                || (r['Coin'] || r['Asset'] || '').toUpperCase();
+      const qty   = parseFloat(r['Executed'] || r['Amount'] || r['Quantity'] || 0);
       const price = parseFloat(r['Price'] || r['Avg Trading Price'] || 0);
-      const total = parseFloat(r['Total'] || r['Executed Amount (Quote)'] || 0);
-      const fee = parseFloat(r['Fee'] || 0);
-      const date = r['Date(UTC)'] || r['Date'] || r['Time'] || '';
+      const total = parseFloat(r['Total'] || r['Executed Amount (Quote)'] || r['Turnover'] || 0)
+                  || (price > 0 && qty > 0 ? price * qty : 0);
+      const fee   = parseFloat(r['Fee'] || 0);
+      const date  = r['Date(UTC)'] || r['Date'] || r['Time'] || '';
+      // For BUY: spent `total` quoteAsset to receive `qty` base
+      // For SELL: sold `qty` base, received `total` quoteAsset
       return normalizeTransaction({
         txHash: r['TxID'] || r['Order ID'] || r['OrderId'] || `bnb_${date}_${base}_${qty}`,
-        date, type: side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : 'trade',
-        assetSymbol: base, amount: qty,
-        priceSEKPerUnit: 0, // Will be fetched
-        costBasisSEK: 0,
-        feeSEK: fee, needsReview: true,
-        notes: `Binance ${side} ${base} at ${price} (quote)`,
+        date,
+        type: side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : 'trade',
+        assetSymbol: base,
+        amount: qty,
+        inAsset: quoteAsset,
+        inAmount: total,
+        rawTradePrice: price,
+        rawTradeCurrency: quoteAsset,
+        feeSEK: fee,
+        needsReview: true,
+        notes: `Binance ${side} ${base} at ${price} ${quoteAsset}`,
       }, accountId, 'binance_csv');
     });
   }
 
   function parseKrakenCSV(text, accountId) {
     const rows = parseCSV(text);
+    // Kraken exports two formats: Trade History and Ledger History
+    // Trade History has: txid, ordertxid, pair, time, type, price, cost, fee, vol
+    // Ledger History has: txid, refid, time, type, asset, amount, fee
+    const isTradeHistory = rows.length > 0 && ('pair' in rows[0] || 'cost' in rows[0]);
+
+    if (isTradeHistory) {
+      return rows.map(r => {
+        const side = (r['type'] || '').toLowerCase();
+        const pair = (r['pair'] || '').toUpperCase();
+        // Kraken pairs: XXBTZUSD, XETHZEUR, SOLUSD, ETHUSD etc.
+        const quoteMatch = pair.match(/(USDT|USDC|ZUSD|ZEUR|USD|EUR|BTC|ETH|XBT)$/i);
+        const rawQuote = quoteMatch ? quoteMatch[1].toUpperCase() : 'USD';
+        const quoteAsset = rawQuote.replace(/^Z/, '').replace('XBT', 'BTC');
+        // Base: strip leading X and trailing quote
+        const base = pair.replace(/^X/, '').replace(new RegExp(quoteMatch?.[0] || '$'), '')
+                        .replace(/^X/, '').replace('XBT', 'BTC') || 'UNKNOWN';
+        const vol    = parseFloat(r['vol'] || 0);
+        const price  = parseFloat(r['price'] || 0);
+        const cost   = parseFloat(r['cost'] || 0) || (vol * price);
+        const fee    = parseFloat(r['fee'] || 0);
+        return normalizeTransaction({
+          txHash: r['txid'] || r['ordertxid'] || `krk_${r['time']}_${base}_${vol}`,
+          date: r['time'],
+          type: side === 'buy' ? 'buy' : 'sell',
+          assetSymbol: base,
+          amount: vol,
+          inAsset: quoteAsset,
+          inAmount: cost,
+          rawTradePrice: price,
+          rawTradeCurrency: quoteAsset,
+          feeSEK: fee,
+          needsReview: true,
+          notes: `Kraken ${side} ${base} at ${price} ${quoteAsset}`,
+        }, accountId, 'kraken_csv');
+      });
+    }
+
+    // Ledger format (one asset per row — can't determine pair directly)
     return rows.map(r => {
-      const type = (r['type'] || '').toLowerCase();
-      const asset = (r['asset'] || '').replace(/^X(?=[A-Z]{2,4}$)/, '').replace(/Z?EUR$|Z?USD$|\.S$/, '').toUpperCase();
+      const type  = (r['type'] || '').toLowerCase();
+      const asset = (r['asset'] || '').replace(/^X(?=[A-Z]{2,4}$)/, '').replace(/^Z/, '')
+                      .replace(/\.S$/, '').replace('XBT', 'BTC').toUpperCase();
+      const amount = Math.abs(parseFloat(r['amount'] || r['vol'] || 0));
       return normalizeTransaction({
         txHash: r['txid'] || r['refid'] || `krk_${r['time']}_${asset}`,
         date: r['time'],
         type,
         assetSymbol: asset,
-        amount: parseFloat(r['vol'] || r['amount'] || 0),
+        amount,
         feeSEK: parseFloat(r['fee'] || 0),
         needsReview: true,
         notes: `Kraken ${type} ${asset}`,
@@ -1820,16 +1990,33 @@ const TaxEngine = (() => {
     const rows = parseCSV(text);
     return rows.map(r => {
       const side = (r['Side'] || '').toUpperCase();
-      const sym = (r['Symbol'] || r['Coin'] || '').replace(/USDT$|USD$/, '').toUpperCase();
+      const rawSymbol = r['Symbol'] || r['Coin'] || '';
+      // Extract quote currency from symbol (e.g. BTCUSDT → USDT)
+      const quoteMatch = rawSymbol.match(/(USDT|USDC|USD|BUSD|EUR|BTC|ETH)$/i);
+      const quoteAsset = (quoteMatch ? quoteMatch[1] : 'USDT').toUpperCase();
+      const sym = rawSymbol.replace(new RegExp(quoteAsset + '$', 'i'), '').toUpperCase()
+               || (r['Coin'] || '').toUpperCase();
+      const qty       = parseFloat(r['Qty'] || r['Quantity'] || r['Amount'] || 0);
+      const execPrice = parseFloat(r['Avg Price'] || r['Order Price'] || r['Price'] || 0);
+      // Exec Value = total quote amount of the trade
+      const execValue = parseFloat(r['Exec Value'] || r['Order Amount (USDT)']
+                       || r['Value (USDT)'] || r['Turnover'] || 0)
+                     || (execPrice > 0 && qty > 0 ? execPrice * qty : 0);
+      const fee = parseFloat(r['Trading Fee'] || r['Fee'] || 0);
+      const date = r['Date'] || r['Time'] || r['Create Time'] || '';
       return normalizeTransaction({
-        txHash: r['Order ID'] || r['Trade ID'] || `bybit_${r['Date']}_${sym}`,
-        date: r['Date'] || r['Time'],
+        txHash: r['Order ID'] || r['Trade ID'] || `bybit_${date}_${sym}_${qty}`,
+        date,
         type: side === 'BUY' ? 'buy' : 'sell',
         assetSymbol: sym,
-        amount: parseFloat(r['Qty'] || r['Amount'] || 0),
-        feeSEK: parseFloat(r['Trading Fee'] || 0),
+        amount: qty,
+        inAsset: quoteAsset,
+        inAmount: execValue,
+        rawTradePrice: execPrice,
+        rawTradeCurrency: quoteAsset,
+        feeSEK: fee,
         needsReview: true,
-        notes: `Bybit ${side} ${sym}`,
+        notes: `Bybit ${side} ${sym} at ${execPrice} ${quoteAsset}`,
       }, accountId, 'bybit_csv');
     });
   }
@@ -1837,16 +2024,32 @@ const TaxEngine = (() => {
   function parseCoinbaseCSV(text, accountId) {
     const rows = parseCSV(text);
     return rows.map(r => {
-      const type = (r['Transaction Type'] || '').toLowerCase();
+      const type = (r['Transaction Type'] || r['Type'] || '').toLowerCase();
+      const asset = (r['Asset'] || r['Coin Type'] || '').toUpperCase();
+      const qty = parseFloat(r['Quantity Transacted'] || r['Amount'] || 0);
+      // Coinbase Advanced Trade CSV has Spot Price Currency + Spot Price at Transaction
+      // Coinbase Simple CSV may have Total (USD) or Subtotal
+      const quoteCurrency = (r['Spot Price Currency'] || r['Price / Share Currency'] || 'USD').toUpperCase();
+      const spotPrice = parseFloat(r['Spot Price at Transaction'] || r['Price / Share'] || 0);
+      // Subtotal is total trade value excluding fees
+      const subtotal = parseFloat(r['Subtotal'] || r['Total (inclusive of fees and/or spread)']
+                      || r['USD Total (inclusive of fees)'] || r['Total'] || 0)
+                    || (spotPrice > 0 && qty > 0 ? spotPrice * qty : 0);
+      const fee = parseFloat(r['Fees and/or Spread'] || r['Fee'] || r['Fees'] || 0);
       return normalizeTransaction({
-        txHash: r['ID'] || `cb_${r['Timestamp']}_${r['Asset']}`,
-        date: r['Timestamp'],
+        txHash: r['ID'] || r['Transaction ID'] || `cb_${r['Timestamp']}_${asset}_${qty}`,
+        date: r['Timestamp'] || r['Date'],
         type,
-        assetSymbol: (r['Asset'] || r['Coin Type'] || '').toUpperCase(),
-        amount: parseFloat(r['Quantity Transacted'] || 0),
-        feeSEK: parseFloat(r['Fees and/or Spread'] || 0),
+        assetSymbol: asset,
+        amount: qty,
+        inAsset: STABLES.has(quoteCurrency) || quoteCurrency === 'USD' || quoteCurrency === 'EUR'
+                   ? quoteCurrency : null,
+        inAmount: subtotal,
+        rawTradePrice: spotPrice,
+        rawTradeCurrency: quoteCurrency,
+        feeSEK: fee,
         needsReview: true,
-        notes: `Coinbase ${type}`,
+        notes: `Coinbase ${type} ${asset} at ${spotPrice} ${quoteCurrency}`,
       }, accountId, 'coinbase_csv');
     });
   }

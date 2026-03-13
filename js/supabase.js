@@ -78,8 +78,17 @@ const SupabaseDB = (() => {
             .map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
+    // ── Helper: get current user ID (scopes all per-user data) ───
+    // Session is stored as { userId, role, name, email, ... }
+    // so we read .userId — never .id (which is undefined on the session).
+    function _uid() {
+        try { return AuthManager.getUser()?.userId || 'anon'; } catch { return 'anon'; }
+    }
+
     // ── Public API ────────────────────────────────────────────
     return {
+        // Expose user ID so TaxEngine / WalletTracker can scope caches
+        getCurrentUserId() { return _uid(); },
 
         // ── Users ─────────────────────────────────────
         async getUserByEmail(email) {
@@ -184,38 +193,49 @@ const SupabaseDB = (() => {
             return sbGet('invites', q);
         },
 
-        // ── Watched Wallets (shared across all users) ─────────
-        // Required Supabase table:
-        //   CREATE TABLE watched_wallets (
-        //     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-        //     chain text NOT NULL,
-        //     address text NOT NULL,
-        //     label text,
-        //     created_at timestamptz DEFAULT now()
-        //   );
-        //   ALTER TABLE watched_wallets ENABLE ROW LEVEL SECURITY;
-        //   CREATE POLICY "public read"  ON watched_wallets FOR SELECT USING (true);
-        //   CREATE POLICY "public write" ON watched_wallets FOR INSERT WITH CHECK (true);
-        //   CREATE POLICY "public delete" ON watched_wallets FOR DELETE USING (true);
+        // ── Watched Wallets (user-scoped — each wallet belongs to one user) ──
+        // Required Supabase table: see supabase-schema.sql
+        // user_id is REQUIRED on every row; RLS enforces it on writes.
 
         async getWallets() {
-            if (!SUPABASE_READY) return null;
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                // localStorage fallback: user-scoped key
+                try { return JSON.parse(localStorage.getItem(`tcmd_wallets_${userId}`) || '[]'); }
+                catch { return []; }
+            }
             try {
-                return await sbGet('watched_wallets', 'order=created_at.desc');
-            } catch { return null; }
+                return await sbGet('watched_wallets', `user_id=eq.${userId}&order=created_at.desc`);
+            } catch { return []; }
         },
 
         async addWallet({ chain, address, label }) {
-            if (!SUPABASE_READY) return null;
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const wallets = JSON.parse(localStorage.getItem(`tcmd_wallets_${userId}`) || '[]');
+                const entry = { id: Date.now().toString(), user_id: userId, chain, address, label, created_at: new Date().toISOString() };
+                if (!wallets.find(w => w.address === address && w.chain === chain)) {
+                    wallets.unshift(entry);
+                    localStorage.setItem(`tcmd_wallets_${userId}`, JSON.stringify(wallets));
+                }
+                return entry;
+            }
             try {
-                return await sbPost('watched_wallets', { chain, address, label });
+                return await sbPost('watched_wallets', { chain, address, label, user_id: userId });
             } catch { return null; }
         },
 
         async deleteWallet(id) {
-            if (!SUPABASE_READY) return false;
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                const wallets = JSON.parse(localStorage.getItem(`tcmd_wallets_${userId}`) || '[]')
+                    .filter(w => w.id !== id);
+                localStorage.setItem(`tcmd_wallets_${userId}`, JSON.stringify(wallets));
+                return true;
+            }
             try {
-                await sbDelete('watched_wallets', `id=eq.${id}`);
+                // Include user_id in the predicate so a user can only delete their own wallets
+                await sbDelete('watched_wallets', `id=eq.${id}&user_id=eq.${userId}`);
                 return true;
             } catch { return false; }
         }

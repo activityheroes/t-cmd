@@ -72,26 +72,59 @@ const AuthManager = (() => {
       }
     },
 
+    // ── Admin guard ────────────────────────────────────────
+    // Throws if the current session is not an admin.
+    // Call at the top of every admin operation.
+    _requireAdmin() {
+      const s = getSession();
+      if (s?.role !== 'admin') throw new Error('Unauthorized: administrator access required.');
+    },
+
     // ── Admin helpers (async) ──────────────────────────────
-    async getAllUsers() { return SupabaseDB.getAllUsers(); },
-    async approveUser(id) { return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false } }); },
-    async disableUser(id) { return SupabaseDB.updateUser(id, { status: 'disabled' }); },
-    async updateFeatures(id, features) { return SupabaseDB.updateUser(id, { features }); },
-    async deleteUser(id) { return SupabaseDB.deleteUser(id); },
+    async getAllUsers() {
+      this._requireAdmin();
+      return SupabaseDB.getAllUsers();
+    },
+    async approveUser(id) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, { status: 'active', features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false } });
+    },
+    async disableUser(id) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, { status: 'disabled' });
+    },
+    async updateFeatures(id, features) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, { features });
+    },
+    async deleteUser(id) {
+      this._requireAdmin();
+      const s = getSession();
+      if (s?.userId === id) throw new Error('Cannot delete your own admin account.');
+      return SupabaseDB.deleteUser(id);
+    },
     async createUserDirect({ name, email, password, role = 'user' }) {
+      this._requireAdmin();
       return SupabaseDB.createUser({
         name, email, password, role, status: 'active',
         features: { coinSignals: true, memeScanner: true, tradingLog: true, whalesWallets: false, taxCalculator: false },
       });
     },
-    async updateUser(id, data) { return SupabaseDB.updateUser(id, data); },
+    async updateUser(id, data) {
+      this._requireAdmin();
+      return SupabaseDB.updateUser(id, data);
+    },
 
     // ── Invite helpers ────────────────────────────────────
     async generateInvite(email = null, name = null) {
+      this._requireAdmin();
       const session = getSession();
       return SupabaseDB.createInvite({ email, name, createdBy: session?.userId || null });
     },
-    async getAllInvites() { return SupabaseDB.getAllInvites(); },
+    async getAllInvites() {
+      this._requireAdmin();
+      return SupabaseDB.getAllInvites();
+    },
 
     // Register via invite token (bypasses pending — creates active account)
     async registerViaInvite(token, name, email, password) {
@@ -390,6 +423,14 @@ function showAuthError(el, msg) {
 async function renderAdminPanel() {
   const panel = document.getElementById('admin-panel-content');
   if (!panel) return;
+
+  // Gate: only admins may see this panel
+  if (!AuthManager.isAdmin()) {
+    panel.innerHTML = `<div style="color:var(--accent-red);padding:32px;text-align:center;font-size:14px;">
+      🔒 Access denied — administrator privileges required.</div>`;
+    return;
+  }
+
   panel.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center;">Loading users...</div>`;
 
   try {

@@ -1922,9 +1922,9 @@ const App = {
       showAuthPage('login');
     });
 
-    // User display
+    // User display — show name, fall back to email, then generic label
     const userEl = document.getElementById('nav-user-name');
-    if (userEl && user) userEl.textContent = user.name;
+    if (userEl && user) userEl.textContent = user.name || user.email || 'User';
   },
 
   setupDrawer() {

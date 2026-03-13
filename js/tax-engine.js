@@ -295,6 +295,72 @@ const TaxEngine = (() => {
     _settingsCache    = null;
     _idbLastUserId    = null;
     _importStatusCache = {};
+    if (_cloudSyncTimer) { clearTimeout(_cloudSyncTimer); _cloudSyncTimer = null; }
+  }
+
+  // ── Cloud sync (cross-browser) ─────────────────────────────
+  // Transactions are stored in IndexedDB (browser-local) for performance.
+  // We also maintain a cloud backup in Supabase so that logging in from
+  // a different browser (e.g. Safari → Chrome) restores the full history.
+  //
+  // Strategy:
+  //   • Writes: debounced 3 s after the last saveTransactions() call.
+  //     Chunked into CLOUD_CHUNK_SIZE rows so no single JSON value is
+  //     too large for Supabase's jsonb column.
+  //   • Reads:  on loadTransactions(), if IndexedDB comes back empty
+  //     AND Supabase has cloud data, we pull it down and repopulate IDB.
+  const CLOUD_CHUNK_SIZE = 1000; // transactions per Supabase row
+  let _cloudSyncTimer = null;
+
+  function _scheduleCloudSync(txns) {
+    if (!SUPABASE_READY) return; // no Supabase → nothing to sync
+    if (_cloudSyncTimer) clearTimeout(_cloudSyncTimer);
+    _cloudSyncTimer = setTimeout(() => {
+      _cloudSyncTimer = null;
+      _pushTransactionsToCloud(txns).catch(e =>
+        console.warn('[TaxEngine] cloud sync failed:', e.message));
+    }, 3000);
+  }
+
+  async function _pushTransactionsToCloud(txns) {
+    if (!SUPABASE_READY || !txns) return;
+    const chunks = [];
+    for (let i = 0; i < txns.length; i += CLOUD_CHUNK_SIZE)
+      chunks.push(txns.slice(i, i + CLOUD_CHUNK_SIZE));
+    if (chunks.length === 0) chunks.push([]); // keep meta even when empty
+
+    // Write each chunk
+    for (let i = 0; i < chunks.length; i++) {
+      await SupabaseDB.setUserData(`tax_txns_chunk_${i}`, chunks[i]);
+    }
+    // Write metadata (so the reader knows how many chunks to expect)
+    await SupabaseDB.setUserData('tax_txns_meta', {
+      chunks:    chunks.length,
+      total:     txns.length,
+      syncedAt:  new Date().toISOString(),
+    });
+    const syncedAt = new Date().toISOString();
+    console.log(`[TaxEngine] Synced ${txns.length} transactions to cloud (${chunks.length} chunks)`);
+    // Notify the UI so it can update the sync timestamp display
+    try { window.dispatchEvent(new CustomEvent('taxCloudSynced', { detail: { count: txns.length, syncedAt } })); } catch { }
+  }
+
+  async function _pullTransactionsFromCloud() {
+    if (!SUPABASE_READY) return null;
+    try {
+      const meta = await SupabaseDB.getUserData('tax_txns_meta', null);
+      if (!meta || !meta.chunks || meta.total === 0) return null;
+      const all = [];
+      for (let i = 0; i < meta.chunks; i++) {
+        const chunk = await SupabaseDB.getUserData(`tax_txns_chunk_${i}`, []);
+        all.push(...chunk);
+      }
+      console.log(`[TaxEngine] Restored ${all.length} transactions from cloud`);
+      return all.length ? all : null;
+    } catch (e) {
+      console.warn('[TaxEngine] cloud pull failed:', e.message);
+      return null;
+    }
   }
 
   async function idbSaveAll(txns) {
@@ -336,6 +402,8 @@ const TaxEngine = (() => {
   function saveTransactions(txns) {
     _txCache = txns;
     idbSaveAll(txns).catch(e => console.warn('[TaxEngine] saveTransactions error:', e));
+    // Schedule a cloud backup so other browsers can restore the same data.
+    _scheduleCloudSync(txns);
   }
 
   async function loadTransactions() {
@@ -353,6 +421,7 @@ const TaxEngine = (() => {
     await _migrateAnonData(currentUid);
     _idbLastUserId = currentUid;
     _txCache = await idbLoadAll();
+
     // One-time migration: if IDB is empty, check legacy (un-scoped) localStorage key
     if (!_txCache.length) {
       try {
@@ -364,6 +433,17 @@ const TaxEngine = (() => {
           console.log('[TaxEngine] Migrated', _txCache.length, 'transactions from localStorage to IDB');
         }
       } catch { }
+    }
+
+    // Cross-browser restore: if IDB is still empty, try pulling from Supabase cloud backup.
+    // This is how transactions move from Safari → Chrome (or any other browser pair).
+    if (!_txCache.length && SUPABASE_READY) {
+      const cloudTxns = await _pullTransactionsFromCloud();
+      if (cloudTxns && cloudTxns.length) {
+        _txCache = cloudTxns;
+        await idbSaveAll(_txCache); // populate local IDB so future loads are instant
+        console.log('[TaxEngine] Restored', _txCache.length, 'transactions from cloud backup');
+      }
     }
   }
 
@@ -3464,6 +3544,8 @@ const TaxEngine = (() => {
     loadTransactions,
     getTransactions, saveTransactions, addTransactions,
     deleteTransaction, updateTransaction,
+    // Cloud sync (cross-browser)
+    syncToCloud: _pushTransactionsToCloud,
     normalizeTransaction,
     // Pipeline
     runPipeline, Events,

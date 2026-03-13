@@ -36,10 +36,19 @@ const TaxUI = (() => {
     selectedTxIds: new Set(),
     userName: '',
     userPnr: '',
+    _cloudSyncedAt: null,  // ISO timestamp of last successful cloud sync
   };
 
   let _pendingCSVText = null;
   let _pendingCSVParser = null;
+
+  // ── Cloud sync event ──────────────────────────────────────
+  // Fired by TaxEngine._pushTransactionsToCloud after a successful write.
+  window.addEventListener('taxCloudSynced', ({ detail }) => {
+    S._cloudSyncedAt = detail.syncedAt;
+    // Update just the sync info bar if the accounts page is visible
+    if (S.page === 'accounts') render();
+  });
 
   // ── Pipeline Listener ─────────────────────────────────────
   function bindPipelineEvents() {
@@ -960,6 +969,14 @@ const TaxUI = (() => {
   function renderAccounts() {
     const accounts = TaxEngine.getAccounts();
     const txns = TaxEngine.getTransactions();
+    const txnCount = txns.length;
+
+    // Cloud sync status line
+    const cloudMeta = (typeof SUPABASE_READY !== 'undefined' && SUPABASE_READY)
+      ? (S._cloudSyncedAt
+          ? `<span style="color:#34d399">☁ Backed up ${timeAgoShort(S._cloudSyncedAt)}</span>`
+          : `<span style="color:var(--text-muted)">☁ Not yet synced to cloud</span>`)
+      : `<span style="color:var(--text-muted)">☁ Cloud sync off (Supabase not configured)</span>`;
 
     return `
       <div class="tax-page tax-page--accounts">
@@ -975,6 +992,17 @@ const TaxUI = (() => {
             </button>
           </div>
         </div>
+
+        <!-- ── Cross-browser cloud sync info bar ─────────────── -->
+        ${txnCount > 0 ? `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;background:rgba(255,255,255,0.03);border:1px solid var(--border-subtle);border-radius:10px;margin-bottom:16px;font-size:12px;">
+          <span style="color:var(--text-muted)">${txnCount.toLocaleString()} transactions</span>
+          <span style="color:var(--border-subtle)">•</span>
+          ${cloudMeta}
+          <button class="tax-btn tax-btn-xs tax-btn-ghost" style="margin-left:auto" onclick="TaxUI.manualCloudSync()" title="Push all transactions to cloud now (makes them available in other browsers)">
+            ☁ Sync now
+          </button>
+        </div>` : ''}
 
         <!-- ── Connected accounts table ─────────────────── -->
         ${accounts.length > 0 ? `
@@ -2336,6 +2364,23 @@ const TaxUI = (() => {
     }
   }
 
+  async function manualCloudSync() {
+    if (typeof SUPABASE_READY === 'undefined' || !SUPABASE_READY) {
+      showTaxToast('ℹ️', 'Cloud sync unavailable', 'Supabase is not configured.', 'info');
+      return;
+    }
+    const txns = TaxEngine.getTransactions();
+    showTaxToast('⏳', 'Syncing to cloud…', `${txns.length.toLocaleString()} transactions`, 'info');
+    try {
+      await TaxEngine.syncToCloud(txns);
+      S._cloudSyncedAt = new Date().toISOString();
+      showTaxToast('✅', 'Cloud sync complete', `${txns.length.toLocaleString()} transactions backed up — available in all browsers.`, 'success');
+      render();
+    } catch (e) {
+      showTaxToast('❌', 'Cloud sync failed', e.message, 'error');
+    }
+  }
+
   async function resyncAccount(accountId) {
     if (!confirm('This will delete all imported transactions for this account and re-import. Continue?')) return;
     TaxEngine.resyncAccount(accountId);
@@ -2505,7 +2550,7 @@ const TaxUI = (() => {
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify,
     deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
-    setUserInfo, resyncAccount,
+    setUserInfo, resyncAccount, manualCloudSync,
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns

@@ -17,6 +17,38 @@ const TaxEngine = (() => {
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
+  // ── Global asset canonical identities ─────────────────────
+  // Maps alternate/wrapped/bridged names → canonical symbol.
+  // Used so the same economic asset is tracked as one across chains/sources.
+  // Wrap/unwrap are NON-TAXABLE in Sweden (same economic exposure);
+  // bridged USDC variants collapse to USDC for cost-basis continuity.
+  const ASSET_CANONICAL = {
+    // Wrapped native tokens — economically identical; treated as same asset
+    'WETH'    : 'ETH',  'WBTC'  : 'BTC',   'WSOL'  : 'SOL',
+    'WBNB'    : 'BNB',  'WMATIC': 'MATIC',  'WAVAX' : 'AVAX',
+    'WFTM'    : 'FTM',  'WCRO'  : 'CRO',   'WONE'  : 'ONE',
+    'WROSE'   : 'ROSE', 'WKAVA' : 'KAVA',
+    // Bridged USDC variants (Polygon, Base, Arbitrum, etc.)
+    'USDC.E'  : 'USDC', 'USDCE' : 'USDC',  'USDC.B': 'USDC',
+    'BRIDGED_USDC': 'USDC', 'USD_COIN': 'USDC',
+    // Bridged USDT
+    'USDT.E'  : 'USDT', 'USDT.B': 'USDT',
+    // Staked / liquid-staked ETH (same economic exposure for Swedish tax)
+    'STETH'   : 'ETH',  'WSTETH': 'ETH',   'BETH'  : 'ETH',   'RETH': 'ETH',
+    // Staked SOL representations
+    'MSOL'    : 'SOL',  'STSOL' : 'SOL',   'JITOSOL': 'SOL',
+    // Alternate native names used by some APIs
+    'XBT'     : 'BTC',  'XETH'  : 'ETH',
+  };
+
+  // Returns the canonical symbol for any asset, normalising wraps + bridged variants.
+  // Preserves unknowns unchanged so pricing/classification still gets original name.
+  function normalizeAssetSymbol(sym) {
+    if (!sym) return sym;
+    const upper = sym.trim().toUpperCase();
+    return ASSET_CANONICAL[upper] || upper;
+  }
+
   // ── CoinGecko asset ID mapping — free, no auth required ──────────
   // CoinGecko IDs (primary price source — free tier, no auth required)
   // Note: differs from CoinCap on BNB, AVAX, MATIC, NEAR, ARB etc.
@@ -42,12 +74,27 @@ const TaxEngine = (() => {
 
   // ── Transaction Categories ────────────────────────────────
   const CAT = {
+    // Core taxable events
     BUY: 'buy', SELL: 'sell', TRADE: 'trade',
-    RECEIVE: 'receive', SEND: 'send', INCOME: 'income',
-    FEE: 'fee', TRANSFER_IN: 'transfer_in', TRANSFER_OUT: 'transfer_out',
+    // Movements — may or may not be taxable depending on context
+    RECEIVE: 'receive', SEND: 'send',
+    INCOME: 'income',                         // Staking reward, lending interest, referral
+    AIRDROP: 'airdrop',                       // Airdrop received — income at FMV (Skatteverket)
+    FEE: 'fee',
+    TRANSFER_IN: 'transfer_in', TRANSFER_OUT: 'transfer_out',  // Internal moves
+    // Bridge / cross-chain — granular so matcher can pair them
+    BRIDGE_IN: 'bridge_in',                   // Funds arriving from another chain
+    BRIDGE_OUT: 'bridge_out',                 // Funds sent to another chain
+    BRIDGE: 'bridge',                         // Legacy / unspecified direction
+    // Token wrapping — non-taxable in Sweden (same economic exposure)
+    WRAP: 'wrap',                             // ETH → WETH
+    UNWRAP: 'unwrap',                         // WETH → ETH
+    // Non-economic
     SPAM: 'spam', APPROVAL: 'approval',
-    STAKING: 'staking', NFT_SALE: 'nft_sale', BRIDGE: 'bridge',
+    STAKING: 'staking', NFT_SALE: 'nft_sale',
     DEFI_UNKNOWN: 'defi_unknown',
+    // Inventory reconstruction
+    UNKNOWN_ACQUISITION: 'unknown_acquisition', // Disposal with no traceable prior acquisition
   };
 
   // ── Storage Keys (price cache remains localStorage; rest moves to Supabase) ──
@@ -228,11 +275,11 @@ const TaxEngine = (() => {
       category: raw.category || CAT.RECEIVE,
       autoClassified: false,
       isInternalTransfer: false,
-      assetSymbol: (raw.assetSymbol || raw.symbol || raw.asset || '').toUpperCase(),
+      assetSymbol: normalizeAssetSymbol((raw.assetSymbol || raw.symbol || raw.asset || '').toUpperCase()),
       assetName: raw.assetName || '',
-      coinGeckoId: raw.coinGeckoId || CC_IDS[(raw.assetSymbol || '').toUpperCase()] || null,
+      coinGeckoId: raw.coinGeckoId || CC_IDS[normalizeAssetSymbol((raw.assetSymbol || '').toUpperCase())] || null,
       amount: Math.abs(parseFloat(raw.amount || 0)),
-      inAsset: (raw.inAsset || '').toUpperCase(),
+      inAsset: normalizeAssetSymbol((raw.inAsset || '').toUpperCase()),
       inAmount: Math.abs(parseFloat(raw.inAmount || 0)),
       priceSEKPerUnit: parseFloat(raw.priceSEKPerUnit || 0),
       costBasisSEK: parseFloat(raw.costBasisSEK || 0),
@@ -458,30 +505,57 @@ const TaxEngine = (() => {
     const rawType = (t.rawType || '').toLowerCase();
     const sym = (t.assetSymbol || '').toUpperCase();
     const notes = (t.notes || '').toLowerCase();
+    const source = (t.source || '').toLowerCase();
     const amount = t.amount || 0;
 
     // ── Exchange-reported types (most reliable) ────────────
-    if (rawType.match(/^buy$/)) return CAT.BUY;
+    if (rawType.match(/^buy$/))  return CAT.BUY;
     if (rawType.match(/^sell$/)) return CAT.SELL;
     if (rawType.match(/swap|convert|exchange/)) return CAT.TRADE;
-    if (rawType.match(/staking|earn|reward|interest|cashback|referral/)) return CAT.INCOME;
-    if (rawType.match(/^deposit$/)) return CAT.TRANSFER_IN;   // May be reclassified as RECEIVE
+
+    // Income: staking, earn, rewards, interest
+    if (rawType.match(/staking|earn|reward|interest|cashback|referral|mining/)) return CAT.INCOME;
+    // Airdrop: separate from generic receive — income at FMV
+    if (rawType.match(/airdrop/)) return CAT.AIRDROP;
+
+    // Exchange crypto deposits are incoming transfers (not a buy of new assets)
+    if (rawType.match(/^deposit$/)) return CAT.TRANSFER_IN;
+    // Exchange crypto withdrawals are outgoing transfers
     if (rawType.match(/^withdrawal?$/)) return CAT.TRANSFER_OUT;
-    if (rawType.match(/airdrop/)) return CAT.RECEIVE;
-    if (rawType.match(/fee/)) return CAT.FEE;
-    if (rawType.match(/mining/)) return CAT.INCOME;
+
+    if (rawType.match(/fee/))      return CAT.FEE;
     if (rawType.match(/approval/)) return CAT.APPROVAL;
 
-    // ── DeFi / Staking / NFT heuristics ───────────────────
+    // ── DeFi / Staking / NFT ──────────────────────────────
     if (rawType.match(/stake|unstake|claim/)) return CAT.STAKING;
-    if (rawType.match(/bridge|wrap|unwrap/)) return CAT.BRIDGE;
     if (rawType.match(/nft.*sale|nft.*sell/)) return CAT.NFT_SALE;
-    if (rawType.match(/add.*liquidity|remove.*liquidity|lp/)) return CAT.TRADE;
+    if (rawType.match(/add.*liquidity|remove.*liquidity|\blp\b/)) return CAT.TRADE;
     if (rawType.match(/lend|borrow|repay|supply|withdraw.*vault/)) return CAT.DEFI_UNKNOWN;
-    if (rawType.match(/contract.*interaction|unknown.*program/)) return CAT.DEFI_UNKNOWN;
+    if (rawType.match(/contract.*interaction|unknown.*program/))   return CAT.DEFI_UNKNOWN;
 
-    // ── Blockchain heuristics ──────────────────────────────
+    // ── Bridge / Wrap — granular categories ───────────────
+    // Wrap/unwrap: detect from rawType or notes (ETH→WETH, WETH→ETH, etc.)
+    if (rawType === 'wrap'   || notes.match(/\bwrap\b/)  ) return CAT.WRAP;
+    if (rawType === 'unwrap' || notes.match(/\bunwrap\b/)) return CAT.UNWRAP;
+    // Bridge direction from rawType
+    if (rawType.match(/bridge.*in|bridge.*receive|bridge.*deposit|cross.?chain.*receiv/)) return CAT.BRIDGE_IN;
+    if (rawType.match(/bridge.*out|bridge.*send|bridge.*withdraw|cross.?chain.*send/))   return CAT.BRIDGE_OUT;
+    // Generic bridge (direction unknown — will be resolved by transfer matcher)
+    if (rawType.match(/bridge/)) return CAT.BRIDGE;
+
+    // ── Blockchain heuristics ─────────────────────────────
+    // Has both sides of swap → TRADE
     if (t.inAsset && t.inAmount > 0) return CAT.TRADE;
+
+    // Canonical wrapped asset arriving → likely an unwrap (non-taxable)
+    const original = ASSET_CANONICAL[sym];
+    if (original && (rawType === 'receive' || !rawType)) {
+      if (notes.match(/unwrap|withdraw.*wrap|redeem/)) return CAT.UNWRAP;
+    }
+    // Canonical wrapped asset leaving → likely a wrap (non-taxable)
+    if (original && (rawType === 'send' || !rawType)) {
+      if (notes.match(/\bwrap\b|deposit.*wrap/)) return CAT.WRAP;
+    }
 
     // Spam detection
     if (SPAM_PATTERNS.some(p => p.test(notes))) return CAT.SPAM;
@@ -506,70 +580,144 @@ const TaxEngine = (() => {
   }
 
   function isTaxableCategory(cat) {
-    return [CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY, CAT.STAKING, CAT.NFT_SALE].includes(cat);
+    return [
+      CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY,
+      CAT.STAKING, CAT.NFT_SALE, CAT.AIRDROP, CAT.UNKNOWN_ACQUISITION,
+    ].includes(cat);
+  }
+
+  // Non-taxable economic categories (internal moves, no gain/loss)
+  function isNonTaxableTransfer(cat) {
+    return [
+      CAT.TRANSFER_IN, CAT.TRANSFER_OUT, CAT.BRIDGE_IN, CAT.BRIDGE_OUT,
+      CAT.WRAP, CAT.UNWRAP,
+    ].includes(cat);
   }
 
   function getReviewReason(t, cat) {
     if (!t.priceSEKPerUnit && !t.costBasisSEK) return 'missing_sek_price';
     if (!t.coinGeckoId && !STABLES.has(t.assetSymbol)) return 'unknown_asset';
-    if (cat === CAT.DEFI_UNKNOWN) return 'unsupported_defi';
-    if (cat === CAT.BRIDGE) return 'bridge_review';
+    if (cat === CAT.DEFI_UNKNOWN)   return 'unsupported_defi';
+    if (cat === CAT.BRIDGE)         return 'bridge_review';
+    if (cat === CAT.BRIDGE_IN || cat === CAT.BRIDGE_OUT) return 'bridge_review';
+    if (cat === CAT.UNKNOWN_ACQUISITION) return 'unknown_acquisition';
     return 'unclassified';
   }
 
   // ════════════════════════════════════════════════════════════
-  // TRANSFER MATCHING
+  // TRANSFER MATCHING  (cross-chain / multi-source / bridge)
   // ════════════════════════════════════════════════════════════
-  const MATCH_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 h
+  //
+  // Three matching passes, each with different time + fee tolerances:
+  //   Pass 1 — Same-chain, wallet-to-wallet (24 h, 2%)
+  //   Pass 2 — Cross-chain bridge            (72 h, 5%)
+  //   Pass 3 — CEX withdrawal ↔ on-chain     (48 h, 2%)
+  //
+  // Assets are compared using their CANONICAL symbol (WETH = ETH, etc.)
+  // so wraps/unwraps across chains are matched as internal transfers.
+  // ════════════════════════════════════════════════════════════
+
+  const MATCH_WINDOW_MS  = 24 * 60 * 60 * 1000; // 24 h (same-chain)
   const AMOUNT_TOLERANCE = 0.02;                  // 2%
 
   function matchTransfers(txns) {
-    // Only try to match transactions across accounts the user owns
-    const byId = new Map(txns.map(t => [t.id, t]));
-    const outgoing = txns.filter(t =>
-      !t.isInternalTransfer &&
-      (t.category === CAT.TRANSFER_OUT || t.category === CAT.SEND)
-    );
-    const incoming = txns.filter(t =>
-      !t.isInternalTransfer &&
-      (t.category === CAT.TRANSFER_IN || t.category === CAT.RECEIVE)
-    );
-
     const matched = new Set();
 
-    for (const out of outgoing) {
-      if (matched.has(out.id)) continue;
-      const outDate = new Date(out.date).getTime();
+    // Canonical symbol: normalise wraps so WETH and ETH match
+    const symOf = t => normalizeAssetSymbol(t.assetSymbol || '');
 
-      const candidates = incoming
-        .filter(inc => {
-          if (matched.has(inc.id)) return false;
-          if (inc.accountId === out.accountId) return false; // same account
-          if (inc.assetSymbol !== out.assetSymbol) return false;
-          const timeDiff = Math.abs(new Date(inc.date).getTime() - outDate);
-          if (timeDiff > MATCH_WINDOW_MS) return false;
-          // Fee-aware matching: incoming may be slightly less due to network fee
-          const amtDiff = Math.abs(inc.amount - out.amount) / (out.amount || 1);
-          if (amtDiff > AMOUNT_TOLERANCE) return false;
-          return true;
-        })
-        .sort((a, b) => {
-          const ta = Math.abs(new Date(a.date).getTime() - outDate);
-          const tb = Math.abs(new Date(b.date).getTime() - outDate);
-          return ta - tb;
-        });
+    // In-place mark helper
+    function pair(out, inc, transferType) {
+      out.isInternalTransfer = true;
+      out.matchedTxId  = inc.id;
+      out.matchedType  = transferType;
+      out.needsReview  = false;
+      out.reviewReason = null;
+      inc.isInternalTransfer = true;
+      inc.matchedTxId  = out.id;
+      inc.matchedType  = transferType;
+      inc.needsReview  = false;
+      inc.reviewReason = null;
+      matched.add(out.id);
+      matched.add(inc.id);
+    }
 
-      if (candidates.length > 0) {
-        const best = candidates[0];
-        out.isInternalTransfer = true;
-        out.matchedTxId = best.id;
-        out.needsReview = false;
-        best.isInternalTransfer = true;
-        best.matchedTxId = out.id;
-        best.needsReview = false;
-        matched.add(out.id);
-        matched.add(best.id);
+    // Generic match pass: finds best matching incoming for each outgoing
+    function runPass(outCats, inCats, windowMs, amtTol, allowSameAccount) {
+      const outgoing = txns.filter(t => !matched.has(t.id) && outCats.includes(t.category));
+      const incoming = txns.filter(t => !matched.has(t.id) && inCats.includes(t.category));
+
+      for (const out of outgoing) {
+        if (matched.has(out.id)) continue;
+        const outMs  = new Date(out.date).getTime();
+        const outSym = symOf(out);
+
+        const candidates = incoming
+          .filter(inc => {
+            if (matched.has(inc.id)) return false;
+            if (!allowSameAccount && inc.accountId === out.accountId) return false;
+            if (symOf(inc) !== outSym) return false;
+            const timeDiff = Math.abs(new Date(inc.date).getTime() - outMs);
+            if (timeDiff > windowMs) return false;
+            const amtDiff = Math.abs(inc.amount - out.amount) / (out.amount || 1);
+            if (amtDiff > amtTol) return false;
+            return true;
+          })
+          .sort((a, b) => {
+            const ta = Math.abs(new Date(a.date).getTime() - outMs);
+            const tb = Math.abs(new Date(b.date).getTime() - outMs);
+            return ta - tb;
+          });
+
+        if (candidates.length > 0) {
+          pair(out, candidates[0], 'transfer');
+        }
       }
+    }
+
+    // ── Pass 1: Same-chain wallet→wallet (24 h, 2% fee tolerance) ──
+    runPass(
+      [CAT.TRANSFER_OUT, CAT.SEND],
+      [CAT.TRANSFER_IN,  CAT.RECEIVE],
+      24 * 3600_000, 0.02, false,
+    );
+
+    // ── Pass 2: Cross-chain bridge (72 h, 5% bridge fee tolerance) ──
+    // Bridge pairs: BRIDGE_OUT ↔ BRIDGE_IN / RECEIVE / TRANSFER_IN
+    // Also catches unclassified sends that turn out to be bridges
+    runPass(
+      [CAT.BRIDGE_OUT, CAT.BRIDGE, CAT.SEND, CAT.TRANSFER_OUT],
+      [CAT.BRIDGE_IN,  CAT.BRIDGE, CAT.RECEIVE, CAT.TRANSFER_IN],
+      72 * 3600_000, 0.05, false,
+    );
+
+    // ── Pass 3: CEX withdrawal → on-chain deposit (48 h, 2%) ──
+    // Exchange sources paired with blockchain sources
+    runPass(
+      [CAT.TRANSFER_OUT, CAT.SEND],
+      [CAT.TRANSFER_IN,  CAT.RECEIVE],
+      48 * 3600_000, 0.02, false,
+    );
+
+    // ── Pass 4: Wrap/unwrap within same account (same asset canonical) ──
+    // e.g. WRAP (ETH→WETH) on same wallet: mark as internal, non-taxable
+    const wrapOuts = txns.filter(t =>
+      !matched.has(t.id) && (t.category === CAT.WRAP || t.category === CAT.UNWRAP),
+    );
+    for (const out of wrapOuts) {
+      if (matched.has(out.id)) continue;
+      const outMs  = new Date(out.date).getTime();
+      const outSym = symOf(out);
+      // Find the counterpart: same account, same canonical asset, within 10 min
+      const counterpart = txns.find(t =>
+        !matched.has(t.id) && t.id !== out.id &&
+        t.accountId === out.accountId &&
+        symOf(t) === outSym &&
+        Math.abs(new Date(t.date).getTime() - outMs) < 10 * 60_000 &&
+        (t.category === CAT.WRAP || t.category === CAT.UNWRAP ||
+         t.category === CAT.RECEIVE || t.category === CAT.SEND),
+      );
+      if (counterpart) pair(out, counterpart, 'wrap');
     }
 
     return txns;
@@ -1306,47 +1454,78 @@ const TaxEngine = (() => {
   // Tags the offending disposal transactions for review.
   // ════════════════════════════════════════════════════════════
   function detectNegativeBalances(txns) {
+    // Forward-pass inventory simulation to find where disposals exceed available balance.
+    // We track running qty and, separately, whether ANY acquisitions were ever seen.
     const sorted = [...txns].sort((a, b) => new Date(a.date) - new Date(b.date));
-    const qty = {};  // sym → running qty (per all wallets combined for this check)
-    const negativeSyms = new Set();
+    const qty         = {};   // sym → running quantity
+    const everBought  = {};   // sym → true if at least one acquisition event seen
+    // Txns whose disposal causes a negative balance, keyed by id
+    const badIds = new Map(); // id → 'unknown_acquisition' | 'negative_balance'
 
     for (const t of sorted) {
-      if (t.isInternalTransfer || t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
+      if (t.isInternalTransfer) continue;
+      if ([CAT.SPAM, CAT.APPROVAL, CAT.WRAP, CAT.UNWRAP].includes(t.category)) continue;
       const sym = t.assetSymbol;
       if (!sym) continue;
-      if (!qty[sym]) qty[sym] = 0;
+      if (qty[sym] === undefined) qty[sym] = 0;
 
       switch (t.category) {
-        case CAT.BUY: case CAT.RECEIVE: case CAT.TRANSFER_IN: case CAT.INCOME: case CAT.STAKING:
+        // ── Acquisition events ──
+        case CAT.BUY:
+        case CAT.RECEIVE:
+        case CAT.TRANSFER_IN:
+        case CAT.BRIDGE_IN:
+        case CAT.INCOME:
+        case CAT.STAKING:
+        case CAT.AIRDROP:
           qty[sym] += t.amount || 0;
-          if (t.inAsset && t.inAmount) {
-            if (!qty[t.inAsset]) qty[t.inAsset] = 0;
+          everBought[sym] = true;
+          // Track the in-side of a trade as an acquisition too
+          if (t.inAsset && t.inAmount > 0) {
+            if (qty[t.inAsset] === undefined) qty[t.inAsset] = 0;
             qty[t.inAsset] += t.inAmount;
+            everBought[t.inAsset] = true;
           }
           break;
-        case CAT.SELL: case CAT.SEND: case CAT.TRANSFER_OUT: case CAT.FEE:
+
+        // ── Disposal events ──
+        case CAT.SELL:
+        case CAT.SEND:
+        case CAT.TRANSFER_OUT:
+        case CAT.BRIDGE_OUT:
+        case CAT.FEE:
           qty[sym] -= t.amount || 0;
-          if (qty[sym] < -0.0001) negativeSyms.add(sym);
-          break;
-        case CAT.TRADE:
-          qty[sym] -= t.amount || 0;
-          if (qty[sym] < -0.0001) negativeSyms.add(sym);
-          if (t.inAsset && t.inAmount) {
-            if (!qty[t.inAsset]) qty[t.inAsset] = 0;
-            qty[t.inAsset] += t.inAmount;
+          if (qty[sym] < -0.0001 && !t.manualCategory && !t.userReviewed) {
+            // Distinguish: was this asset NEVER acquired vs. partial history gap?
+            const reason = !everBought[sym]
+              ? 'unknown_acquisition'   // No acquisition ever seen → genuinely unknown source
+              : 'negative_balance';     // Acquired before, but gap in history
+            badIds.set(t.id, reason);
           }
           break;
+
+        case CAT.TRADE: {
+          qty[sym] -= t.amount || 0;
+          if (qty[sym] < -0.0001 && !t.manualCategory && !t.userReviewed) {
+            const reason = !everBought[sym] ? 'unknown_acquisition' : 'negative_balance';
+            badIds.set(t.id, reason);
+          }
+          if (t.inAsset && t.inAmount > 0) {
+            if (qty[t.inAsset] === undefined) qty[t.inAsset] = 0;
+            qty[t.inAsset] += t.inAmount;
+            everBought[t.inAsset] = true;
+          }
+          break;
+        }
       }
     }
 
-    if (!negativeSyms.size) return txns;
+    if (!badIds.size) return txns;
 
-    // Tag the disposal transactions for assets with negative balances
     return txns.map(t => {
-      if (!negativeSyms.has(t.assetSymbol)) return t;
-      if (![CAT.SELL, CAT.TRADE, CAT.SEND].includes(t.category)) return t;
-      if (t.manualCategory || t.userReviewed) return t;
-      return { ...t, needsReview: true, reviewReason: 'negative_balance' };
+      const reason = badIds.get(t.id);
+      if (!reason) return t;
+      return { ...t, needsReview: true, reviewReason: reason };
     });
   }
 
@@ -1356,19 +1535,20 @@ const TaxEngine = (() => {
   // Called AFTER pipeline completes with full taxResult context.
   // ════════════════════════════════════════════════════════════
   const REVIEW_DESCRIPTIONS = {
-    missing_sek_price:   { label: 'Missing SEK price',       icon: '💰', why: 'Cannot calculate gain/loss without SEK value at time of transaction.', fix: 'Enter the market price in SEK on the transaction date.' },
-    unknown_asset:       { label: 'Unknown token',            icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
-    unmatched_transfer:  { label: 'Unmatched transfer',       icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
-    negative_balance:    { label: 'Missing buy history',      icon: '⚠️', why: 'More units sold than found in import history — cost basis will be incorrect.', fix: 'Import the full transaction history for this asset from all sources.' },
-    duplicate:           { label: 'Possible duplicate',       icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one copy.' },
-    unclassified:        { label: 'Unclassified',             icon: '🏷️', why: 'Could not determine what type of transaction this is.', fix: 'Select the correct category manually.' },
-    ambiguous_swap:      { label: 'Incomplete swap',          icon: '↔️', why: 'Only one side of a swap was found — missing received asset or amount.', fix: 'Enter the received asset and amount on this transaction.' },
-    unsupported_defi:    { label: 'Complex DeFi interaction', icon: '🧩', why: 'This is a DeFi interaction (lending, LP, vault, etc.) that cannot be auto-classified.', fix: 'Classify manually as buy/sell/income/fee/ignore.' },
-    bridge_review:       { label: 'Bridge transaction',       icon: '🌉', why: 'Cross-chain bridge detected. The funds may arrive on another chain — verify it was an internal transfer.', fix: 'Confirm non-taxable transfer or reclassify.' },
-    special_transaction: { label: 'Special transaction',      icon: '⭐', why: 'Staking, LP, NFT, or airdrop transactions have special Swedish tax treatment.', fix: 'Verify classification is correct for your situation.' },
-    unknown_contract:    { label: 'Unknown contract',         icon: '🤖', why: 'Interaction with an unrecognised smart contract — could be anything from an airdrop claim to a DeFi protocol.', fix: 'Investigate on a blockchain explorer and classify manually.' },
-    outlier:             { label: 'Outlier / sanity check',   icon: '📊', why: 'This transaction has an unusually large gain/loss or an extreme price vs market value.', fix: 'Verify the SEK price is correct at the transaction date.' },
-    split_trade:         { label: 'Possible split trade',     icon: '🔀', why: 'Multiple transactions near the same time may represent a single trade reported as separate rows.', fix: 'Check if these should be merged into one trade.' },
+    missing_sek_price:    { label: 'Missing SEK price',          icon: '💰', why: 'Cannot calculate gain/loss without SEK value at time of transaction.', fix: 'Enter the market price in SEK on the transaction date.' },
+    unknown_asset:        { label: 'Unknown token',               icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
+    unmatched_transfer:   { label: 'Unmatched transfer',          icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
+    negative_balance:     { label: 'Incomplete buy history',      icon: '⚠️', why: 'More units sold than recorded acquired — some import history appears to be missing. Cost basis has been partially reconstructed.', fix: 'Import full transaction history for this asset from all sources (exchange CSVs, wallets, other chains).' },
+    unknown_acquisition:  { label: 'Unknown acquisition source',  icon: '🔍', why: 'This disposal has no matching acquisition in any imported wallet or exchange. The asset may have been purchased on an unconnected account, received as an OTC trade, or held before this wallet was tracked.', fix: 'Import the account where this was originally acquired, or enter the acquisition manually. Until resolved, cost basis is treated as 0 (full proceeds = gain per Skatteverket).' },
+    duplicate:            { label: 'Possible duplicate',          icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one copy.' },
+    unclassified:         { label: 'Unclassified',                icon: '🏷️', why: 'Could not determine what type of transaction this is.', fix: 'Select the correct category manually.' },
+    ambiguous_swap:       { label: 'Incomplete swap',             icon: '↔️', why: 'Only one side of a swap was found — missing received asset or amount.', fix: 'Enter the received asset and amount on this transaction.' },
+    unsupported_defi:     { label: 'Complex DeFi interaction',    icon: '🧩', why: 'This is a DeFi interaction (lending, LP, vault, etc.) that cannot be auto-classified.', fix: 'Classify manually as buy/sell/income/fee/ignore.' },
+    bridge_review:        { label: 'Bridge / cross-chain',        icon: '🌉', why: 'Cross-chain bridge detected. If the receiving side was imported, it should be matched as a non-taxable transfer.', fix: 'Import the destination chain/wallet so the bridge pair can be matched, or confirm as non-taxable internal transfer.' },
+    special_transaction:  { label: 'Special transaction',         icon: '⭐', why: 'Staking, LP, NFT, or airdrop transactions have special Swedish tax treatment.', fix: 'Verify classification is correct for your situation.' },
+    unknown_contract:     { label: 'Unknown contract',            icon: '🤖', why: 'Interaction with an unrecognised smart contract — could be anything from an airdrop claim to a DeFi protocol.', fix: 'Investigate on a blockchain explorer and classify manually.' },
+    outlier:              { label: 'Outlier / sanity check',      icon: '📊', why: 'This transaction has an unusually large gain/loss or an extreme price vs market value.', fix: 'Verify the SEK price is correct at the transaction date.' },
+    split_trade:          { label: 'Possible split trade',        icon: '🔀', why: 'Multiple transactions near the same time may represent a single trade reported as separate rows.', fix: 'Check if these should be merged into one trade.' },
   };
 
   function getReviewIssues(txns, taxResult) {
@@ -1393,7 +1573,10 @@ const TaxEngine = (() => {
     const flaggedIds = new Set(issues.map(i => i.txnId));
 
     // ── Pass 2: Structural checks (independent of per-tx flags) ──
-    const taxableCats = new Set([CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY, CAT.STAKING, CAT.NFT_SALE]);
+    const taxableCats = new Set([
+      CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY,
+      CAT.STAKING, CAT.NFT_SALE, CAT.AIRDROP, CAT.UNKNOWN_ACQUISITION,
+    ]);
 
     for (const t of txns) {
       if (t.userReviewed || t.isInternalTransfer) continue;
@@ -1420,22 +1603,46 @@ const TaxEngine = (() => {
         flaggedIds.add(t.id); continue;
       }
 
-      // 4. Special transactions (staking, NFT, bridge, airdrop)
-      if ([CAT.STAKING, CAT.NFT_SALE, CAT.BRIDGE].includes(t.category)) {
+      // 4. Bridge / cross-chain: unmatched bridge sends and bridge receives
+      if ((t.category === CAT.BRIDGE || t.category === CAT.BRIDGE_IN || t.category === CAT.BRIDGE_OUT) && !t.isInternalTransfer) {
+        issues.push({ txnId: t.id, txn: t, reason: 'bridge_review', meta: REVIEW_DESCRIPTIONS.bridge_review });
+        flaggedIds.add(t.id); continue;
+      }
+
+      // 5. Special transactions (staking, NFT)
+      if ([CAT.STAKING, CAT.NFT_SALE].includes(t.category)) {
         issues.push({ txnId: t.id, txn: t, reason: 'special_transaction', meta: REVIEW_DESCRIPTIONS.special_transaction });
         flaggedIds.add(t.id); continue;
       }
 
-      // 5. Unknown contract interaction
+      // 6. Airdrops — flag for tax treatment confirmation
+      if (t.category === CAT.AIRDROP) {
+        issues.push({ txnId: t.id, txn: t, reason: 'special_transaction', meta: REVIEW_DESCRIPTIONS.special_transaction });
+        flaggedIds.add(t.id); continue;
+      }
+
+      // 7. Unknown contract interaction
       if (t.category === CAT.DEFI_UNKNOWN) {
         issues.push({ txnId: t.id, txn: t, reason: 'unknown_contract', meta: REVIEW_DESCRIPTIONS.unknown_contract });
         flaggedIds.add(t.id); continue;
       }
 
-      // 6. Incomplete swap (TRADE but no inAsset or inAmount)
+      // 8. Incomplete swap (TRADE but no inAsset or inAmount)
       if (t.category === CAT.TRADE && (!t.inAsset || !t.inAmount)) {
         issues.push({ txnId: t.id, txn: t, reason: 'ambiguous_swap', meta: REVIEW_DESCRIPTIONS.ambiguous_swap });
         flaggedIds.add(t.id); continue;
+      }
+    }
+
+    // ── Pass 2b: Unknown acquisition from taxResult disposals ──
+    // These are disposals where inventory went negative (sold > ever acquired)
+    if (taxResult?.disposals) {
+      for (const d of taxResult.disposals) {
+        if (flaggedIds.has(d.id) || !d.unknownAcquisition) continue;
+        const t = txById.get(d.id);
+        if (!t || t.userReviewed) continue;
+        issues.push({ txnId: d.id, txn: t, reason: 'unknown_acquisition', meta: REVIEW_DESCRIPTIONS.unknown_acquisition });
+        flaggedIds.add(d.id);
       }
     }
 
@@ -1454,8 +1661,23 @@ const TaxEngine = (() => {
       }
     }
 
-    // Sort: most critical first (missing price → unknown → negative_balance → others)
-    const ORDER = ['negative_balance', 'missing_sek_price', 'unknown_asset', 'duplicate', 'ambiguous_swap', 'unmatched_transfer', 'outlier', 'split_trade', 'unknown_contract', 'unsupported_defi', 'special_transaction', 'bridge_review', 'unclassified'];
+    // Sort: most critical first
+    const ORDER = [
+      'unknown_acquisition',  // ← new: no cost basis at all
+      'negative_balance',     // partial history gap
+      'missing_sek_price',    // can't calculate gain/loss
+      'unknown_asset',        // token not resolved
+      'duplicate',
+      'ambiguous_swap',
+      'unmatched_transfer',
+      'bridge_review',
+      'outlier',
+      'split_trade',
+      'unknown_contract',
+      'unsupported_defi',
+      'special_transaction',
+      'unclassified',
+    ];
     issues.sort((a, b) => {
       const ai = ORDER.indexOf(a.reason); const bi = ORDER.indexOf(b.reason);
       return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
@@ -1466,19 +1688,23 @@ const TaxEngine = (() => {
 
   // ════════════════════════════════════════════════════════════
   // SWEDISH TAX ENGINE — Genomsnittsmetoden
+  // Full inventory reconstruction before gain/loss calculation.
+  // Every economic meaning is resolved before touching the ledger.
   // ════════════════════════════════════════════════════════════
   function computeTaxYear(year, txns) {
     if (!txns) txns = getTransactions();
     year = parseInt(year);
 
-    // Process ALL history (including prior years) to get correct cost basis
+    // Process ALL history (including prior years) to build correct cost basis
     const allSorted = [...txns]
       .filter(t => new Date(t.date).getFullYear() <= year)
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    const holdings = {};   // sym → { totalQty, totalCostSEK }
-    const disposals = [];   // in target year
-    const income = [];   // in target year
+    // Per-asset inventory: { totalQty, totalCostSEK }
+    // Assets are tracked by canonical symbol (WETH→ETH already normalised at import)
+    const holdings  = {};
+    const disposals = [];  // in target year
+    const income    = [];  // in target year
 
     function ensure(sym) {
       if (!holdings[sym]) holdings[sym] = { totalQty: 0, totalCostSEK: 0 };
@@ -1488,121 +1714,172 @@ const TaxEngine = (() => {
       return (h && h.totalQty > 0) ? h.totalCostSEK / h.totalQty : 0;
     }
 
+    // Record a disposal into the ledger
+    // unknownAcq = true when we're selling more than we ever recorded acquiring
+    function recordDisposal(t, sym, qty, proceedsSEK, feeSEK, extraFields = {}) {
+      const h = holdings[sym] || { totalQty: 0, totalCostSEK: 0 };
+      const available = h.totalQty;
+      const unknownAcq = qty > available + 0.0001;  // sold more than we have
+      // Under Genomsnittsmetoden: when acquisition unknown, cost basis = 0
+      // (Skatteverket assumes full proceeds = gain if no evidence of cost exists)
+      const safeQty    = unknownAcq ? qty : Math.min(qty, available);
+      const costBasis  = unknownAcq ? 0 : avg(sym) * safeQty;
+      const gainLoss   = proceedsSEK - feeSEK - costBasis;
+
+      // Reduce holdings (floor at 0)
+      h.totalQty     = Math.max(0, h.totalQty - safeQty);
+      h.totalCostSEK = Math.max(0, h.totalCostSEK - costBasis);
+
+      return {
+        date: t.date,
+        assetSymbol: sym,
+        assetName: t.assetName || sym,
+        amountSold: safeQty,
+        proceedsSEK,
+        feeSEK,
+        costBasisSEK: costBasis,
+        gainLossSEK: gainLoss,
+        avgCostAtSale: avg(sym),
+        id: t.id,
+        needsReview: t.needsReview || unknownAcq,
+        unknownAcquisition: unknownAcq,
+        ...extraFields,
+      };
+    }
+
     for (const t of allSorted) {
       const sym = t.assetSymbol;
-      if (!sym || t.isInternalTransfer) continue;
-      if (t.category === CAT.SPAM || t.category === CAT.APPROVAL) continue;
+      if (!sym) continue;
+      // Skip spam / approvals — non-economic
+      if ([CAT.SPAM, CAT.APPROVAL].includes(t.category)) continue;
+      // Skip internal transfers — no economic event (already matched by matchTransfers)
+      if (t.isInternalTransfer) continue;
 
       ensure(sym);
-      const h = holdings[sym];
-      const inYear = new Date(t.date).getFullYear() === year;
-      const priceSEK = t.priceSEKPerUnit || (t.costBasisSEK / (t.amount || 1)) || 0;
-      const proceedsSEK = t.costBasisSEK || (priceSEK * (t.amount || 0));
-      const feeSEK = t.feeSEK || 0;
+      const h       = holdings[sym];
+      const inYear  = new Date(t.date).getFullYear() === year;
+      const priceSEK    = t.priceSEKPerUnit || (t.costBasisSEK / (t.amount || 1)) || 0;
+      const proceedsSEK = t.costBasisSEK    || (priceSEK * (t.amount || 0));
+      const feeSEK      = t.feeSEK || 0;
 
       switch (t.category) {
 
+        // ── Acquisition events: add to inventory ───────────
         case CAT.BUY:
-        case CAT.TRANSFER_IN:
         case CAT.RECEIVE: {
+          // RECEIVE carries cost basis at FMV (treated as acquisition)
+          // Internal transfers were filtered above, so this is genuine incoming
           const cost = proceedsSEK + feeSEK;
-          h.totalQty += t.amount;
+          h.totalQty     += t.amount;
           h.totalCostSEK += cost;
-          if (inYear && t.category === CAT.RECEIVE && t.source !== 'transfer') {
-            // Gifts, airdrops received = income event
-            income.push({ date: t.date, assetSymbol: sym, amount: t.amount, valueSEK: proceedsSEK, id: t.id, category: t.category });
+          // Unclassified receives count as income per Skatteverket default
+          if (inYear && t.category === CAT.RECEIVE) {
+            income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
+                          valueSEK: proceedsSEK, id: t.id, category: t.category });
           }
           break;
         }
 
-        case CAT.INCOME: {
-          const cost = proceedsSEK;
-          h.totalQty += t.amount;
-          h.totalCostSEK += cost;
-          if (inYear) income.push({ date: t.date, assetSymbol: sym, amount: t.amount, valueSEK: proceedsSEK, id: t.id, category: t.category });
-          break;
-        }
-
-        case CAT.SELL:
-        case CAT.SEND: {
-          if (t.category === CAT.SEND && t.isInternalTransfer) break;
-          const qty = Math.min(t.amount, h.totalQty); // cap at available
-          const costBasis = avg(sym) * qty;
-          const gainLoss = proceedsSEK - feeSEK - costBasis;
-
-          if (inYear && t.category === CAT.SELL) {
-            disposals.push({
-              date: t.date, assetSymbol: sym, assetName: t.assetName || sym,
-              amountSold: qty, proceedsSEK, feeSEK, costBasisSEK: costBasis,
-              gainLossSEK: gainLoss, avgCostAtSale: avg(sym),
-              id: t.id, needsReview: t.needsReview,
-            });
-          }
-          h.totalQty = Math.max(0, h.totalQty - qty);
-          h.totalCostSEK = Math.max(0, h.totalCostSEK - costBasis);
-          break;
-        }
-
-        case CAT.TRADE: {
-          const outSym = sym;
-          const inSym = t.inAsset;
-          const outAmt = t.amount;
-          const outProc = proceedsSEK;
-
-          ensure(outSym);
-          const hOut = holdings[outSym];
-          const qty = Math.min(outAmt, hOut.totalQty);
-          const costBasis = avg(outSym) * qty;
-          const gainLoss = outProc - feeSEK - costBasis;
-
+        case CAT.INCOME:
+        case CAT.STAKING: {
+          // Staking rewards & income: add at FMV, report as income
+          h.totalQty     += t.amount;
+          h.totalCostSEK += proceedsSEK;
           if (inYear) {
-            disposals.push({
-              date: t.date, assetSymbol: outSym, assetName: t.assetName || outSym,
-              amountSold: qty, proceedsSEK: outProc, feeSEK, costBasisSEK: costBasis,
-              gainLossSEK: gainLoss, avgCostAtSale: avg(outSym),
-              id: t.id, isTrade: true, inAsset: inSym, inAmount: t.inAmount,
-              needsReview: t.needsReview,
-            });
+            income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
+                          valueSEK: proceedsSEK, id: t.id, category: t.category });
           }
-          hOut.totalQty = Math.max(0, hOut.totalQty - qty);
-          hOut.totalCostSEK = Math.max(0, hOut.totalCostSEK - costBasis);
+          break;
+        }
 
-          // Buy side of swap — cost basis = FMV of what was sold
-          if (inSym && t.inAmount > 0) {
-            ensure(inSym);
-            holdings[inSym].totalQty += t.inAmount;
-            holdings[inSym].totalCostSEK += outProc;
+        case CAT.AIRDROP: {
+          // Airdrops = income at FMV (Skatteverket ruling)
+          h.totalQty     += t.amount;
+          h.totalCostSEK += proceedsSEK;
+          if (inYear) {
+            income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
+                          valueSEK: proceedsSEK, id: t.id, category: CAT.AIRDROP });
           }
+          break;
+        }
+
+        // Non-taxable inbound transfers — carry over cost basis at avg
+        case CAT.TRANSFER_IN:
+        case CAT.BRIDGE_IN: {
+          // Cost basis moves with the asset: use the asset's market price at arrival
+          // (the sending side already deducted from its holdings)
+          const costAtArrival = proceedsSEK + feeSEK;
+          h.totalQty     += t.amount;
+          h.totalCostSEK += costAtArrival || (avg(sym) * t.amount);
+          break;
+        }
+
+        // ── Disposal events ─────────────────────────────────
+        case CAT.SELL: {
+          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK);
+          if (inYear) disposals.push(d);
+          break;
+        }
+
+        case CAT.SEND: {
+          // Unmatched SEND that wasn't caught as internal transfer
+          // — treat as disposal (possible gift/donation, taxable in Sweden)
+          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK);
+          if (inYear) disposals.push(d);
           break;
         }
 
         case CAT.TRANSFER_OUT:
-        case CAT.SEND: {
-          if (t.isInternalTransfer) break;
-          // Non-matched outgoing: reduce holdings (no taxable event for transfers)
-          const qty = Math.min(t.amount, h.totalQty);
-          const cb = avg(sym) * qty;
-          h.totalQty = Math.max(0, h.totalQty - qty);
+        case CAT.BRIDGE_OUT: {
+          // Non-taxable outbound: reduce inventory, preserve cost basis ratio
+          const qty  = Math.min(t.amount, h.totalQty);
+          const cb   = avg(sym) * qty;
+          h.totalQty     = Math.max(0, h.totalQty - qty);
           h.totalCostSEK = Math.max(0, h.totalCostSEK - cb);
           break;
         }
 
+        case CAT.TRADE: {
+          const inSym  = t.inAsset;
+          const inAmt  = t.inAmount || 0;
+          // Out side: disposal of `sym`
+          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK,
+            { isTrade: true, inAsset: inSym, inAmount: inAmt });
+          if (inYear) disposals.push(d);
+          // In side: acquisition of `inSym` at cost = FMV of what was given up
+          if (inSym && inAmt > 0) {
+            ensure(inSym);
+            holdings[inSym].totalQty     += inAmt;
+            holdings[inSym].totalCostSEK += proceedsSEK; // FMV of out-side = cost of in-side
+          }
+          break;
+        }
+
+        // Wrap/unwrap: non-taxable — asset stays in inventory under canonical name
+        // (normalizeAssetSymbol already mapped WETH → ETH at import time,
+        //  so wrap/unwrap events should share the same sym key)
+        case CAT.WRAP:
+        case CAT.UNWRAP:
+          // Nothing to do: inventory already uses canonical symbol
+          break;
+
         case CAT.FEE: {
-          // Fees paid in crypto = disposal at market value
-          if (!['ETH', 'SOL', 'BNB', 'MATIC', 'AVAX'].includes(sym)) break;
-          const qty = Math.min(t.amount, h.totalQty);
-          const feeProc = priceSEK * qty;
-          const feeCb = avg(sym) * qty;
-          const feeGain = feeProc - feeCb;
+          // Fees paid in crypto = small disposal at market value (per Skatteverket)
+          const GAS_TOKENS = new Set(['ETH', 'SOL', 'BNB', 'MATIC', 'AVAX', 'ARB', 'OP']);
+          if (!GAS_TOKENS.has(sym)) break;
+          const qty      = Math.min(t.amount, h.totalQty);
+          const feeProc  = priceSEK * qty;
+          const feeCb    = avg(sym) * qty;
+          const feeGain  = feeProc - feeCb;
           if (inYear && Math.abs(feeGain) > 0.01) {
             disposals.push({
-              date: t.date, assetSymbol: sym,
-              amountSold: qty, proceedsSEK: feeProc, feeSEK: 0,
+              date: t.date, assetSymbol: sym, amountSold: qty,
+              proceedsSEK: feeProc, feeSEK: 0,
               costBasisSEK: feeCb, gainLossSEK: feeGain,
               id: t.id, isFee: true, needsReview: false,
             });
           }
-          h.totalQty = Math.max(0, h.totalQty - qty);
+          h.totalQty     = Math.max(0, h.totalQty - qty);
           h.totalCostSEK = Math.max(0, h.totalCostSEK - feeCb);
           break;
         }

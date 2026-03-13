@@ -152,6 +152,55 @@ const TaxEngine = (() => {
     }
   }
 
+  // ── Cloud sync (cross-browser) ─────────────────────────────
+  // Transactions are stored in IndexedDB (browser-local) for speed.
+  // A Supabase cloud backup lets the user log in from any browser and
+  // restore their full history automatically (Safari → Chrome, etc.).
+  const CLOUD_CHUNK_SIZE = 1000;
+  let _cloudSyncTimer = null;
+
+  function _scheduleCloudSync(txns) {
+    if (typeof SUPABASE_READY === 'undefined' || !SUPABASE_READY) return;
+    if (_cloudSyncTimer) clearTimeout(_cloudSyncTimer);
+    _cloudSyncTimer = setTimeout(() => {
+      _cloudSyncTimer = null;
+      _pushTransactionsToCloud(txns).catch(e =>
+        console.warn('[TaxEngine] cloud sync failed:', e.message));
+    }, 3000);
+  }
+
+  async function _pushTransactionsToCloud(txns) {
+    if (typeof SUPABASE_READY === 'undefined' || !SUPABASE_READY || !txns) return;
+    const chunks = [];
+    for (let i = 0; i < txns.length; i += CLOUD_CHUNK_SIZE)
+      chunks.push(txns.slice(i, i + CLOUD_CHUNK_SIZE));
+    if (chunks.length === 0) chunks.push([]);
+    for (let i = 0; i < chunks.length; i++)
+      await SupabaseDB.setUserData(`tax_txns_chunk_${i}`, chunks[i]);
+    const syncedAt = new Date().toISOString();
+    await SupabaseDB.setUserData('tax_txns_meta', { chunks: chunks.length, total: txns.length, syncedAt });
+    console.log(`[TaxEngine] Synced ${txns.length} transactions to cloud`);
+    try { window.dispatchEvent(new CustomEvent('taxCloudSynced', { detail: { count: txns.length, syncedAt } })); } catch { }
+  }
+
+  async function _pullTransactionsFromCloud() {
+    if (typeof SUPABASE_READY === 'undefined' || !SUPABASE_READY) return null;
+    try {
+      const meta = await SupabaseDB.getUserData('tax_txns_meta', null);
+      if (!meta || !meta.chunks || meta.total === 0) return null;
+      const all = [];
+      for (let i = 0; i < meta.chunks; i++) {
+        const chunk = await SupabaseDB.getUserData(`tax_txns_chunk_${i}`, []);
+        all.push(...chunk);
+      }
+      console.log(`[TaxEngine] Restored ${all.length} transactions from cloud`);
+      return all.length ? all : null;
+    } catch (e) {
+      console.warn('[TaxEngine] cloud pull failed:', e.message);
+      return null;
+    }
+  }
+
   // ── Transactions (in-memory cache backed by IndexedDB) ────
   let _txCache = null;  // null = not yet loaded
 
@@ -160,6 +209,7 @@ const TaxEngine = (() => {
   function saveTransactions(txns) {
     _txCache = txns;
     idbSaveAll(txns).catch(e => console.warn('[TaxEngine] saveTransactions error:', e));
+    _scheduleCloudSync(txns);
   }
 
   async function loadTransactions() {
@@ -176,6 +226,15 @@ const TaxEngine = (() => {
           console.log('[TaxEngine] Migrated', _txCache.length, 'transactions from localStorage to IDB');
         }
       } catch {}
+    }
+    // Cross-browser restore: if IDB still empty, try Supabase cloud backup
+    if (!_txCache.length) {
+      const cloudTxns = await _pullTransactionsFromCloud();
+      if (cloudTxns && cloudTxns.length) {
+        _txCache = cloudTxns;
+        await idbSaveAll(_txCache);
+        console.log('[TaxEngine] Restored', _txCache.length, 'transactions from cloud backup');
+      }
     }
   }
 
@@ -1853,6 +1912,8 @@ const TaxEngine = (() => {
     getTransactions, saveTransactions, addTransactions,
     deleteTransaction, updateTransaction,
     normalizeTransaction,
+    // Cloud sync (cross-browser)
+    syncToCloud: _pushTransactionsToCloud,
     // Pipeline
     runPipeline, Events,
     // Classification

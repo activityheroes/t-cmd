@@ -45,6 +45,18 @@ const SupabaseDB = (() => {
         if (!r.ok) throw new Error(`Supabase DELETE ${table} failed: ${r.status}`);
     }
 
+    // Upsert using Supabase's conflict resolution (ON CONFLICT DO UPDATE)
+    async function sbUpsert(table, body, onConflict) {
+        const q = onConflict ? `on_conflict=${encodeURIComponent(onConflict)}` : '';
+        const hdrs = { ...headers(), 'Prefer': 'resolution=merge-duplicates,return=representation' };
+        const r = await fetch(url(table, q), {
+            method: 'POST', headers: hdrs, body: JSON.stringify(body)
+        });
+        if (!r.ok) { const e = await r.text(); throw new Error(e); }
+        const data = await r.json();
+        return Array.isArray(data) ? data[0] : data;
+    }
+
     // ── localStorage fallback helpers ─────────────────────────
     const LS_USERS = 'tcmd_users';
     const LS_INVITES = 'tcmd_invites';
@@ -191,6 +203,38 @@ const SupabaseDB = (() => {
                 ? `created_by=eq.${createdBy}&order=created_at.desc`
                 : 'order=created_at.desc';
             return sbGet('invites', q);
+        },
+
+        // ── Generic per-user key-value store ──────────────────
+        // Backed by the user_data Supabase table (user_id, key, value jsonb).
+        // Falls back to user-scoped localStorage when Supabase is unavailable.
+        async getUserData(key, fallback = null) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                try { return JSON.parse(localStorage.getItem(`tcmd_${userId}_${key}`) || 'null') ?? fallback; }
+                catch { return fallback; }
+            }
+            try {
+                const rows = await sbGet('user_data', `user_id=eq.${userId}&key=eq.${encodeURIComponent(key)}&limit=1`);
+                return rows[0]?.value ?? fallback;
+            } catch { return fallback; }
+        },
+
+        async setUserData(key, value) {
+            const userId = _uid();
+            if (!SUPABASE_READY) {
+                localStorage.setItem(`tcmd_${userId}_${key}`, JSON.stringify(value));
+                return;
+            }
+            try {
+                await sbUpsert('user_data', {
+                    user_id: userId, key, value,
+                    updated_at: new Date().toISOString()
+                }, 'user_id,key');
+            } catch (e) {
+                console.warn('[SupabaseDB] setUserData failed, falling back to localStorage:', e.message);
+                localStorage.setItem(`tcmd_${userId}_${key}`, JSON.stringify(value));
+            }
         },
 
         // ── Watched Wallets (user-scoped — each wallet belongs to one user) ──

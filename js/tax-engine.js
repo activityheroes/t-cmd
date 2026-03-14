@@ -1052,6 +1052,41 @@ const TaxEngine = (() => {
     return txns.length;
   }
 
+  // ── Purge phantom Solana transactions ────────────────────
+  // Removes transactions that were imported before the failed-tx
+  // filter was added (commit 7c558f6). Detects phantom entries by:
+  //  1. Implausibly large SOL amounts (> 10,000 SOL in a single tx)
+  //  2. Implausibly large SEK cost basis for a Solana source tx
+  //     (> 50M SEK = ~$5M at 10 SEK/USD — unrealistic for retail)
+  //  3. Transactions whose notes contain "DEX buy/sell" with
+  //     a costBasisSEK that is orders of magnitude beyond the fee
+  //
+  // Returns { removed, kept } counts.
+  function purgeSolanaPhantoms(accountId) {
+    const MAX_SOL_SINGLE_TX = 10_000;     // SOL
+    const MAX_SEK_SINGLE_TX = 50_000_000; // 50M SEK
+    const all = getTransactions();
+
+    const isPhantom = t => {
+      if (t.source !== 'solana_wallet') return false;
+      if (accountId && t.accountId !== accountId) return false;
+      // Implausibly large token amount for a single Solana tx
+      if (t.assetSymbol === 'SOL' && (t.amount || 0) > MAX_SOL_SINGLE_TX) return true;
+      if ((t.inAsset === 'SOL') && (t.inAmount || 0) > MAX_SOL_SINGLE_TX) return true;
+      // Implausibly large SEK cost for any single tx from a retail wallet
+      if ((t.costBasisSEK || 0) > MAX_SEK_SINGLE_TX) return true;
+      return false;
+    };
+
+    const phantoms = all.filter(isPhantom);
+    if (!phantoms.length) return { removed: 0, kept: all.length };
+
+    const kept = all.filter(t => !isPhantom(t));
+    saveTransactions(kept);
+    console.log(`[TaxEngine] purgeSolanaPhantoms: removed ${phantoms.length} phantom txns`);
+    return { removed: phantoms.length, kept: kept.length };
+  }
+
   // ════════════════════════════════════════════════════════════
   // SEK PRICE PIPELINE  (CoinCap + Frankfurter — CORS-friendly)
   // CoinGecko:   api.coingecko.com — daily USD prices, free tier no auth
@@ -3505,6 +3540,27 @@ const TaxEngine = (() => {
       }
       const netSol = netSolLamports / 1e9; // positive = received, negative = sent
 
+      // ── Guard 3: Sanity-cap on net SOL flow ─────────────────
+      // For SUCCESSFUL transactions, Helius occasionally includes
+      // LP-pool-level nativeTransfers where the wallet address appears
+      // as an intermediate routing hop. In those cases, netSolLamports
+      // can be millions of SOL — clearly not the user's real movement.
+      // Cap: if |netSol| > MAX_REALISTIC_SOL, flag for manual review
+      // instead of silently turning it into a phantom billion-SEK event.
+      // 10,000 SOL ≈ $2M — any larger single-tx net is suspicious for
+      // a typical retail wallet.
+      const MAX_REALISTIC_SOL = 10_000; // SOL
+      if (Math.abs(netSol) > MAX_REALISTIC_SOL) {
+        console.warn(`[SolTx] Implausible netSol=${netSol.toFixed(2)} SOL in ${sig?.slice(0,12)}… — flagging for review`);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRANSFER_OUT,
+          assetSymbol: 'SOL', amount: Math.abs(netSol),
+          feeSEK, needsReview: true,
+          reviewReason: 'outlier',
+          notes: `Implausible net SOL flow (${netSol.toFixed(2)} SOL). Likely LP routing artefact — verify manually.`,
+        }, accountId, 'solana_wallet');
+      }
+
       // Tokens: net per mint (cancels out routing hops that briefly
       // touch the wallet then leave — e.g. Jupiter intermediate steps)
       const tokenNet = {};
@@ -4386,8 +4442,8 @@ const TaxEngine = (() => {
     detectNegativeBalances,
     // Classification
     looksLikeContractAddress,
-    // Re-sync
-    resyncAccount,
+    // Re-sync / cleanup
+    resyncAccount, purgeSolanaPhantoms,
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine

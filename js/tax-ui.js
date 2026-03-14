@@ -1007,6 +1007,17 @@ const TaxUI = (() => {
     const splitHashCount = Object.values(solanaTxByHash).filter(v => v >= 2).length;
     const hasStaleSolana = splitHashCount > 0;
 
+    // Detect phantom Solana transactions (imported before failed-tx filter).
+    // A phantom has an implausibly large SOL amount or SEK cost basis.
+    const MAX_SOL_SINGLE_TX  = 10_000;
+    const MAX_SEK_SINGLE_TX  = 50_000_000;
+    const phantomSolTxns = solanaTxns.filter(t =>
+      (t.assetSymbol === 'SOL' && (t.amount || 0) > MAX_SOL_SINGLE_TX) ||
+      (t.inAsset === 'SOL' && (t.inAmount || 0) > MAX_SOL_SINGLE_TX) ||
+      (t.costBasisSEK || 0) > MAX_SEK_SINGLE_TX
+    );
+    const hasPhantomSolana = phantomSolTxns.length > 0;
+
     // Cloud sync status line
     const cloudMeta = (typeof SUPABASE_READY !== 'undefined' && SUPABASE_READY)
       ? (S._cloudSyncedAt
@@ -1045,6 +1056,26 @@ const TaxUI = (() => {
             <button class="tax-btn tax-btn-sm" style="background:#6366f1;color:#fff;flex-shrink:0;white-space:nowrap"
               onclick="TaxUI.reprocessAndSaveSolana()">
               ◎ Rekonstruera swappar
+            </button>
+          </div>
+        </div>` : ''}
+
+        <!-- ── Phantom Solana data warning ──────────────────── -->
+        ${hasPhantomSolana ? `
+        <div class="tax-warn-banner" style="margin-bottom:14px;border-color:#ef444466;background:rgba(239,68,68,0.08)">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:18px;flex-shrink:0">🚨</span>
+            <div style="flex:1">
+              <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:#f87171">Phantom-transaktioner hittades — felaktiga K4-siffror!</div>
+              <div style="font-size:12px;color:var(--text-secondary)">
+                ${phantomSolTxns.length} Solana-transaktioner har orimliga belopp (misslyckade DEX-swappar
+                som importerades som riktiga händelser). Dessa skapar miljardsiffror i K4.
+                <strong>Rensa dem direkt</strong> och reimportera plånboken.
+              </div>
+            </div>
+            <button class="tax-btn tax-btn-sm" style="background:#ef4444;color:#fff;flex-shrink:0;white-space:nowrap"
+              onclick="TaxUI.purgeAndResync()">
+              🧹 Rensa & reimportera
             </button>
           </div>
         </div>` : ''}
@@ -3292,6 +3323,20 @@ const TaxUI = (() => {
     }
   }
 
+  // One-click: purge phantom Solana txns, then prompt a full re-import
+  // for each affected Solana account.
+  async function purgeAndResync() {
+    const result = TaxEngine.purgeSolanaPhantoms();
+    if (result.removed === 0) {
+      showTaxToast('✅', 'Inga phantom-transaktioner', 'Inga orimliga Solana-transaktioner hittades.', 'success');
+      return;
+    }
+    showTaxToast('🧹', `${result.removed} phantom-transaktioner rensade`,
+      'Reimportera nu dina Solana-plånböcker för att få korrekt data.', 'success');
+    S.taxResult = null;
+    render();
+  }
+
   async function resyncAccount(accountId) {
     if (!confirm('This will delete all imported transactions for this account and re-import. Continue?')) return;
     TaxEngine.resyncAccount(accountId);
@@ -3511,7 +3556,7 @@ const TaxUI = (() => {
     bulkAutoInfer, toggleReviewGroup,
     deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
-    setUserInfo, resyncAccount, manualCloudSync, reprocessAndSaveSolana,
+    setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,
     // Transactions page — expanded row & manual entry
     expandTxRow, setExpandedTab,
     toggleAddTxMenu, toggleTxTypeMenu, toggleTxWalletMenu, toggleTxLabelMenu,

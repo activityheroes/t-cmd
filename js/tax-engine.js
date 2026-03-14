@@ -14,6 +14,8 @@ const TaxEngine = (() => {
 
   // ── Stablecoins (treated as SEK-proxies at 1 USD ≈ current rate) ──
   const STABLES = new Set(['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'EUROC', 'EURC', 'USDS']);
+  // ── Major assets with deep liquidity (used to prioritise swap-leg derivation) ──
+  const MAJOR_ASSETS = new Set(['BTC','ETH','SOL','BNB','MATIC','AVAX','DOT','ADA','WETH','WBTC','WBNB','POL']);
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
@@ -1183,6 +1185,7 @@ const TaxEngine = (() => {
     STABLE_HIST_FX:  'stable_historical_fx',// Stablecoin × historical USD/SEK FX rate
     STABLE_APPROX:   'stable_approx',      // Stablecoin × hardcoded fallback rate
     MANUAL:          'manual',             // User-entered price
+    BACK_DERIVED:    'back_derived',       // Inferred from a later disposal of the same asset
     MISSING:         'missing',            // All passes failed — manual review required
   };
 
@@ -1457,19 +1460,32 @@ const TaxEngine = (() => {
         const hashGroup = t.txHash && !t.txHash.startsWith('manual_') ? (byHash[t.txHash] || []) : [];
         const pricedInGroup = hashGroup.filter(x => x.id !== t.id && x.priceSEKPerUnit > 0 && x.priceSource !== PS.MISSING);
 
-        if (pricedInGroup.length > 0) {
-          // Find the best-priced counterpart in same hash
-          const counterpart = pricedInGroup[0];
-          if (counterpart.priceSEKPerUnit > 0 && amt > 0) {
-            const derivedPrice = counterpart.priceSEKPerUnit;
-            changed = true;
-            return {
-              ...t,
-              priceSEKPerUnit: derivedPrice, costBasisSEK: derivedPrice * amt,
-              priceSource: PS.SWAP_IMPLIED, priceConfidence: 'medium',
-              priceDerivedFromOtherLeg: true,
-              needsReview: false, reviewReason: null,
-            };
+        if (pricedInGroup.length > 0 && amt > 0) {
+          // Pick the most trustworthy counterpart: stablecoin > major asset > any priced leg.
+          // Then derive THIS asset's SEK price as (swap total SEK) / (this amount).
+          // NOTE: do NOT copy the counterpart's priceSEKPerUnit directly — that is the
+          // OTHER asset's per-unit price (e.g. ETH = 30 000 SEK/unit) and has nothing
+          // to do with this token's per-unit price.
+          const best = pricedInGroup.find(x => STABLES.has((x.assetSymbol||'').toUpperCase()))
+            || pricedInGroup.find(x => MAJOR_ASSETS.has((x.assetSymbol||'').toUpperCase()))
+            || pricedInGroup[0];
+          if (best) {
+            const swapTotalSEK = best.costBasisSEK > 0
+              ? best.costBasisSEK
+              : best.priceSEKPerUnit * (best.amount || 0);
+            if (swapTotalSEK > 0) {
+              const ctrSym = (best.assetSymbol||'').toUpperCase();
+              const conf = STABLES.has(ctrSym) ? PC.INFERRED_HIGH : PC.INFERRED_MED;
+              changed = true;
+              return {
+                ...t,
+                priceSEKPerUnit: swapTotalSEK / amt,
+                costBasisSEK:    swapTotalSEK,
+                priceSource: PS.SWAP_IMPLIED, priceConfidence: conf,
+                priceDerivedFromOtherLeg: true,
+                needsReview: false, reviewReason: null,
+              };
+            }
           }
         }
 
@@ -1543,6 +1559,61 @@ const TaxEngine = (() => {
     });
   }
 
+  // Pass 4: Back-derive acquisition prices from later disposals of the same asset.
+  // If token X was received with no price, but is later sold for a known SEK amount,
+  // we infer the acquisition cost from the nearest-in-time disposal price.
+  // This eliminates the majority of "missing acquisition price" K4 blockers for tokens
+  // that eventually get disposed of — without any extra API calls.
+  function backDeriveFromDisposals(txns) {
+    // Build map: symbol → list of { date, price } from priced disposals
+    const disposalPrices = new Map(); // symbol → [{date, price}]
+    for (const t of txns) {
+      if (![CAT.SELL, CAT.TRADE, CAT.NFT_SALE].includes(t.category)) continue;
+      if (!t.priceSEKPerUnit || t.priceSEKPerUnit <= 0) continue;
+      if (t.priceSource === PS.MISSING) continue;
+      const sym = (t.assetSymbol || '').toUpperCase();
+      if (!disposalPrices.has(sym)) disposalPrices.set(sym, []);
+      disposalPrices.get(sym).push({ date: t.date || '', price: t.priceSEKPerUnit });
+    }
+    // Sort each list chronologically for proximity lookup
+    for (const list of disposalPrices.values()) {
+      list.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    }
+
+    function nearestDisposalPrice(sym, date) {
+      const list = disposalPrices.get(sym);
+      if (!list || !list.length) return null;
+      let bestPrice = null, bestDiffMs = Infinity;
+      const ts = date ? new Date(date).getTime() : 0;
+      for (const { date: d, price } of list) {
+        const diff = Math.abs(new Date(d).getTime() - ts);
+        if (diff < bestDiffMs) { bestDiffMs = diff; bestPrice = price; }
+      }
+      return bestPrice;
+    }
+
+    return txns.map(t => {
+      // Only fill completely unpriced acquisition transactions
+      if (t.priceSEKPerUnit > 0 || t.priceSource !== PS.MISSING) return t;
+      if (t.isInternalTransfer) return t;
+      if (![CAT.BUY, CAT.RECEIVE, CAT.AIRDROP].includes(t.category)) return t;
+      const sym = (t.assetSymbol || '').toUpperCase();
+      const amt = t.amount || 0;
+      if (!amt) return t;
+      const price = nearestDisposalPrice(sym, t.date);
+      if (!price || price <= 0) return t;
+      return {
+        ...t,
+        priceSEKPerUnit: price,
+        costBasisSEK:    price * amt,
+        priceSource:     PS.BACK_DERIVED,
+        priceConfidence: PC.INFERRED_MED,
+        priceDerivedFromDisposal: true,
+        needsReview: false, reviewReason: null,
+      };
+    });
+  }
+
   // ── Smart missing-price helpers ────────────────────────────
   // Build a set of canonical asset symbols that have at least one disposal
   // (SELL, TRADE, NFT_SALE) anywhere in the transaction list.
@@ -1592,11 +1663,13 @@ const TaxEngine = (() => {
   // Pass 1: independent per-transaction pricing (CoinGecko + stablecoin + inline swap derivation)
   // Pass 2: cross-transaction derivation (same txHash + sibling prices) — up to 4 rounds
   // Pass 3: fee row pricing
+  // Pass 4: back-derive acquisition price from later disposal of the same asset
   // Final: tag any remaining unpriced taxable transactions for manual review
   function applyPricingChain(txns, cache, fxByYear) {
     let result = txns.map(t => priceOneTxn(t, cache, fxByYear)); // Pass 1
     result = deriveFromContext(result, cache, fxByYear);           // Pass 2 (multi-round)
     result = priceFees(result, cache, fxByYear);                  // Pass 3
+    result = backDeriveFromDisposals(result);                     // Pass 4
     // Final: smart confidence triage — not all missing prices are equal
     // Build disposal set so we can detect "received but never sold" tokens
     const disposedSyms = buildDisposalSet(result);

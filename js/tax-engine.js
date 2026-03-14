@@ -1122,15 +1122,18 @@ const TaxEngine = (() => {
   }
 
   // ── GeckoTerminal — DEX OHLCV for on-chain tokens not in CoinGecko ──
-  // GeckoTerminal's free API provides historical price data for tokens traded
-  // on DEXes (Raydium, Uniswap, etc.) using the token's contract/mint address.
-  // This is the pricing source that handles ROOT, DSYNC, NEURAL and similar
-  // obscure tokens that are never listed on centralized price feeds.
+  // GeckoTerminal's direct API blocks browser requests from github.io with CORS.
+  // We route it through corsproxy.io (open, privacy-preserving proxy — only the
+  // token mint address is sent, no user data).  Falls back to null on any failure.
   const GT_NETWORK_MAP = {
     solana: 'solana', eth: 'eth', base: 'base',
     arbitrum: 'arbitrum', optimism: 'optimism',
     polygon_pos: 'polygon_pos', avax: 'avax', bsc: 'bsc',
   };
+
+  // CORS proxy prefix — routes GeckoTerminal requests through a free proxy that
+  // adds the missing Access-Control-Allow-Origin header.
+  const GT_CORS_PROXY = 'https://corsproxy.io/?url=';
 
   // Fetch OHLCV for a token by contract/mint address for a given year.
   // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
@@ -1138,19 +1141,20 @@ const TaxEngine = (() => {
     const gtNetwork = GT_NETWORK_MAP[network];
     if (!gtNetwork || !address) return null;
     try {
-      // GeckoTerminal v2 — fetch last 365 days of OHLCV before end of year
       const beforeTs = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
-      const url = `https://api.geckoterminal.com/api/v2/networks/${gtNetwork}/tokens/${address}/ohlcv/day?limit=365&before_timestamp=${beforeTs}`;
-      const r = await fetchWithTimeout(url, 12000);
+      const directUrl = `https://api.geckoterminal.com/api/v2/networks/${gtNetwork}/tokens/${address}/ohlcv/day?limit=365&before_timestamp=${beforeTs}`;
+      // Try direct first (works in dev / if GT re-enables CORS), then proxy
+      let r = await fetchWithTimeout(directUrl, 8000);
+      if (!r || !r.ok) {
+        r = await fetchWithTimeout(GT_CORS_PROXY + encodeURIComponent(directUrl), 12000);
+      }
       if (!r || !r.ok) return null;
       const json = await r.json();
-      // Response shape: { data: { attributes: { ohlcv_list: [[ts, open, high, low, close, volume]] } } }
       const ohlcv = json?.data?.attributes?.ohlcv_list;
       if (!Array.isArray(ohlcv) || !ohlcv.length) return null;
       const map = new Map();
       for (const [ts, , , , close] of ohlcv) {
         const d = new Date(ts * 1000).toISOString().slice(0, 10);
-        // Use close price (USD)
         if (typeof close === 'number' && close > 0) map.set(d, close);
       }
       return map.size > 0 ? map : null;
@@ -1160,23 +1164,39 @@ const TaxEngine = (() => {
   // ── Cache key for GeckoTerminal data (separate namespace) ────
   function gtCacheKey(address, dateStr) { return `gt:${address}:${dateStr}`; }
 
-  // Fetch one year of daily USD prices from CoinGecko /market_chart/range
-  // Returns Map<YYYY-MM-DD, usdPrice>
+  // ── CoinCap v2 — free, no API key, CORS-friendly ─────────────
+  // Replaces CoinGecko which now requires a paid API key for all requests.
+  // CoinCap uses the same asset slug format for most major coins.
+  // IDs that differ from CoinGecko are translated in COINCAP_ID_MAP below.
+  const COINCAP_ID_MAP = {
+    'binancecoin':     'binance-coin',
+    'avalanche-2':     'avalanche',
+    'matic-network':   'polygon',
+    'injective-protocol': 'injective',
+    'pyth-network':    'pyth-network',  // same
+    'dogwifhat':       'dogwifhat',     // same (may not be in CoinCap)
+    'the-open-network': 'toncoin',
+  };
+
+  // Fetch one year of daily USD prices from CoinCap v2 history endpoint.
+  // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
   async function fetchCoinCapYear(cgId, year) {
-    const from = Math.floor(Date.UTC(year, 0, 1) / 1000);
-    const to   = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
+    const capId = COINCAP_ID_MAP[cgId] || cgId;
+    const start = Date.UTC(year, 0, 1);          // ms
+    const end   = Date.UTC(year, 11, 31, 23, 59, 59);
     try {
-      const url = `https://api.coingecko.com/api/v3/coins/${cgId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`;
+      const url = `https://api.coincap.io/v2/assets/${capId}/history?interval=d1&start=${start}&end=${end}`;
       const r = await fetchWithTimeout(url, 12000);
       if (!r || !r.ok) return null;
       const data = await r.json();
       const map = new Map();
-      // data.prices = [[timestamp_ms, price], ...]
-      for (const [ts, price] of (data.prices || [])) {
-        const d = new Date(ts).toISOString().slice(0, 10);
-        map.set(d, price);
+      // data.data = [{ priceUsd: "50000.0", time: 1635724800000, date: "..." }]
+      for (const point of (data.data || [])) {
+        const d = new Date(point.time).toISOString().slice(0, 10);
+        const p = parseFloat(point.priceUsd);
+        if (p > 0) map.set(d, p);
       }
-      return map;
+      return map.size > 0 ? map : null;
     } catch { return null; }
   }
 

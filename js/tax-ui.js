@@ -37,6 +37,13 @@ const TaxUI = (() => {
     portfolioRefreshTimer: null, // auto-refresh interval handle
     // Transaction selection
     selectedTxIds: new Set(),
+    // Transaction expanded row & manual entry
+    expandedTxId: null,
+    expandedTxTab: 'description',   // 'description' | 'tax'
+    manualTxRows: [],               // Array of { _id, type, label, wallet, date, sentAmt, sentCcy, recAmt, recCcy, feeAmt, feeCcy }
+    addTxMenuOpen: false,           // add-transaction dropdown open
+    txLabelFilter: 'all',           // active label filter pill
+    txWalletFilter: 'all',          // active wallet filter pill (mirrors txFilter.account)
     userName: '',
     userPnr: '',
     _cloudSyncedAt: null,  // ISO timestamp of last successful cloud sync
@@ -959,15 +966,20 @@ const TaxUI = (() => {
     // ── Blockchains ───────────────────────────────────────────
     { type: 'ethereum_bc', icon: '🔷',  name: 'Ethereum',       category: 'blockchains',tag: 'popular', desc: 'EVM address import',       color: '#627EEA', networks: [{ id: 'eth', label: 'Ethereum', icon: 'Ξ', chain: 'eth' }] },
     { type: 'solana_bc',   icon: '◎',   name: 'Solana',         category: 'blockchains',tag: 'popular', desc: 'Solana wallet import',      color: '#9945FF', networks: [{ id: 'sol', label: 'Solana', icon: '◎', chain: 'sol' }] },
-    { type: 'polygon_bc',  icon: '🟣',  name: 'Polygon',        category: 'blockchains',tag: '',        desc: 'Polygon (MATIC) address',   color: '#8247E5', networks: [{ id: 'polygon', label: 'Polygon', icon: '🟣', chain: 'eth', chainId: 137 }] },
-    { type: 'base_bc',     icon: '🔵',  name: 'Base',           category: 'blockchains',tag: '',        desc: 'Coinbase L2 address',       color: '#0052FF', networks: [{ id: 'base', label: 'Base', icon: '🔵', chain: 'eth', chainId: 8453 }] },
+    { type: 'polygon_bc',   icon: '🟣',  name: 'Polygon',        category: 'blockchains',tag: '',        desc: 'Polygon (MATIC) address',   color: '#8247E5', networks: [{ id: 'polygon',  label: 'Polygon',   icon: '🟣', chain: 'eth', chainId: 137   }] },
+    { type: 'base_bc',      icon: '🔵',  name: 'Base',           category: 'blockchains',tag: '',        desc: 'Coinbase L2 address',       color: '#0052FF', networks: [{ id: 'base',     label: 'Base',      icon: '🔵', chain: 'eth', chainId: 8453  }] },
+    { type: 'arbitrum_bc',  icon: '🔷',  name: 'Arbitrum',       category: 'blockchains',tag: '',        desc: 'Arbitrum One address',      color: '#28a0f0', networks: [{ id: 'arbitrum', label: 'Arbitrum',  icon: '🔷', chain: 'eth', chainId: 42161 }] },
+    { type: 'bnb_bc',       icon: '🟡',  name: 'BNB Chain',      category: 'blockchains',tag: '',        desc: 'BNB Smart Chain address',   color: '#f3ba2f', networks: [{ id: 'bsc',      label: 'BNB Chain', icon: '🟡', chain: 'eth', chainId: 56    }] },
+    { type: 'avalanche_bc', icon: '🔺',  name: 'Avalanche',      category: 'blockchains',tag: '',        desc: 'Avalanche C-Chain address', color: '#e84142', networks: [{ id: 'avax',     label: 'Avalanche', icon: '🔺', chain: 'eth', chainId: 43114 }] },
     // ── Exchanges ─────────────────────────────────────────────
-    { type: 'binance',     icon: '🟡',  name: 'Binance',        category: 'exchanges',  tag: 'popular', desc: 'Upload trade history CSV',  color: '#f0b90b', networks: [] },
-    { type: 'coinbase',    icon: '🔵',  name: 'Coinbase',       category: 'exchanges',  tag: 'popular', desc: 'Upload transaction CSV',    color: '#0052ff', networks: [] },
-    { type: 'kraken',      icon: '🐙',  name: 'Kraken',         category: 'exchanges',  tag: 'popular', desc: 'Upload ledger CSV',         color: '#5741d9', networks: [] },
-    { type: 'bybit',       icon: '🔸',  name: 'Bybit',          category: 'exchanges',  tag: 'popular', desc: 'Upload order history CSV',  color: '#f7a600', networks: [] },
-    { type: 'kucoin',      icon: '🟢',  name: 'KuCoin',         category: 'exchanges',  tag: '',        desc: 'Upload trade history CSV',  color: '#26de81', networks: [] },
-    { type: 'cryptocom',   icon: '🔷',  name: 'Crypto.com',     category: 'exchanges',  tag: '',        desc: 'Upload transaction CSV',    color: '#002d74', networks: [] },
+    { type: 'binance',      icon: '🟡',  name: 'Binance',        category: 'exchanges',  tag: 'popular', desc: 'Upload trade history CSV',  color: '#f0b90b', networks: [] },
+    { type: 'coinbase',     icon: '🔵',  name: 'Coinbase',       category: 'exchanges',  tag: 'popular', desc: 'Upload transaction CSV',    color: '#0052ff', networks: [] },
+    { type: 'kraken',       icon: '🐙',  name: 'Kraken',         category: 'exchanges',  tag: 'popular', desc: 'Upload ledger CSV',         color: '#5741d9', networks: [] },
+    { type: 'bybit',        icon: '🔸',  name: 'Bybit',          category: 'exchanges',  tag: 'popular', desc: 'Upload order history CSV',  color: '#f7a600', networks: [] },
+    { type: 'kucoin',       icon: '🟢',  name: 'KuCoin',         category: 'exchanges',  tag: '',        desc: 'Upload trade history CSV',  color: '#26de81', networks: [] },
+    { type: 'cryptocom',    icon: '🔷',  name: 'Crypto.com',     category: 'exchanges',  tag: '',        desc: 'Upload transaction CSV',    color: '#002d74', networks: [] },
+    { type: 'revolut',      icon: '🟤',  name: 'Revolut',        category: 'exchanges',  tag: '',        desc: 'Upload Revolut CSV export',  color: '#0075eb', networks: [] },
+    { type: 'mexc',         icon: '🟩',  name: 'MEXC',           category: 'exchanges',  tag: '',        desc: 'Upload MEXC trade history', color: '#00b897', networks: [] },
     // ── Services ──────────────────────────────────────────────
     { type: 'csv',         icon: '📄',  name: 'CSV / Generic',  category: 'services',   tag: '',        desc: 'Any exchange or wallet CSV', color: '#64748b', networks: [] },
   ];
@@ -1205,6 +1217,19 @@ const TaxUI = (() => {
         '3. Select Transaction History → All time', '4. Download CSV and upload below',
       ], warning: null
     },
+    revolut: {
+      icon: '🟤', name: 'Revolut', steps: [
+        '1. Öppna Revolut-appen', '2. Gå till Account → Statement',
+        '3. Välj "Excel" eller "CSV" → välj hela perioden',
+        '4. Ladda ned och ladda upp nedan',
+      ], warning: 'Exportera kryptotransaktioner under Crypto-fliken separat om tillgängligt.'
+    },
+    mexc: {
+      icon: '🟩', name: 'MEXC', steps: [
+        '1. Logga in på MEXC', '2. Gå till Orders → Order History',
+        '3. Klicka "Export" → välj All time', '4. Ladda ned CSV och ladda upp nedan',
+      ], warning: null
+    },
     csv: {
       icon: '📄', name: 'CSV File', steps: [
         'Expected columns: date, type, asset, amount, price_sek (or price), fee',
@@ -1370,106 +1395,169 @@ const TaxUI = (() => {
   // TRANSACTIONS PAGE
   // ════════════════════════════════════════════════════════════
   const CAT_META = {
-    buy: { icon: '↓', color: '#22c55e', label: 'Buy' },
-    sell: { icon: '↑', color: '#ef4444', label: 'Sell' },
-    trade: { icon: '↔', color: '#8b5cf6', label: 'Swap' },
-    receive: { icon: '⬇', color: '#06b6d4', label: 'Receive' },
-    send: { icon: '⬆', color: '#f59e0b', label: 'Send' },
-    income: { icon: '★', color: '#f59e0b', label: 'Income' },
-    fee: { icon: '💸', color: '#94a3b8', label: 'Fee' },
-    transfer_in: { icon: '←', color: '#64748b', label: 'Transfer In' },
-    transfer_out: { icon: '→', color: '#64748b', label: 'Transfer Out' },
-    spam: { icon: '🚫', color: '#475569', label: 'Spam' },
-    approval: { icon: '✓', color: '#475569', label: 'Approval' },
-    staking: { icon: '🥩', color: '#22d3ee', label: 'Staking' },
-    nft_sale: { icon: '🖼️', color: '#a78bfa', label: 'NFT Sale' },
-    bridge: { icon: '🌉', color: '#818cf8', label: 'Bridge' },
-    defi_unknown: { icon: '🧩', color: '#f59e0b', label: 'DeFi' },
+    buy:          { icon: '↓',  color: '#22c55e', label: 'Köp',          labelEn: 'Buy'         },
+    sell:         { icon: '↑',  color: '#ef4444', label: 'Sälj',         labelEn: 'Sell'        },
+    trade:        { icon: '↔',  color: '#8b5cf6', label: 'Byte',         labelEn: 'Swap'        },
+    receive:      { icon: '⬇',  color: '#06b6d4', label: 'Mottagen',     labelEn: 'Receive'     },
+    send:         { icon: '⬆',  color: '#f59e0b', label: 'Skickad',      labelEn: 'Send'        },
+    income:       { icon: '★',  color: '#f59e0b', label: 'Inkomst',      labelEn: 'Income'      },
+    fee:          { icon: '💸', color: '#94a3b8', label: 'Avgift',        labelEn: 'Fee'         },
+    transfer_in:  { icon: '←',  color: '#64748b', label: 'Överföring in',labelEn: 'Transfer In' },
+    transfer_out: { icon: '→',  color: '#64748b', label: 'Överföring ut',labelEn: 'Transfer Out'},
+    spam:         { icon: '🚫', color: '#475569', label: 'Spam',          labelEn: 'Spam'        },
+    approval:     { icon: '✓',  color: '#475569', label: 'Godkännande',  labelEn: 'Approval'    },
+    staking:      { icon: '🥩', color: '#22d3ee', label: 'Staking',       labelEn: 'Staking'     },
+    nft_sale:     { icon: '🖼️',color: '#a78bfa', label: 'NFT-försäljning',labelEn: 'NFT Sale'  },
+    bridge:       { icon: '🌉', color: '#818cf8', label: 'Bridge',        labelEn: 'Bridge'      },
+    defi_unknown: { icon: '🧩', color: '#f59e0b', label: 'DeFi',          labelEn: 'DeFi'        },
   };
 
   function renderTransactions() {
-    const allTxns = TaxEngine.getTransactions();
+    const allTxns  = TaxEngine.getTransactions();
     const accounts = TaxEngine.getAccounts();
     const filtered = filterTxns(allTxns);
-    const sorted = sortTxnsArr(filtered);
-    const paged = sorted.slice(S.txPage * S.txPageSize, (S.txPage + 1) * S.txPageSize);
+    const sorted   = sortTxnsArr(filtered);
+    const paged    = sorted.slice(S.txPage * S.txPageSize, (S.txPage + 1) * S.txPageSize);
     const selCount = S.selectedTxIds.size;
 
-    return `
-      <div class="tax-page" style="display:flex;flex-direction:column;height:100%;overflow:hidden">
-        <div class="tax-page-header" style="flex-shrink:0">
-          <h1 class="tax-page-title">Transactions</h1>
-          <div class="tax-page-actions" style="display:flex;gap:8px;align-items:center">
-            ${selCount > 0 ? `
-              <span style="font-size:12px;color:var(--tax-muted)">${selCount.toLocaleString()} selected</span>
-              <button class="tax-btn tax-btn-sm" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteSelected()">🗑 Delete selected</button>
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.clearSelection()">Clear</button>
-            ` : ''}
-            <button class="tax-btn tax-btn-sm tax-btn-ghost" style="color:#f87171;border-color:rgba(248,113,113,.25)" onclick="TaxUI.deleteAllFiltered(${filtered.length})" title="Delete all transactions matching current filters">
-              🗑 Delete all ${filtered.length < allTxns.length ? filtered.length.toLocaleString() + ' filtered' : allTxns.length.toLocaleString()}
-            </button>
-            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.openImport('csv')">+ Add CSV</button>
-            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Process</button>
-          </div>
-        </div>
+    // ── Top filter bar (Divly-style pill dropdowns) ──────────
+    const typeLabel   = S.txFilter.category !== 'all'
+      ? (CAT_META[S.txFilter.category]?.label || S.txFilter.category) : 'Alla typer';
+    const walletLabel = S.txFilter.account !== 'all'
+      ? (accounts.find(a => a.id === S.txFilter.account)?.label || 'Plånbok') : 'Alla plånböcker';
+    const labelLabel  = S.txLabelFilter !== 'all' ? S.txLabelFilter : 'Alla etiketter';
+    const hasDateFilter = S.txFilter.dateFrom || S.txFilter.dateTo;
+    const dateLabel   = hasDateFilter
+      ? `${S.txFilter.dateFrom || '…'} – ${S.txFilter.dateTo || '…'}` : 'Alla datum';
+    const reviewActive = S.txFilter.needsReview;
 
-        <div class="tax-filter-bar" style="flex-shrink:0">
-          <div class="tax-search-wrap">
-            <span class="tax-search-icon">🔍</span>
-            <input type="text" class="tax-input tax-search-input" placeholder="Search asset, hash, notes…"
-              value="${S.txFilter.search}" oninput="TaxUI.setFilter('search',this.value)">
+    // ── Bulk action bar (shown when rows are selected) ───────
+    const bulkBar = selCount > 0 ? `
+      <div class="tx-bulk-bar">
+        <span class="tx-bulk-count">${selCount} valda</span>
+        <button class="tx-bulk-btn" onclick="TaxUI.mergeSameHash()">SÄTT IHOP ${selCount}</button>
+        <button class="tx-bulk-btn" onclick="TaxUI.mergeTrade()">SÄTT IHOP TILL TRADE</button>
+        <button class="tx-bulk-btn" onclick="TaxUI.mergeTransfer()">SLÅ IHOP TILL EN ÖVERFÖRING</button>
+        <button class="tx-bulk-btn" onclick="TaxUI.bulkReclassify('')">MASSREDIGERING ${selCount}</button>
+        <button class="tx-bulk-btn" onclick="TaxUI.mergeMultipleTransfers()">SÄTT IHOP FLERA ÖVERFÖRINGAR</button>
+        <button class="tx-bulk-btn tx-bulk-btn--danger" onclick="TaxUI.deleteSelected()">TA BORT ${selCount}</button>
+        <button class="tx-bulk-btn tx-bulk-btn--ghost" onclick="TaxUI.clearSelection()">✕</button>
+      </div>` : '';
+
+    // ── Add transaction dropdown ─────────────────────────────
+    const addTxMenu = S.addTxMenuOpen ? `
+      <div class="tx-add-menu">
+        <button class="tx-add-menu-item" onclick="TaxUI.addManualRow('receive')">Insättning</button>
+        <button class="tx-add-menu-item" onclick="TaxUI.addManualRow('send')">Uttag</button>
+        <button class="tx-add-menu-item" onclick="TaxUI.addManualRow('trade')">Trade</button>
+        <button class="tx-add-menu-item" onclick="TaxUI.addManualRow('transfer_in')">Överföring</button>
+      </div>` : '';
+
+    // ── Manual entry form rows ───────────────────────────────
+    const manualFormHtml = S.manualTxRows.length > 0 ? renderManualTxForm() : '';
+
+    // ── Table rows including expandable panels ────────────────
+    const tableRows = paged.map(t => {
+      const row = renderTxRow(t);
+      const expanded = S.expandedTxId === t.id ? renderExpandedTxRow(t) : '';
+      return row + expanded;
+    }).join('');
+
+    return `
+      <div class="tax-page tax-page--transactions" style="display:flex;flex-direction:column;height:100%;overflow:hidden">
+
+        <!-- ── Top filter bar ────────────────────────────────── -->
+        <div class="tx-filter-topbar" style="flex-shrink:0">
+          <div class="tx-filter-pills">
+            <div class="tx-filter-pill-wrap">
+              <button class="tx-filter-pill ${S.txFilter.category !== 'all' ? 'active' : ''}"
+                onclick="TaxUI.toggleTxTypeMenu(event)">
+                ${typeLabel} <span class="tx-pill-caret">▾</span>
+              </button>
+            </div>
+            <div class="tx-filter-pill-wrap">
+              <button class="tx-filter-pill ${S.txFilter.account !== 'all' ? 'active' : ''}"
+                onclick="TaxUI.toggleTxWalletMenu(event)">
+                ${walletLabel} <span class="tx-pill-caret">▾</span>
+              </button>
+            </div>
+            <div class="tx-filter-pill-wrap">
+              <button class="tx-filter-pill ${S.txLabelFilter !== 'all' ? 'active' : ''}"
+                onclick="TaxUI.toggleTxLabelMenu(event)">
+                ${labelLabel} <span class="tx-pill-caret">▾</span>
+              </button>
+            </div>
+            <button class="tx-filter-pill ${reviewActive ? 'active' : ''}"
+              onclick="TaxUI.setFilter('needsReview', ${!reviewActive})">
+              ${reviewActive ? '⚠️ Behöver granskning' : 'Filter'}
+            </button>
+            <div class="tx-filter-pill-wrap">
+              <button class="tx-filter-pill ${hasDateFilter ? 'active' : ''}"
+                onclick="TaxUI.openCal('from')">
+                📅 ${dateLabel}
+              </button>
+            </div>
+            ${S.txFilter.search ? `
+              <button class="tx-filter-pill active" onclick="TaxUI.setFilter('search','')">
+                🔍 "${S.txFilter.search}" ✕
+              </button>` : `
+              <div class="tx-search-wrap">
+                <span class="tx-search-icon">🔍</span>
+                <input type="text" class="tx-search-input" placeholder="Sök tillgång, hash…"
+                  value="${S.txFilter.search}" oninput="TaxUI.setFilter('search',this.value)">
+              </div>`}
           </div>
-          <select class="tax-select tax-filter-select" onchange="TaxUI.setFilter('category',this.value)">
-            <option value="all">All types</option>
-            ${Object.entries(CAT_META).map(([k, v]) => `<option value="${k}" ${S.txFilter.category === k ? 'selected' : ''}>${v.label}</option>`).join('')}
-          </select>
-          <select class="tax-select tax-filter-select" onchange="TaxUI.setFilter('account',this.value)">
-            <option value="all">All accounts</option>
-            ${accounts.map(a => `<option value="${a.id}" ${S.txFilter.account === a.id ? 'selected' : ''}>${a.label || a.type}</option>`).join('')}
-          </select>
-          <div class="tax-date-range">
-            <input type="text" class="tax-input tax-date-input" placeholder="From" value="${S.txFilter.dateFrom}" readonly onclick="TaxUI.openCal('from')">
-            <span style="color:var(--text-muted)">→</span>
-            <input type="text" class="tax-input tax-date-input" placeholder="To" value="${S.txFilter.dateTo}" readonly onclick="TaxUI.openCal('to')">
+          <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Bearbeta</button>
+            <div style="position:relative">
+              <button class="tx-add-btn" onclick="TaxUI.toggleAddTxMenu()">
+                LÄGG TILL TRANSAKTION <span class="tx-pill-caret">▾</span>
+              </button>
+              ${addTxMenu}
+            </div>
           </div>
-          <label class="tax-check-label">
-            <input type="checkbox" ${S.txFilter.needsReview ? 'checked' : ''} onchange="TaxUI.setFilter('needsReview',this.checked)">
-            Review only
-          </label>
         </div>
 
         ${S.calOpen ? renderCalendar() : ''}
+        ${bulkBar}
 
+        <!-- ── Table meta + pagination ───────────────────────── -->
         <div class="tax-table-meta" style="flex-shrink:0">
-          <span class="tax-muted">${filtered.length.toLocaleString()} transactions</span>
-          ${filtered.length < allTxns.length ? `<span class="tax-filter-chip">${allTxns.length.toLocaleString()} total</span>` : ''}
+          <span class="tax-muted">${filtered.length.toLocaleString()} transaktioner</span>
+          ${filtered.length < allTxns.length ? `<span class="tax-filter-chip">${allTxns.length.toLocaleString()} totalt</span>` : ''}
           <span style="flex:1"></span>
           ${renderPagination(filtered.length)}
         </div>
 
-        ${paged.length === 0
-        ? renderEmpty('No transactions', allTxns.length === 0 ? 'Add accounts from the Accounts page.' : 'No matches.', '📋')
-        : `<div class="tax-table-wrap" style="flex:1;overflow-y:auto;min-height:0">
-              <table class="tax-table" style="width:100%">
-              <thead style="position:sticky;top:0;z-index:2;background:var(--tax-bg,#0d1021)">
-                <tr>
-                <th style="width:32px;padding:0 6px">
-                  <input type="checkbox" ${selCount > 0 && selCount === sorted.length ? 'checked' : ''}
-                    onchange="TaxUI.toggleSelectAll(this.checked)"
-                    title="${selCount === sorted.length && sorted.length > 0 ? `Deselect all ${sorted.length.toLocaleString()}` : `Select all ${sorted.length.toLocaleString()} transactions`}">
-                </th>
-                <th>Type</th>
-                <th class="sortable" onclick="TaxUI.sortTxns('date')">Date ${sortIcon('date')}</th>
-                <th>Asset</th>
-                <th class="ta-r">Amount</th>
-                <th class="ta-r" title="Price source legend: 🟢 Exchange/CoinGecko (high) · 🟣 Swap-derived · 🟡 Approximate · 🔴 Missing">Price (SEK) <span style="font-size:9px;opacity:.5">●</span></th>
-                <th class="ta-r">Value (SEK)</th>
-                <th class="ta-r">Fee</th>
-                <th></th>
-              </tr></thead>
-              <tbody>${paged.map(renderTxRow).join('')}</tbody>
-            </table></div>`
-      }
+        <!-- ── Main table ─────────────────────────────────────── -->
+        ${paged.length === 0 && S.manualTxRows.length === 0
+          ? renderEmpty('Inga transaktioner', allTxns.length === 0 ? 'Lägg till konton från sidan Konton.' : 'Inga matchningar.', '📋')
+          : `<div class="tax-table-wrap" style="flex:1;overflow-y:auto;min-height:0">
+              <table class="tax-table tax-table--tx" style="width:100%">
+                <thead style="position:sticky;top:0;z-index:2;background:var(--tax-bg,#0d1021)">
+                  <tr>
+                    <th class="tx-col-check">
+                      <input type="checkbox" ${selCount > 0 && selCount === sorted.length ? 'checked' : ''}
+                        onchange="TaxUI.toggleSelectAll(this.checked)"
+                        title="Markera alla ${sorted.length.toLocaleString()} transaktioner">
+                    </th>
+                    <th class="tx-col-info">Info</th>
+                    <th class="tx-col-type">Typ</th>
+                    <th class="tx-col-date sortable" onclick="TaxUI.sortTxns('date')">Datum ${sortIcon('date')}</th>
+                    <th class="tx-col-sent">Skickad</th>
+                    <th class="tx-col-recv">Mottagen</th>
+                    <th class="tx-col-gl ta-r">Vinst/Förlust</th>
+                    <th class="tx-col-wallet">Plånbok</th>
+                    <th class="tx-col-actions"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${manualFormHtml}
+                  ${tableRows}
+                </tbody>
+              </table>
+            </div>`
+        }
 
         ${S.editTxId ? renderEditModal() : ''}
       </div>
@@ -1490,58 +1578,228 @@ const TaxUI = (() => {
   };
 
   function renderTxRow(t) {
-    const cm = CAT_META[t.category] || { icon: '•', color: '#94a3b8', label: t.category };
-    const val = t.costBasisSEK || (t.priceSEKPerUnit * t.amount) || 0;
+    const cm       = CAT_META[t.category] || { icon: '•', color: '#94a3b8', label: t.category };
     const isInternal = t.isInternalTransfer;
-    const checked = S.selectedTxIds.has(t.id);
+    const checked  = S.selectedTxIds.has(t.id);
+    const expanded = S.expandedTxId === t.id;
+    const accounts = TaxEngine.getAccounts();
+    const acc      = accounts.find(a => a.id === t.accountId);
+    const accLabel = acc?.label || acc?.type || '—';
 
-    // Resolve display symbol for asset column
+    // Resolve display symbol
     const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(t.assetSymbol) : { symbol: t.assetSymbol, name: '' };
     const displaySym = td.symbol || t.assetSymbol || '—';
-    const displayName = td.name || t.assetName || '';
 
-    // Price source indicator
+    // Sent / Received columns — derived from category + amounts
+    const isOutgoing = ['sell','send','transfer_out','fee'].includes(t.category);
+    const isSwap     = t.category === 'trade';
+    let sentCell = '—', recvCell = '—';
+    const fmtAmt = (sym, amt) =>
+      `<span class="tx-asset-amt">${TaxEngine.formatCrypto(amt, 6)}</span> <span class="tx-asset-sym-sm">${sym}</span>`;
+    if (isSwap) {
+      sentCell = fmtAmt(displaySym, t.amount);
+      recvCell = t.inAsset ? fmtAmt(t.inAsset, t.inAmount || 0) : '—';
+    } else if (isOutgoing) {
+      sentCell = fmtAmt(displaySym, t.amount);
+    } else {
+      recvCell = fmtAmt(displaySym, t.amount);
+    }
+
+    // Gain/loss cell (for disposals only)
+    const hasGL = t.category === 'sell' || t.category === 'trade';
+    let glCell = '—';
+    if (hasGL && t.gainSEK != null) {
+      const isGain = t.gainSEK >= 0;
+      glCell = `<span class="tx-gl ${isGain ? 'tx-gl--gain' : 'tx-gl--loss'}">${isGain ? '+' : ''}${TaxEngine.formatSEK(t.gainSEK)}</span>`;
+    } else if (hasGL) {
+      glCell = '<span class="tax-missing" title="Kör pipeline för att beräkna">—</span>';
+    }
+
+    // Warning indicator
+    const warnIcon = t.needsReview
+      ? `<span class="tx-warn-dot" title="${t.reviewReason || 'Behöver granskning'}">⚠</span>` : '';
+
+    // Price source dot
     const psMeta = PRICE_SOURCE_LABELS[t.priceSource] || null;
-    const priceCell = t.priceSEKPerUnit
-      ? `<span style="display:inline-flex;align-items:center;gap:4px">
-           ${TaxEngine.formatSEK(t.priceSEKPerUnit, 2)}
-           ${psMeta ? `<span title="${psMeta.label}" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${psMeta.dot};flex-shrink:0"></span>` : ''}
-         </span>`
-      : '<span class="tax-missing" title="Price missing — run pipeline to resolve">—</span>';
+    const psDot = psMeta ? `<span class="tx-ps-dot" title="${psMeta.label}" style="background:${psMeta.dot}"></span>` : '';
 
     return `
-      <tr class="${t.needsReview ? 'tax-row-review' : ''} ${isInternal ? 'tax-row-internal' : ''} ${checked ? 'tax-row-selected' : ''}">
-        <td style="width:32px;padding:0 6px">
+      <tr class="tx-row ${t.needsReview ? 'tx-row--review' : ''} ${isInternal ? 'tx-row--internal' : ''} ${checked ? 'tx-row--selected' : ''} ${expanded ? 'tx-row--expanded' : ''}"
+          onclick="TaxUI.expandTxRow('${t.id}')">
+        <td class="tx-col-check" onclick="event.stopPropagation()">
           <input type="checkbox" ${checked ? 'checked' : ''}
             onchange="TaxUI.toggleSelectTx('${t.id}',this.checked)">
         </td>
-        <td>
-          <span class="tax-cat-badge" style="background:${cm.color}22;color:${cm.color}">${cm.icon} ${cm.label}</span>
-          ${isInternal ? '<span class="tax-transfer-tag">↔ internal</span>' : ''}
-          ${t.isDuplicate ? '<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>' : ''}
-          ${t.priceDerivedFromOtherLeg ? '<span class="tax-badge" style="font-size:10px;opacity:.7" title="SEK value derived from the other side of this swap">↔ derived</span>' : ''}
+        <td class="tx-col-info">
+          ${warnIcon}
+          ${t.isDuplicate ? '<span class="tx-badge tx-badge--dup">DUP</span>' : ''}
+          ${isInternal ? '<span class="tx-badge tx-badge--int">↔</span>' : ''}
+          ${psDot}
         </td>
-        <td class="tax-muted tax-nowrap">${fmtDateShort(t.date)}</td>
-        <td>
-          <div class="tax-asset-cell-col">
-            <span class="tax-asset-sym" title="${t.assetSymbol || ''}">${displaySym}</span>
-            ${displayName && displayName !== displaySym ? `<span style="font-size:10px;color:var(--tax-muted)">${displayName}</span>` : ''}
-            ${t.category === 'trade' && t.inAsset ? `<span style="font-size:11px;color:#8b5cf6">→ ${t.inAsset}</span>` : ''}
-          </div>
+        <td class="tx-col-type">
+          <span class="tx-type-badge" style="background:${cm.color}20;color:${cm.color};border:1px solid ${cm.color}40">
+            ${cm.icon} ${cm.label}
+          </span>
         </td>
-        <td class="ta-r tax-mono">${TaxEngine.formatCrypto(t.amount, 8)}</td>
-        <td class="ta-r tax-mono">${priceCell}</td>
-        <td class="ta-r tax-mono">${val ? TaxEngine.formatSEK(val) : '<span class="tax-missing">—</span>'}</td>
-        <td class="ta-r tax-mono">${t.feeSEK ? TaxEngine.formatSEK(t.feeSEK, 2) : '—'}</td>
-        <td>
+        <td class="tx-col-date">
+          <span class="tx-date-primary">${fmtDateShort(t.date).split(' ')[0]}</span>
+          <span class="tx-date-time">${fmtDateShort(t.date).split(' ')[1] || ''}</span>
+        </td>
+        <td class="tx-col-sent tx-mono">${sentCell}</td>
+        <td class="tx-col-recv tx-mono">${recvCell}</td>
+        <td class="tx-col-gl ta-r">${glCell}</td>
+        <td class="tx-col-wallet">
+          <span class="tx-wallet-label" title="${accLabel}">${accLabel.length > 14 ? accLabel.slice(0,12)+'…' : accLabel}</span>
+        </td>
+        <td class="tx-col-actions" onclick="event.stopPropagation()">
           <div class="tax-row-actions">
-            ${t.needsReview ? `<span title="${t.reviewReason || 'Needs review'}" style="font-size:13px">⚠️</span>` : ''}
-            <button class="tax-icon-btn" onclick="TaxUI.editTx('${t.id}')">✏️</button>
-            <button class="tax-icon-btn tax-icon-del" onclick="TaxUI.deleteTx('${t.id}')">🗑️</button>
+            <button class="tax-icon-btn" onclick="TaxUI.editTx('${t.id}')" title="Redigera">✏️</button>
+            <button class="tax-icon-btn tax-icon-del" onclick="TaxUI.deleteTx('${t.id}')" title="Ta bort">🗑️</button>
           </div>
         </td>
       </tr>
     `;
+  }
+
+  // ── Expandable row panel ────────────────────────────────────
+  function renderExpandedTxRow(t) {
+    const tab = S.expandedTxTab || 'description';
+    const cm  = CAT_META[t.category] || { label: t.category };
+    const val = t.costBasisSEK || (t.priceSEKPerUnit && t.amount ? t.priceSEKPerUnit * t.amount : 0);
+    const psMeta = PRICE_SOURCE_LABELS[t.priceSource] || null;
+
+    // Tab: TRANSAKTIONSBESKRIVNING
+    const descTab = `
+      <div class="tx-expand-grid">
+        <div class="tx-expand-kv"><span class="tx-expand-k">Typ</span><span class="tx-expand-v">${cm.label}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Datum</span><span class="tx-expand-v">${fmtDateShort(t.date)}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Tillgång</span><span class="tx-expand-v">${t.assetSymbol || '—'}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Antal</span><span class="tx-expand-v tax-mono">${TaxEngine.formatCrypto(t.amount, 8)}</span></div>
+        ${t.inAsset ? `<div class="tx-expand-kv"><span class="tx-expand-k">Mottagen tillgång</span><span class="tx-expand-v">${t.inAsset} ${t.inAmount ? TaxEngine.formatCrypto(t.inAmount, 8) : ''}</span></div>` : ''}
+        <div class="tx-expand-kv"><span class="tx-expand-k">Pris (SEK)</span><span class="tx-expand-v tax-mono">${t.priceSEKPerUnit ? TaxEngine.formatSEK(t.priceSEKPerUnit, 2) : '—'} ${psMeta ? `<span style="font-size:10px;color:var(--tax-muted)">(${psMeta.label})</span>` : ''}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Värde (SEK)</span><span class="tx-expand-v tax-mono">${val ? TaxEngine.formatSEK(val) : '—'}</span></div>
+        ${t.feeSEK ? `<div class="tx-expand-kv"><span class="tx-expand-k">Avgift (SEK)</span><span class="tx-expand-v tax-mono">${TaxEngine.formatSEK(t.feeSEK, 2)}</span></div>` : ''}
+        ${t.txHash ? `<div class="tx-expand-kv" style="grid-column:1/-1"><span class="tx-expand-k">TxHash</span><span class="tx-expand-v tax-mono" style="font-size:10px;word-break:break-all">${t.txHash}</span></div>` : ''}
+        ${t.notes ? `<div class="tx-expand-kv" style="grid-column:1/-1"><span class="tx-expand-k">Anteckningar</span><span class="tx-expand-v">${t.notes}</span></div>` : ''}
+      </div>
+      ${t.needsReview ? `
+        <div class="tx-warning-card">
+          <div class="tx-warning-row"><span class="tx-warning-label">Typ av varning</span><span class="tx-warning-val">${t.reviewReason || 'Behöver granskning'}</span></div>
+          <div class="tx-warning-row"><span class="tx-warning-label">Detaljer</span><span class="tx-warning-val">${t.reviewDetails || 'Kontrollera och klassificera denna transaktion.'}</span></div>
+          <div class="tx-warning-actions">
+            <button class="tx-warn-action-btn" onclick="TaxUI.markReviewed('${t.id}')">IGNORERA VARNING</button>
+          </div>
+        </div>` : ''}`;
+
+    // Tab: SKATTEBERÄKNINGAR
+    const taxTab = `
+      <div class="tx-expand-grid">
+        <div class="tx-expand-kv"><span class="tx-expand-k">Skatteår</span><span class="tx-expand-v">${t.date ? new Date(t.date).getFullYear() : '—'}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Kategori (SKV)</span><span class="tx-expand-v">${cm.label} (${t.category})</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Kostnadsbas (SEK)</span><span class="tx-expand-v tax-mono">${t.costBasisSEK ? TaxEngine.formatSEK(t.costBasisSEK) : '—'}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Genomsnittskurs</span><span class="tx-expand-v tax-mono">${t.avgCostSEK ? TaxEngine.formatSEK(t.avgCostSEK, 4) : '—'}</span></div>
+        <div class="tx-expand-kv"><span class="tx-expand-k">Vinst/Förlust</span><span class="tx-expand-v tax-mono ${t.gainSEK >= 0 ? 'tx-gl--gain' : 'tx-gl--loss'}">${t.gainSEK != null ? TaxEngine.formatSEK(t.gainSEK) : '—'}</span></div>
+        ${t.isInternalTransfer ? '<div class="tx-expand-kv" style="grid-column:1/-1"><span class="tx-expand-k">Intern överföring</span><span class="tx-expand-v">Ej skattepliktig — matchad som intern transfer.</span></div>' : ''}
+      </div>`;
+
+    return `
+      <tr class="tx-expand-row">
+        <td colspan="9" style="padding:0">
+          <div class="tx-expand-panel">
+            <div class="tx-expand-tabs">
+              <button class="tx-expand-tab ${tab === 'description' ? 'active' : ''}"
+                onclick="event.stopPropagation();TaxUI.setExpandedTab('description')">
+                TRANSAKTIONSBESKRIVNING
+              </button>
+              <button class="tx-expand-tab ${tab === 'tax' ? 'active' : ''}"
+                onclick="event.stopPropagation();TaxUI.setExpandedTab('tax')">
+                SKATTEBERÄKNINGAR
+              </button>
+            </div>
+            <div class="tx-expand-body">
+              ${tab === 'description' ? descTab : taxTab}
+            </div>
+          </div>
+        </td>
+      </tr>`;
+  }
+
+  // ── Manual transaction entry form ──────────────────────────
+  function renderManualTxForm() {
+    const accounts = TaxEngine.getAccounts();
+    const typeOptions = ['receive','send','trade','transfer_in','transfer_out','buy','sell','income','fee']
+      .map(k => `<option value="${k}">${CAT_META[k]?.label || k}</option>`).join('');
+    const walletOptions = accounts.map(a => `<option value="${a.id}">${a.label || a.type}</option>`).join('');
+
+    return S.manualTxRows.map((row, i) => `
+      <tr class="tx-manual-row">
+        <td></td>
+        <td>
+          <select class="tx-manual-select" onchange="TaxUI.updateManualRow(${i},'type',this.value)">
+            ${typeOptions.replace(`value="${row.type}"`, `value="${row.type}" selected`)}
+          </select>
+        </td>
+        <td>
+          <select class="tx-manual-select" onchange="TaxUI.updateManualRow(${i},'label',this.value)">
+            <option value="">Ingen etikett</option>
+            <option value="staking" ${row.label==='staking'?'selected':''}>Staking</option>
+            <option value="mining" ${row.label==='mining'?'selected':''}>Mining</option>
+            <option value="airdrop" ${row.label==='airdrop'?'selected':''}>Airdrop</option>
+            <option value="gift" ${row.label==='gift'?'selected':''}>Gåva</option>
+          </select>
+        </td>
+        <td>
+          <select class="tx-manual-select" onchange="TaxUI.updateManualRow(${i},'wallet',this.value)">
+            <option value="">Välj plånbok</option>
+            ${walletOptions.replace(`value="${row.wallet}"`, `value="${row.wallet}" selected`)}
+          </select>
+        </td>
+        <td>
+          <input type="datetime-local" class="tx-manual-input tx-manual-date"
+            value="${row.date || ''}" onchange="TaxUI.updateManualRow(${i},'date',this.value)">
+        </td>
+        <td>
+          <div style="display:flex;gap:4px">
+            <input type="number" class="tx-manual-input" style="width:72px" placeholder="Belopp"
+              value="${row.sentAmt || ''}" oninput="TaxUI.updateManualRow(${i},'sentAmt',this.value)">
+            <input type="text" class="tx-manual-input" style="width:52px" placeholder="CCY"
+              value="${row.sentCcy || ''}" oninput="TaxUI.updateManualRow(${i},'sentCcy',this.value)">
+          </div>
+        </td>
+        <td>
+          <div style="display:flex;gap:4px">
+            <input type="number" class="tx-manual-input" style="width:72px" placeholder="Belopp"
+              value="${row.recAmt || ''}" oninput="TaxUI.updateManualRow(${i},'recAmt',this.value)">
+            <input type="text" class="tx-manual-input" style="width:52px" placeholder="CCY"
+              value="${row.recCcy || ''}" oninput="TaxUI.updateManualRow(${i},'recCcy',this.value)">
+          </div>
+        </td>
+        <td>
+          <div style="display:flex;gap:4px">
+            <input type="number" class="tx-manual-input" style="width:60px" placeholder="Avgift"
+              value="${row.feeAmt || ''}" oninput="TaxUI.updateManualRow(${i},'feeAmt',this.value)">
+            <input type="text" class="tx-manual-input" style="width:48px" placeholder="CCY"
+              value="${row.feeCcy || ''}" oninput="TaxUI.updateManualRow(${i},'feeCcy',this.value)">
+          </div>
+        </td>
+        <td>
+          <div style="display:flex;gap:4px">
+            <button class="tax-icon-btn" title="Duplicera" onclick="TaxUI.duplicateManualRow(${i})">⧉</button>
+            <button class="tax-icon-btn tax-icon-del" title="Ta bort" onclick="TaxUI.removeManualRow(${i})">✕</button>
+          </div>
+        </td>
+      </tr>`).join('') + `
+      <tr class="tx-manual-submit-row">
+        <td colspan="9" style="padding:6px 12px">
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="tax-btn tax-btn-primary tax-btn-sm" onclick="TaxUI.submitManualRows()">
+              ✓ Spara ${S.manualTxRows.length} transaktion${S.manualTxRows.length !== 1 ? 'er' : ''}
+            </button>
+            <button class="tax-btn tax-btn-ghost tax-btn-sm" onclick="TaxUI.addManualRow(null)">+ Lägg till rad</button>
+            <button class="tax-btn tax-btn-ghost tax-btn-sm" onclick="TaxUI.cancelManualRows()">Avbryt</button>
+          </div>
+        </td>
+      </tr>`;
   }
 
   function renderCalendar() {
@@ -2087,6 +2345,156 @@ const TaxUI = (() => {
     reRenderMain();
   }
   function setPage(p) { S.txPage = p; reRenderMain(); }
+
+  // ── Expanded row & tabs ────────────────────────────────────
+  function expandTxRow(id) {
+    S.expandedTxId = S.expandedTxId === id ? null : id;
+    S.expandedTxTab = 'description';
+    reRenderMain();
+  }
+  function setExpandedTab(tab) { S.expandedTxTab = tab; reRenderMain(); }
+
+  // ── Add-transaction menu ───────────────────────────────────
+  function toggleAddTxMenu() {
+    S.addTxMenuOpen = !S.addTxMenuOpen;
+    reRenderMain();
+  }
+
+  // ── Filter menus (pill dropdowns — inline for now) ─────────
+  function toggleTxTypeMenu(event) {
+    // Simple inline prompt; a full dropdown overlay would need more state
+    const val = window.prompt(
+      'Ange typ (buy/sell/trade/receive/send/income/fee/transfer_in/transfer_out/staking/bridge/nft_sale/spam/defi_unknown)\n\nLämna tomt för "Alla typer":',
+      S.txFilter.category === 'all' ? '' : S.txFilter.category
+    );
+    if (val === null) return; // cancelled
+    S.txFilter.category = val.trim() || 'all';
+    S.txPage = 0;
+    reRenderMain();
+  }
+  function toggleTxWalletMenu(event) {
+    const accounts = TaxEngine.getAccounts();
+    const opts = ['all', ...accounts.map(a => a.id)];
+    const labels = ['Alla plånböcker', ...accounts.map(a => a.label || a.type)];
+    const current = opts.indexOf(S.txFilter.account);
+    const next = (current + 1) % opts.length;
+    S.txFilter.account = opts[next];
+    S.txPage = 0;
+    reRenderMain();
+  }
+  function toggleTxLabelMenu(event) {
+    const labels = ['all', 'staking', 'mining', 'airdrop', 'gift'];
+    const current = labels.indexOf(S.txLabelFilter);
+    S.txLabelFilter = labels[(current + 1) % labels.length];
+    S.txPage = 0;
+    reRenderMain();
+  }
+
+  // ── Manual row CRUD ────────────────────────────────────────
+  function addManualRow(type) {
+    const today = new Date().toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM
+    S.manualTxRows.push({
+      _id: Date.now() + Math.random(),
+      type: type || 'receive',
+      label: '',
+      wallet: TaxEngine.getAccounts()[0]?.id || '',
+      date: today,
+      sentAmt: '', sentCcy: '',
+      recAmt: '',  recCcy: '',
+      feeAmt: '',  feeCcy: 'ETH',
+    });
+    S.addTxMenuOpen = false;
+    reRenderMain();
+  }
+  function removeManualRow(i) { S.manualTxRows.splice(i, 1); reRenderMain(); }
+  function duplicateManualRow(i) { S.manualTxRows.splice(i + 1, 0, { ...S.manualTxRows[i], _id: Date.now() }); reRenderMain(); }
+  function updateManualRow(i, key, val) { if (S.manualTxRows[i]) S.manualTxRows[i][key] = val; }
+  function cancelManualRows() { S.manualTxRows = []; reRenderMain(); }
+  function submitManualRows() {
+    const toAdd = S.manualTxRows.map(row => {
+      const isOutgoing = ['sell','send','transfer_out','fee'].includes(row.type);
+      const isSwap = row.type === 'trade';
+      const assetSym = isOutgoing || isSwap ? (row.sentCcy || '').toUpperCase() : (row.recCcy || '').toUpperCase();
+      const amount = parseFloat(isOutgoing || isSwap ? row.sentAmt : row.recAmt) || 0;
+      return TaxEngine.normalizeTransaction({
+        txHash: `manual_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        date: row.date ? new Date(row.date).toISOString() : new Date().toISOString(),
+        type: row.type,
+        assetSymbol: assetSym,
+        amount,
+        inAsset: isSwap ? (row.recCcy || '').toUpperCase() : undefined,
+        inAmount: isSwap ? (parseFloat(row.recAmt) || 0) : undefined,
+        feeSEK: 0,
+        notes: row.label ? `Etikett: ${row.label}` : 'Manuell transaktion',
+        needsReview: true,
+      }, row.wallet, 'manual');
+    }).filter(t => t && t.assetSymbol && t.amount > 0);
+
+    if (toAdd.length > 0) {
+      TaxEngine.addTransactions(toAdd);
+      S.taxResult = null;
+    }
+    S.manualTxRows = [];
+    reRenderMain();
+    if (toAdd.length > 0) {
+      showTaxToast('✅', `${toAdd.length} transaktion${toAdd.length !== 1 ? 'er' : ''} tillagda`, 'Kör pipeline för att beräkna skatt.', 'success');
+    }
+  }
+
+  // ── Bulk merge helpers ─────────────────────────────────────
+  function mergeSameHash() {
+    const ids = [...S.selectedTxIds];
+    if (ids.length < 2) { showTaxToast('ℹ️', 'Välj minst 2 transaktioner'); return; }
+    // If all have same txHash, mark as internal transfer pair
+    const txns = TaxEngine.getTransactions().filter(t => ids.includes(t.id));
+    const hashes = [...new Set(txns.map(t => t.txHash).filter(Boolean))];
+    if (hashes.length === 1) {
+      // Mark both as internal transfers
+      ids.forEach(id => TaxEngine.updateTransaction(id, { isInternalTransfer: true, needsReview: false }));
+      showTaxToast('✅', 'Markerade som intern överföring', `${ids.length} transaktioner`);
+    } else {
+      showTaxToast('ℹ️', 'Olika TxHash', 'Välj transaktioner med samma TxHash för att slå ihop.');
+    }
+    S.selectedTxIds.clear();
+    S.taxResult = null;
+    reRenderMain();
+  }
+  function mergeTrade() {
+    const ids = [...S.selectedTxIds];
+    if (ids.length !== 2) { showTaxToast('ℹ️', 'Välj exakt 2 transaktioner för att skapa ett trade'); return; }
+    const txns = TaxEngine.getTransactions().filter(t => ids.includes(t.id));
+    const out = txns.find(t => ['sell','send'].includes(t.category));
+    const inT = txns.find(t => ['buy','receive'].includes(t.category));
+    if (!out || !inT) { showTaxToast('ℹ️', 'En måste vara utgående och en inkommande'); return; }
+    TaxEngine.updateTransaction(out.id, {
+      category: 'trade', type: 'trade',
+      inAsset: inT.assetSymbol, inAmount: inT.amount,
+      needsReview: false,
+    });
+    TaxEngine.deleteTransaction(inT.id);
+    S.selectedTxIds.clear();
+    S.taxResult = null;
+    reRenderMain();
+    showTaxToast('✅', 'Byte skapat', `${out.assetSymbol} → ${inT.assetSymbol}`);
+  }
+  function mergeTransfer() {
+    const ids = [...S.selectedTxIds];
+    if (ids.length !== 2) { showTaxToast('ℹ️', 'Välj exakt 2 transaktioner'); return; }
+    const txns = TaxEngine.getTransactions().filter(t => ids.includes(t.id));
+    ids.forEach(id => TaxEngine.updateTransaction(id, { isInternalTransfer: true, needsReview: false }));
+    S.selectedTxIds.clear();
+    S.taxResult = null;
+    reRenderMain();
+    showTaxToast('✅', 'Markerade som intern överföring');
+  }
+  function mergeMultipleTransfers() {
+    const ids = [...S.selectedTxIds];
+    ids.forEach(id => TaxEngine.updateTransaction(id, { isInternalTransfer: true, needsReview: false }));
+    S.selectedTxIds.clear();
+    S.taxResult = null;
+    reRenderMain();
+    showTaxToast('✅', `${ids.length} transaktioner markerade som interna överföringar`);
+  }
   function openCal(field) { S.calField = field; S.calOpen = true; S.calMonth = new Date().getMonth(); S.calYear = new Date().getFullYear(); reRenderMain(); }
   function closeCal() { S.calOpen = false; reRenderMain(); }
   function calNav(d) { S.calMonth += d; if (S.calMonth > 11) { S.calMonth = 0; S.calYear++; } if (S.calMonth < 0) { S.calMonth = 11; S.calYear--; } reRenderMain(); }
@@ -2471,6 +2879,8 @@ const TaxUI = (() => {
       else if (parser === 'kraken') txns = P.parseKrakenCSV(_pendingCSVText, acc.id);
       else if (parser === 'bybit') txns = P.parseBybitCSV(_pendingCSVText, acc.id);
       else if (parser === 'coinbase') txns = P.parseCoinbaseCSV(_pendingCSVText, acc.id);
+      else if (parser === 'revolut') txns = P.parseRevolutCSV(_pendingCSVText, acc.id);
+      else if (parser === 'mexc') txns = P.parseMEXCCSV(_pendingCSVText, acc.id);
       else txns = P.parseGenericCSV(_pendingCSVText, acc.id);
     } catch (e) {
       if (st) st.innerHTML = `<div class="tax-import-error">❌ Parse error: ${e.message}</div>`;
@@ -2527,9 +2937,10 @@ const TaxUI = (() => {
         // Sui: placeholder — will be implemented when Sui indexer is added
         throw new Error('Sui import is not yet implemented. Coming soon!');
       }
+      const chainIdForImport = net?.chainId || (chain === 'sol' ? undefined : 1);
       res = chain === 'sol'
         ? await TaxEngine.importSolanaWallet(addr, acc.id, onProgress)
-        : await TaxEngine.importEthWallet(addr, acc.id, onProgress);
+        : await TaxEngine.importEthWallet(addr, acc.id, onProgress, chainIdForImport);
     } catch (e) {
       if (st) st.innerHTML = `<div class="tax-import-error">❌ ${e.message}</div>`;
       if (btn) { btn.disabled = false; btn.textContent = 'Import Full History'; }
@@ -2872,6 +3283,12 @@ const TaxUI = (() => {
     deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, manualCloudSync,
+    // Transactions page — expanded row & manual entry
+    expandTxRow, setExpandedTab,
+    toggleAddTxMenu, toggleTxTypeMenu, toggleTxWalletMenu, toggleTxLabelMenu,
+    addManualRow, removeManualRow, duplicateManualRow, updateManualRow, cancelManualRows, submitManualRows,
+    // Bulk merge
+    mergeSameHash, mergeTrade, mergeTransfer, mergeMultipleTransfers,
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns

@@ -14,6 +14,8 @@ const TaxEngine = (() => {
 
   // ── Stablecoins (treated as SEK-proxies at 1 USD ≈ current rate) ──
   const STABLES = new Set(['USDT','USDC','BUSD','DAI','TUSD','USDP','EUROC','EURC','USDS']);
+  // ── Major assets with deep liquidity (used to prioritise swap-leg derivation) ──
+  const MAJOR_ASSETS = new Set(['BTC','ETH','SOL','BNB','MATIC','AVAX','DOT','ADA','WETH','WBTC','WBNB','POL']);
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
@@ -538,6 +540,58 @@ const TaxEngine = (() => {
     });
   }
 
+  // Pass 4: Back-derive acquisition prices from later disposals of the same asset.
+  // If token X was received with no price, but is later sold for a known SEK amount,
+  // we infer the acquisition cost from the nearest-in-time disposal price.
+  // Eliminates most "missing acquisition price" K4 blockers without extra API calls.
+  function backDeriveFromDisposals(txns) {
+    // Build map: symbol → list of { date, price } from priced disposals
+    const disposalPrices = new Map(); // symbol → [{date, price}]
+    for (const t of txns) {
+      if (![CAT.SELL, CAT.TRADE].includes(t.category)) continue;
+      if (!t.priceSEKPerUnit || t.priceSEKPerUnit <= 0) continue;
+      const sym = (t.assetSymbol || '').toUpperCase();
+      if (!disposalPrices.has(sym)) disposalPrices.set(sym, []);
+      disposalPrices.get(sym).push({ date: t.date || '', price: t.priceSEKPerUnit });
+    }
+    // Sort each list chronologically for proximity lookup
+    for (const list of disposalPrices.values()) {
+      list.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    }
+
+    function nearestDisposalPrice(sym, date) {
+      const list = disposalPrices.get(sym);
+      if (!list || !list.length) return null;
+      let bestPrice = null, bestDiffMs = Infinity;
+      const ts = date ? new Date(date).getTime() : 0;
+      for (const { date: d, price } of list) {
+        const diff = Math.abs(new Date(d).getTime() - ts);
+        if (diff < bestDiffMs) { bestDiffMs = diff; bestPrice = price; }
+      }
+      return bestPrice;
+    }
+
+    return txns.map(t => {
+      // Only fill completely unpriced acquisition transactions
+      if (t.priceSEKPerUnit > 0) return t;
+      if (t.isInternalTransfer) return t;
+      if (![CAT.BUY, CAT.RECEIVE, CAT.INCOME].includes(t.category)) return t;
+      const sym = (t.assetSymbol || '').toUpperCase();
+      const amt = t.amount || 0;
+      if (!amt) return t;
+      const price = nearestDisposalPrice(sym, t.date);
+      if (!price || price <= 0) return t;
+      return {
+        ...t,
+        priceSEKPerUnit: price,
+        costBasisSEK:    price * amt,
+        priceSource:     'back_derived',
+        priceDerivedFromDisposal: true,
+        needsReview: false, reviewReason: null,
+      };
+    });
+  }
+
   // Fetch all missing SEK prices — batched by (coin × year) for minimal requests
   async function fetchAllSEKPrices(txns, onProgress) {
     const cache = getPriceCache();
@@ -577,7 +631,7 @@ const TaxEngine = (() => {
 
     if (totalSteps === 0) {
       if (onProgress) onProgress({ step:'price', pct:100, msg:'Prices up to date' });
-      return stampPrices(txns, cache);
+      return backDeriveFromDisposals(stampPrices(txns, cache));
     }
 
     let stepsDone = 0;
@@ -618,7 +672,7 @@ const TaxEngine = (() => {
     }
 
     savePriceCache(updatedCache);
-    return stampPrices(txns, updatedCache);
+    return backDeriveFromDisposals(stampPrices(txns, updatedCache));
   }
 
   // ════════════════════════════════════════════════════════════

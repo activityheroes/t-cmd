@@ -3223,3 +3223,32 @@
   background: rgba(99,102,241,.08);
 }
 
+
+/* ============================================================
+   SOLANA REPROCESS WARNING BANNER
+   ============================================================ */
+
+.tax-warn-banner {
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid;
+}
+
+.tax-warn-banner--info {
+  background: rgba(153, 69, 255, 0.07);
+  border-color: rgba(153, 69, 255, 0.25);
+  color: #e2e8f0;
+}
+
+.tax-warn-banner--warning {
+  background: rgba(251, 191, 36, 0.07);
+  border-color: rgba(251, 191, 36, 0.25);
+  color: #e2e8f0;
+}
+
+.tax-warn-banner--error {
+  background: rgba(239, 68, 68, 0.07);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #e2e8f0;
+}
+

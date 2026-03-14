@@ -1472,7 +1472,8 @@ const TaxUI = (() => {
             <h2>K4 Sektion D — Kryptovalutor</h2>
             ${k4.formsNeeded>1?`<span class="tax-badge" style="background:rgba(99,102,241,.15);color:#818cf8">${k4.formsNeeded} blanketter</span>`:''}
             <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
-              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4PDF()" title="${hasProfile ? 'Ladda ner K4 som PDF' : 'Fyll i namn och personnummer ovan först'}">⬇ K4 PDF</button>
+              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadK4PDF()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none" title="${hasProfile ? 'Ladda ner K4 som PDF' : 'Fyll i namn och personnummer ovan först'}">📄 K4 PDF (officiell)</button>
+              <button class="tax-btn tax-btn-sm tax-btn-primary" onclick="TaxUI.downloadAccountantReport()" style="background:linear-gradient(135deg,#0ea5e9,#0284c7);border:none" title="Detaljerad rapport med alla transaktioner och kostnadsbas">📊 Revisionsrapport PDF</button>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.downloadK4CSV()">⬇ K4 CSV (SKV 2104-D)</button>
               <button class="tax-btn tax-btn-sm tax-btn-secondary" onclick="TaxUI.downloadAuditCSV()">⬇ Transaktionslogg</button>
             </div>
@@ -1755,6 +1756,39 @@ const TaxUI = (() => {
     }
   }
 
+  async function downloadAccountantReport() {
+    const settings = TaxEngine.getSettings();
+    if (!settings.userName || !settings.personnummer) {
+      const pf = document.querySelector('.tax-profile-inline');
+      if (pf) { pf.classList.add('tax-profile-open', 'tax-profile-shake'); setTimeout(()=>pf.classList.remove('tax-profile-shake'),600); }
+      showTaxToast('⚠️', 'Profil saknas', 'Fyll i Namn och Personnummer för att generera revisionsrapport.', 'warning');
+      return;
+    }
+    if (typeof K4PdfFiller === 'undefined' || typeof K4PdfFiller.generateAccountantReport !== 'function') {
+      showTaxToast('❌', 'PDF-biblioteket saknas', 'Ladda om sidan och försök igen.', 'error');
+      return;
+    }
+    try {
+      showTaxToast('⏳', 'Genererar revisionsrapport…', '', 'info');
+      const result   = getOrComputeTaxResult();
+      const allTxns  = TaxEngine.getTransactions ? TaxEngine.getTransactions() : [];
+      const userInfo = { name: settings.userName, pnr: settings.personnummer, year: S.taxYear };
+      const buf      = await K4PdfFiller.generateAccountantReport(result, userInfo, allTxns);
+      const blob     = new Blob([buf], { type: 'application/pdf' });
+      const url      = URL.createObjectURL(blob);
+      const a        = document.createElement('a');
+      const pnrSafe  = settings.personnummer.replace(/[^0-9]/g, '');
+      a.href     = url;
+      a.download = `K4_revisionsrapport_${S.taxYear}_${pnrSafe}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showTaxToast('✅', 'Revisionsrapport nedladdad', `K4_revisionsrapport_${S.taxYear}_${pnrSafe}.pdf`);
+    } catch (e) {
+      console.error('[AccountantReport]', e);
+      showTaxToast('❌', 'Kunde inte generera revisionsrapport', e.message, 'error');
+    }
+  }
+
   function saveProfile() {
     const name = document.getElementById('tax-pf-name')?.value?.trim() || '';
     const pnr  = document.getElementById('tax-pf-pnr')?.value?.trim()  || '';
@@ -1960,7 +1994,7 @@ const TaxUI = (() => {
     openCal, closeCal, calNav, selectDate,
     editTx, closeEdit, saveEdit, deleteTx,
     markReviewed, markAllReviewed, removeAccount,
-    downloadK4CSV, downloadAuditCSV, downloadK4PDF, printReport,
+    downloadK4CSV, downloadAuditCSV, downloadK4PDF, downloadAccountantReport, printReport,
     saveProfile, resyncAccount, manualCloudSync,
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances,

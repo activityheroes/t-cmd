@@ -592,6 +592,43 @@ const TaxEngine = (() => {
     });
   }
 
+  // Pass 2.5: Propagate derived prices to same-symbol same-day transactions.
+  // After the initial price stamping, some tokens gain swap-implied or back-derived
+  // prices. This pass spreads those prices to any remaining unpriced transactions
+  // for the same symbol on the exact same calendar day.
+  function propagateSameDayPrices(txns) {
+    // Build best-price-per-day map (prefer stable/market over inferred)
+    const SOURCE_PRIORITY = {
+      'trade_exact': 5, 'stable_historical_fx': 4, 'stable_approx': 4,
+      'market_api_coingecko': 3, 'coincap': 3, 'market_api_dex': 3,
+      'swap_implied': 2, 'pair_derived': 2, 'back_derived': 1,
+    };
+    const dayMap = new Map(); // "SYM|YYYY-MM-DD" → { price, source, priority }
+    for (const t of txns) {
+      if (!t.priceSEKPerUnit || t.priceSEKPerUnit <= 0 || !t.priceSource) continue;
+      const key = `${(t.assetSymbol||'').toUpperCase()}|${(t.date||'').slice(0,10)}`;
+      const pri = SOURCE_PRIORITY[t.priceSource] ?? 0;
+      const cur = dayMap.get(key);
+      if (!cur || pri > cur.priority) dayMap.set(key, { price: t.priceSEKPerUnit, source: t.priceSource, priority: pri });
+    }
+    return txns.map(t => {
+      if (t.priceSEKPerUnit > 0) return t;
+      if (t.isInternalTransfer) return t;
+      if (!isTaxableCategory(t.category)) return t;
+      const key   = `${(t.assetSymbol||'').toUpperCase()}|${(t.date||'').slice(0,10)}`;
+      const entry = dayMap.get(key);
+      if (!entry || entry.price <= 0) return t;
+      const amt = t.amount || 0;
+      if (!amt) return t;
+      return {
+        ...t,
+        priceSEKPerUnit: entry.price, costBasisSEK: entry.price * amt,
+        priceSource: entry.source, pricePropagatedSameDay: true,
+        needsReview: false, reviewReason: null,
+      };
+    });
+  }
+
   // Fetch all missing SEK prices — batched by (coin × year) for minimal requests
   async function fetchAllSEKPrices(txns, onProgress) {
     const cache = getPriceCache();
@@ -631,7 +668,7 @@ const TaxEngine = (() => {
 
     if (totalSteps === 0) {
       if (onProgress) onProgress({ step:'price', pct:100, msg:'Prices up to date' });
-      return backDeriveFromDisposals(stampPrices(txns, cache));
+      return propagateSameDayPrices(backDeriveFromDisposals(stampPrices(txns, cache)));
     }
 
     let stepsDone = 0;
@@ -672,7 +709,7 @@ const TaxEngine = (() => {
     }
 
     savePriceCache(updatedCache);
-    return backDeriveFromDisposals(stampPrices(txns, updatedCache));
+    return propagateSameDayPrices(backDeriveFromDisposals(stampPrices(txns, updatedCache)));
   }
 
   // ════════════════════════════════════════════════════════════

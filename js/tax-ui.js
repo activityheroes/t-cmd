@@ -18,6 +18,9 @@ const TaxUI = (() => {
     importModal: null,
     importNetwork: null,  // selected network when multi-network wallet is chosen
     addAccountModal: false, // Koinly-style "add account" search modal
+    walletModalTab: 'auto',      // 'auto' | 'empty'
+    walletImportFrom: 'beginning', // 'beginning' | 'date'
+    walletImportDate: '',          // ISO date string e.g. '2024-01-01'
     editTxId: null,
     calOpen: false,
     calField: null,
@@ -241,36 +244,33 @@ const TaxUI = (() => {
 
     return `
       <div class="tax-page tax-page--portfolio">
-        <div class="tax-page-header">
-          <h1 class="tax-page-title">Portfolio</h1>
-          <span class="tax-page-subtitle">Inkomstår ${S.taxYear}</span>
-          <div class="tax-page-actions">
-            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Recalculate</button>
-          </div>
-        </div>
 
+        <!-- ── Review banner ──────────────────────────────── -->
         ${issues > 0 ? `
         <div class="tax-review-banner" onclick="TaxUI.navigate('review')">
           <span>⚠️</span>
-          <span><strong>${issues} transactions</strong> need review — tax result may be incomplete</span>
-          <span class="tax-rb-link">Fix now →</span>
+          <span><strong>${issues} transaktioner</strong> behöver granskning — skatteberäkningen kan vara ofullständig</span>
+          <span class="tax-rb-link">Åtgärda →</span>
         </div>` : ''}
 
-        <!-- ── TOP ROW: chart + summary panel ─────────────── -->
+        <!-- ── HERO: balance + chart ───────────────────────── -->
         <div class="tax-port-top">
-          <!-- Left: value headline + chart canvas + time range -->
+
+          <!-- Left: hero balance + chart -->
           <div class="tax-port-chart-card">
-            <div class="tax-port-value-header">
-              <div>
-                <div class="tax-port-val-label">Total value</div>
-                <div class="tax-port-val-number" id="tax-port-total-val">
-                  ${totalVal !== null ? TaxEngine.formatSEK(totalVal) : '<span class="tax-port-loading-val">Loading…</span>'}
-                </div>
+            <div class="tax-port-hero">
+              <div class="tax-port-hero-label">Total balans</div>
+              <div class="tax-port-hero-val" id="tax-port-total-val">
+                ${totalVal !== null ? TaxEngine.formatSEK(totalVal) : '<span class="tax-port-loading-val">Hämtar…</span>'}
               </div>
+              ${totalReturn !== null ? `
+              <div class="tax-port-hero-sub ${totalReturn >= 0 ? 'tax-port-pos' : 'tax-port-neg'}">
+                ${totalReturn >= 0 ? '▲' : '▼'} ${TaxEngine.formatSEK(Math.abs(totalReturn))} total avkastning
+              </div>` : ''}
             </div>
             <div class="tax-port-chart-wrap">
               <canvas id="tax-port-chart" height="180"></canvas>
-              <div class="tax-port-chart-overlay" id="tax-port-overlay" style="display:none">Loading chart…</div>
+              <div class="tax-port-chart-overlay" id="tax-port-overlay" style="display:none">Laddar diagram…</div>
             </div>
             <div class="tax-port-time-row">
               ${['1D', '1W', '1M', '1Y', 'YTD', 'All'].map(r => `
@@ -278,63 +278,68 @@ const TaxUI = (() => {
                   onclick="TaxUI.portSetRange('${r}')">${r}</button>`).join('')}
               <span style="flex:1"></span>
               <span class="tax-port-legend-dot" style="background:#6366f1"></span>
-              <span class="tax-port-legend-lbl">Total value</span>
+              <span class="tax-port-legend-lbl">Marknadsvärde</span>
               <span class="tax-port-legend-dot" style="background:rgba(148,163,184,0.4)"></span>
-              <span class="tax-port-legend-lbl">Net cost basis</span>
+              <span class="tax-port-legend-lbl">Investerat</span>
             </div>
           </div>
 
-          <!-- Right: summary panel -->
+          <!-- Right: performance summary -->
           <div class="tax-port-summary-panel">
-            <div class="tax-port-sum-title">Performance <span class="tax-port-auto-tag">🔄 Auto</span></div>
+            <div class="tax-port-sum-title">Prestanda <span class="tax-port-auto-tag">🔄 Live</span></div>
+
             <div class="tax-port-sum-row">
               <span class="tax-port-sum-lbl">24h P&amp;L</span>
               <span class="tax-port-sum-val" id="tax-ps-24h"><span class="tax-port-loading-val">—</span></span>
             </div>
             <div class="tax-port-sum-div"></div>
             <div class="tax-port-sum-row">
-              <span class="tax-port-sum-lbl">Total return</span>
-              <span class="tax-port-sum-val" id="tax-ps-return">${fmtVal(totalReturn)}</span>
+              <span class="tax-port-sum-lbl">Orealiserad vinst</span>
+              <span class="tax-port-sum-val ${unrealized !== null ? (unrealized >= 0 ? 'tax-port-pos' : 'tax-port-neg') : ''}"
+                id="tax-ps-unrealized">${fmtVal(unrealized)}</span>
             </div>
             <div class="tax-port-sum-div"></div>
             <div class="tax-port-sum-row">
-              <span class="tax-port-sum-lbl">Unrealized gains</span>
-              <span class="tax-port-sum-val ${unrealized !== null ? (unrealized >= 0 ? 'tax-port-pos' : 'tax-port-neg') : ''}" id="tax-ps-unrealized">${fmtVal(unrealized)}</span>
-            </div>
-            <div class="tax-port-sum-div"></div>
-            <div class="tax-port-sum-row">
-              <span class="tax-port-sum-lbl">Fiat invested</span>
+              <span class="tax-port-sum-lbl">Investerat kapital</span>
               <span class="tax-port-sum-val" id="tax-ps-fiatin">${fmtVal(fiatIn)}</span>
             </div>
             <div class="tax-port-sum-div"></div>
             <div class="tax-port-sum-row">
-              <span class="tax-port-sum-lbl">Fiat proceeds</span>
+              <span class="tax-port-sum-lbl">Realiserade intäkter</span>
               <span class="tax-port-sum-val" id="tax-ps-fiatout">${fmtVal(fiatOut)}</span>
             </div>
             <div class="tax-port-sum-div"></div>
             <div class="tax-port-sum-row">
-              <span class="tax-port-sum-lbl">Fees paid</span>
+              <span class="tax-port-sum-lbl">Avgifter betalda</span>
               <span class="tax-port-sum-val" id="tax-ps-fees">${fmtVal(fees)}</span>
             </div>
+
+            <!-- Quick tax stat -->
+            <div class="tax-port-sum-div" style="margin-top:auto"></div>
+            <div class="tax-port-tax-pill">
+              <span class="tax-port-tax-pill-lbl">Skatt ${S.taxYear} (est. 30%)</span>
+              <span class="tax-port-tax-pill-val tax-red">${TaxEngine.formatSEK(summary.estimatedTax)}</span>
+            </div>
           </div>
+
         </div>
 
         <!-- ── STAT CARDS ──────────────────────────────────── -->
         <div class="tax-stat-grid">
           <div class="tax-stat-card">
-            <div class="tax-stat-label">Holdings</div>
-            <div class="tax-stat-value">${currentHoldings.length} assets</div>
+            <div class="tax-stat-label">Tillgångar</div>
+            <div class="tax-stat-value">${currentHoldings.length} st</div>
           </div>
           <div class="tax-stat-card ${summary.netGainLoss >= 0 ? 'gain' : 'loss'}">
-            <div class="tax-stat-label">Net Gain/Loss ${S.taxYear}</div>
+            <div class="tax-stat-label">Nettovinst/-förlust ${S.taxYear}</div>
             <div class="tax-stat-value">${TaxEngine.formatSEK(summary.netGainLoss)}</div>
           </div>
           <div class="tax-stat-card">
-            <div class="tax-stat-label">Estimated tax (30%)</div>
-            <div class="tax-stat-value tax-red">${TaxEngine.formatSEK(summary.estimatedTax)}</div>
+            <div class="tax-stat-label">Realiserad vinst ${S.taxYear}</div>
+            <div class="tax-stat-value ${summary.totalGains >= 0 ? 'tax-port-pos' : ''}">${TaxEngine.formatSEK(summary.totalGains || 0)}</div>
           </div>
           <div class="tax-stat-card">
-            <div class="tax-stat-label">Transactions ${S.taxYear}</div>
+            <div class="tax-stat-label">Transaktioner ${S.taxYear}</div>
             <div class="tax-stat-value">${summary.totalTransactions.toLocaleString()}</div>
           </div>
         </div>
@@ -342,12 +347,12 @@ const TaxUI = (() => {
         <!-- ── CHARTS ROW: donut + winners/losers ─────────── -->
         <div class="tax-port-mid">
           <div class="tax-chart-card">
-            <div class="tax-chart-card-title">Asset allocation</div>
+            <div class="tax-chart-card-title">Tillgångsfördelning</div>
             <div class="tax-alloc-inner">
               <div class="tax-alloc-donut-wrap">
                 <canvas id="tax-alloc-chart"></canvas>
                 <div class="tax-alloc-center" id="tax-alloc-center">
-                  <div class="tax-alloc-center-lbl">All assets</div>
+                  <div class="tax-alloc-center-lbl">Alla</div>
                   <div class="tax-alloc-center-val" id="tax-alloc-total">
                     ${totalVal !== null ? TaxEngine.formatSEK(totalVal) : TaxEngine.formatSEK(currentHoldings.reduce((s, h) => s + h.totalCostSEK, 0))}
                   </div>
@@ -370,7 +375,7 @@ const TaxUI = (() => {
     }).join('')}
                 ${sortedHoldings.length > 8 ? `<div class="tax-alloc-row tax-alloc-other">
                   <span class="tax-asset-icon" style="font-size:9px">…</span>
-                  <span class="tax-alloc-sym">Other</span>
+                  <span class="tax-alloc-sym">Övriga</span>
                   <span class="tax-alloc-pct">&lt;1%</span>
                   <span class="tax-alloc-val">${TaxEngine.formatSEK(sortedHoldings.slice(8).reduce((s, h) => s + (h.currentValueSEK ?? h.totalCostSEK), 0))}</span>
                 </div>` : ''}
@@ -378,15 +383,15 @@ const TaxUI = (() => {
             </div>
           </div>
           <div class="tax-chart-card">
-            <div class="tax-chart-card-title" id="tax-perf-title">Winners and losers</div>
+            <div class="tax-chart-card-title" id="tax-perf-title">Vinnare och förlorare</div>
             <div class="tax-perf-wrap">
               <canvas id="tax-perf-chart"></canvas>
               <p id="tax-perf-loading" class="tax-port-loading-val"
-                 style="padding:12px 0;font-size:12px;${snap ? 'display:none' : ''}">Loading prices…</p>
+                 style="padding:12px 0;font-size:12px;${snap ? 'display:none' : ''}">Hämtar priser…</p>
             </div>
             <div id="tax-perf-note" class="tax-port-accuracy-note"
                  style="${snap && !tableHoldings.some(h => h.unrealizedPct === null) ? 'display:none' : ''}">
-              ⓘ Improve accuracy by categorizing transactions
+              ⓘ Förbättra noggrannheten genom att kategorisera transaktioner
             </div>
           </div>
         </div>
@@ -394,27 +399,30 @@ const TaxUI = (() => {
         <!-- ── ASSETS TABLE ────────────────────────────────── -->
         <div class="tax-section">
           <div class="tax-section-header">
-            <h2>Assets</h2>
-            <input class="tax-search-input" id="tax-asset-search" placeholder="Find asset"
-              oninput="TaxUI.filterAssets(this.value)">
+            <h2>Mina tillgångar</h2>
+            <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
+              <input class="tax-search-input" id="tax-asset-search" placeholder="Sök tillgång…"
+                oninput="TaxUI.filterAssets(this.value)">
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()" title="Beräkna om">⚙</button>
+            </div>
           </div>
           ${sortedHoldings.length === 0
-        ? renderEmpty('No holdings found', 'Import transactions to see your portfolio.', '💼')
+        ? renderEmpty('Inga tillgångar', 'Importera transaktioner för att se din portfölj.', '💼')
         : `<div class="tax-table-wrap"><table class="tax-table">
                 <thead><tr>
-                  <th>Asset</th>
-                  <th class="ta-r">Price</th>
-                  <th class="ta-r">Cost</th>
-                  <th class="ta-r">Holdings</th>
-                  <th class="ta-r">Profit / Loss</th>
-                  <th class="ta-r">24h Change</th>
+                  <th>Tillgång</th>
+                  <th class="ta-r">Aktuellt pris</th>
+                  <th class="ta-r">Kostnadsbas</th>
+                  <th class="ta-r">Innehav</th>
+                  <th class="ta-r">Vinst / Förlust</th>
+                  <th class="ta-r">24h</th>
                 </tr></thead>
                 <tbody id="tax-assets-tbody">
                   ${sortedHoldings.map(renderAssetRow).join('')}
                 </tbody>
               </table></div>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" style="margin-top:10px"
-                onclick="TaxUI.toggleSmallBalances()">Show tokens with small balances ▾</button>`
+                onclick="TaxUI.toggleSmallBalances()">Visa tokens med litet saldo ▾</button>`
       }
         </div>
       </div>
@@ -1206,57 +1214,123 @@ const TaxUI = (() => {
   };
 
   function renderWalletModal(type, chain, net) {
-    const src = ACC_SOURCES.find(s => s.type === type) || {};
-    const netLabel = net ? net.label : (chain === 'sol' ? 'Solana' : 'Ethereum');
-    const netIcon  = net ? net.icon  : (chain === 'sol' ? '◎' : 'Ξ');
-    const addrPlaceholder = chain === 'sol' ? 'Solana public key (base58)' :
-      chain === 'sui' ? 'Sui address (0x…)' : '0x… Ethereum address';
+    const src       = ACC_SOURCES.find(s => s.type === type) || {};
+    const netLabel  = net ? net.label : (chain === 'sol' ? 'Solana' : 'Ethereum');
+    const netIcon   = net ? net.icon  : (chain === 'sol' ? '◎' : 'Ξ');
+    const addrPlh   = chain === 'sol' ? 'Solana-adress (base58…)' :
+                      chain === 'sui' ? 'Sui-adress (0x…)' : '0x… Ethereum-adress';
+    const isSui     = chain === 'sui';
+    const chainId   = net?.chainId || null;
+    const tab       = S.walletModalTab || 'auto';
+    const fromMode  = S.walletImportFrom || 'beginning';
+    const today     = new Date().toISOString().slice(0, 10);
 
-    const isSui = chain === 'sui';
-    const chainId = net?.chainId || null;
+    // Build warning banners
+    let warnings = '';
+    if (chain === 'sol' && !localStorage.getItem('tcmd_helius_key')) {
+      warnings += `<div class="tax-warn-box">⚠️ Ingen Helius API-nyckel. Lägg till i Admin → API-nycklar för Solana-import.</div>`;
+    } else if (chain === 'eth' && !localStorage.getItem('tcmd_etherscan_key') && !window.TCMD_KEYS?.etherscan) {
+      warnings += `<div class="tax-warn-box" style="flex-direction:column;gap:4px">
+        <div><strong>⚠️ Etherscan API-nyckel krävs för EVM-import.</strong></div>
+        <div style="color:#fde68a;font-weight:400">${typeof AuthManager !== 'undefined' && AuthManager.isAdmin()
+          ? 'Gå till <strong>Admin → API-nycklar → Etherscan</strong> för att lägga till din nyckel.'
+          : 'Kontakta din administratör för att konfigurera Etherscan API-nyckeln.'
+        }</div></div>`;
+    }
+    if (isSui) warnings += `<div class="tax-warn-box">⚠️ Sui-import kommer snart.</div>`;
 
     return `<div class="tax-modal-overlay" onclick="if(event.target===this)TaxUI.closeImport()">
       <div class="tax-modal">
+
+        <!-- ── Header ────────────────────────────────────── -->
         <div class="tax-modal-header">
           <div style="display:flex;align-items:center;gap:8px">
-            ${src.networks?.length > 1 ? `<button class="tax-modal-back" onclick="TaxUI.selectNetwork(null)" title="Back">←</button>` : ''}
-            <span>${src.icon} ${src.name} <span class="acc-net-badge">${netIcon} ${netLabel}</span></span>
+            ${src.networks?.length > 1 ? `<button class="tax-modal-back" onclick="TaxUI.selectNetwork(null)" title="Tillbaka">←</button>` : ''}
+            <span style="font-size:18px">${src.icon}</span>
+            <span>${src.name}${net ? `<span class="acc-net-badge" style="margin-left:6px">${netIcon} ${netLabel}</span>` : ''}</span>
           </div>
           <button class="tax-modal-close" onclick="TaxUI.closeImport()">✕</button>
         </div>
+
+        <!-- ── Tabs ───────────────────────────────────────── -->
+        <div class="tax-wallet-tabs">
+          <button class="tax-wallet-tab ${tab === 'auto' ? 'active' : ''}"
+            onclick="TaxUI.setWalletTab('auto')">☁ Automatisk import</button>
+          <button class="tax-wallet-tab ${tab === 'empty' ? 'active' : ''}"
+            onclick="TaxUI.setWalletTab('empty')">📋 Tom plånbok</button>
+        </div>
+
+        <!-- ── Body ──────────────────────────────────────── -->
         <div class="tax-modal-body">
-          <div class="tax-info-box" style="margin-bottom:14px">
-            <span>🔒</span>
-            <span>Read-only — private keys are <strong>never</strong> accessed. Only the public address is used.</span>
-          </div>
-          <div class="tax-form-group">
-            <label>Public Wallet Address</label>
-            <input type="text" id="tax-wallet-addr" class="tax-input" placeholder="${addrPlaceholder}">
-          </div>
-          <div class="tax-form-group">
-            <label>Label <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
-            <input type="text" id="tax-wallet-label" class="tax-input" placeholder="e.g. My ${netLabel} wallet">
-          </div>
-          ${chain === 'sol' && !localStorage.getItem('tcmd_helius_key') ? `
-          <div class="tax-warn-box">⚠️ No Helius API key. Add it in Admin → API Keys to enable Solana import.</div>` : ''}
-          ${chain === 'eth' && !localStorage.getItem('tcmd_etherscan_key') && !window.TCMD_KEYS?.etherscan ? `
-          <div class="tax-warn-box" style="flex-direction:column;gap:4px">
-            <div><strong>⚠️ Etherscan API key required for EVM wallet import.</strong></div>
-            <div style="color:#fde68a;font-weight:400">${typeof AuthManager !== 'undefined' && AuthManager.isAdmin()
-              ? `Go to <strong>Admin → API Keys → 🦊 Etherscan</strong> to add your key.`
-              : 'Contact your administrator to configure the Etherscan API key.'
-            }</div>
-          </div>` : ''}
-          ${isSui ? `<div class="tax-warn-box">⚠️ Sui import coming soon — history will be fetched via Sui indexer.</div>` : ''}
-          <div id="tax-import-status"></div>
+          ${tab === 'auto' ? `
+            <div class="tax-form-group">
+              <label>Plånboksadress <span class="tax-label-required">*</span></label>
+              <input type="text" id="tax-wallet-addr" class="tax-input"
+                placeholder="${addrPlh}" autocomplete="off" spellcheck="false">
+            </div>
+
+            <div class="tax-form-group">
+              <label>Importera transaktioner</label>
+              <div class="tax-import-from-row">
+                <button class="tax-import-from-btn ${fromMode === 'beginning' ? 'active' : ''}"
+                  onclick="TaxUI.setImportFrom('beginning')">
+                  <span class="tax-import-from-icon">${fromMode === 'beginning' ? '●' : '○'}</span>
+                  Från början
+                </button>
+                <button class="tax-import-from-btn ${fromMode === 'date' ? 'active' : ''}"
+                  onclick="TaxUI.setImportFrom('date')">
+                  <span class="tax-import-from-icon">${fromMode === 'date' ? '●' : '○'}</span>
+                  Från datum
+                </button>
+              </div>
+              ${fromMode === 'date' ? `
+              <input type="date" id="tax-wallet-since" class="tax-input" style="margin-top:8px"
+                value="${S.walletImportDate || ''}" max="${today}"
+                onchange="TaxUI.setWalletImportDate(this.value)">` : ''}
+            </div>
+
+            <div class="tax-form-group">
+              <label>Plånboksnamn <span style="font-weight:400;color:var(--text-muted);text-transform:none">(valfritt)</span></label>
+              <input type="text" id="tax-wallet-label" class="tax-input"
+                placeholder="Min ${netLabel}-plånbok">
+            </div>
+
+            ${warnings}
+
+            <div class="tax-info-box" style="margin-top:4px;margin-bottom:0">
+              <span>🔒</span>
+              <span>Skrivskyddad — privata nycklar används <strong>aldrig</strong>. Bara den offentliga adressen används.</span>
+            </div>
+            <div id="tax-import-status" style="margin-top:12px"></div>
+
+          ` : `
+            <p class="tax-modal-desc" style="margin-bottom:20px">
+              Skapa en tom plånbok och lägg till transaktioner manuellt. Inga transaktioner importeras automatiskt.
+            </p>
+            <div class="tax-form-group">
+              <label>Plånboksnamn <span class="tax-label-required">*</span></label>
+              <input type="text" id="tax-wallet-label-empty" class="tax-input"
+                placeholder="Min ${netLabel}-plånbok" autocomplete="off">
+            </div>
+            <div id="tax-import-status" style="margin-top:12px"></div>
+          `}
         </div>
+
+        <!-- ── Footer ────────────────────────────────────── -->
         <div class="tax-modal-footer">
-          <button class="tax-btn tax-btn-ghost" onclick="TaxUI.closeImport()">Cancel</button>
-          <button class="tax-btn tax-btn-primary" onclick="TaxUI.importWallet('${chain}',${chainId ? `'${chainId}'` : 'null'})"
-            ${isSui ? 'disabled title="Sui import coming soon"' : ''}>
-            Import Full History
-          </button>
+          <button class="tax-btn tax-btn-ghost" onclick="TaxUI.closeImport()">Avbryt</button>
+          ${tab === 'auto'
+            ? `<button class="tax-btn tax-btn-primary"
+                onclick="TaxUI.importWallet('${chain}',${chainId ? `'${chainId}'` : 'null'})"
+                ${isSui ? 'disabled title="Sui-import kommer snart"' : ''}>
+                Importera historik
+               </button>`
+            : `<button class="tax-btn tax-btn-primary"
+                onclick="TaxUI.createEmptyWallet('${chain}',${chainId ? `'${chainId}'` : 'null'})">
+                Skapa plånbok
+               </button>`}
         </div>
+
       </div></div>`;
   }
 
@@ -1980,9 +2054,31 @@ const TaxUI = (() => {
   }
   function accFilter(f) { _accFilter = f; render(); }
 
-  function openImport(type) { S.importModal = type; S.importNetwork = null; render(); }
+  function openImport(type) {
+    S.importModal = type; S.importNetwork = null;
+    S.walletModalTab = 'auto'; S.walletImportFrom = 'beginning'; S.walletImportDate = '';
+    render();
+  }
   function selectNetwork(netId) { S.importNetwork = netId; render(); }
   function closeImport() { S.importModal = null; S.importNetwork = null; _pendingCSVText = null; render(); }
+
+  // Wallet modal tab & import-date helpers
+  function setWalletTab(tab) { S.walletModalTab = tab; render(); }
+  function setImportFrom(mode) { S.walletImportFrom = mode; render(); }
+  function setWalletImportDate(date) { S.walletImportDate = date; }
+
+  function createEmptyWallet(chain, chainId) {
+    const label = document.getElementById('tax-wallet-label-empty')?.value?.trim();
+    if (!label) { showTaxToast('⚠️', 'Ange ett plånboksnamn'); return; }
+    const src = ACC_SOURCES.find(s => s.type === S.importModal);
+    const net = src?.networks?.find(n => n.id === S.importNetwork) || src?.networks?.[0];
+    const accType = chain === 'sol' ? (S.importModal || 'phantom')
+      : chain === 'sui' ? 'sui'
+      : (S.importModal === 'phantom' ? 'phantom_eth' : (S.importModal || 'metamask'));
+    TaxEngine.addAccount({ type: accType, label, address: '', network: net?.id || chain });
+    closeImport();
+    showTaxToast('✅', 'Tom plånbok skapad', label);
+  }
 
   function setFilter(key, val) { S.txFilter[key] = val; S.txPage = 0; reRenderMain(); }
   function sortTxns(field) {
@@ -2446,10 +2542,22 @@ const TaxUI = (() => {
       return;
     }
 
-    const added = TaxEngine.addTransactions(res.txns || []);
+    // Apply since-date filter if user requested partial import
+    let importedTxns = res.txns || [];
+    if (S.walletImportFrom === 'date' && S.walletImportDate) {
+      const cutoffMs = new Date(S.walletImportDate).getTime();
+      importedTxns = importedTxns.filter(t => {
+        const d = t.date || t.timestamp || '';
+        return d ? new Date(d).getTime() >= cutoffMs : true;
+      });
+    }
+
+    const added = TaxEngine.addTransactions(importedTxns);
     // Update lastSyncAt
     TaxEngine.updateAccount?.(acc.id, { lastSyncAt: new Date().toISOString() });
-    S.importModal = null; S.importNetwork = null; S.taxResult = null; S.page = 'transactions';
+    S.importModal = null; S.importNetwork = null;
+    S.walletImportFrom = 'beginning'; S.walletImportDate = '';
+    S.taxResult = null; S.page = 'transactions';
     render();
     showTaxToast('✅', `Imported ${added} transactions`, `Total fetched: ${res.totalFetched || 0}`);
     setTimeout(triggerPipeline, 500);
@@ -2752,6 +2860,7 @@ const TaxUI = (() => {
     init, render, navigate, triggerPipeline,
     openAddAccountModal, closeAddAccountModal, accSearch, accFilter,
     openImport, selectNetwork, closeImport,
+    setWalletTab, setImportFrom, setWalletImportDate, createEmptyWallet,
     importWallet, importCSV, onCSVSelected,
     setFilter, sortTxns, setPage,
     openCal, closeCal, calNav, selectDate,

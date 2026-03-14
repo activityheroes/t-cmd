@@ -1955,6 +1955,26 @@ const TaxEngine = (() => {
       txns = deduplicateTransactions(txns);
       await tick();
 
+      // ── Step 4b: Solana swap post-processing ──────────────
+      // For wallets imported with the old normalizeSolanaTx (which split
+      // SOL↔token swaps into separate transfer_in/transfer_out rows),
+      // merge those pairs now so cost-basis flows correctly.
+      // This is a one-time migration — new imports already produce TRADE rows.
+      emit('classify', 33, 'Reconstructing Solana swaps…');
+      const solanaResult = reprocessSolanaSwaps();
+      if (solanaResult.merged > 0) {
+        const toDeleteSet = new Set(solanaResult.toDelete);
+        txns = txns.filter(t => !toDeleteSet.has(t.id));
+        for (const newTx of solanaResult.toAdd) {
+          // Avoid re-adding if it was already fixed in a prior run
+          if (!txns.find(t => t.txHash === newTx.txHash && t.category === CAT.TRADE)) {
+            txns.push(newTx);
+          }
+        }
+        console.log(`[Pipeline] Solana: merged ${solanaResult.merged} split swap pairs into TRADE rows`);
+      }
+      await tick();
+
       // ── Step 5: Classify all transactions ─────────────────
       // Classification MUST run before transfer matching so the matcher can
       // filter by the correct economic categories (BRIDGE_IN/OUT, SEND/RECEIVE…).
@@ -3004,6 +3024,86 @@ const TaxEngine = (() => {
   }
 
   // ── Revolut CSV parser ─────────────────────────────────────
+  // ── Solscan CSV parser ────────────────────────────────────
+  // Solscan offers several CSV export formats depending on which tab
+  // is open. This parser handles the two most common:
+  //
+  // Format A — DeFi activity export (most useful for swap history):
+  //   "Time","Signature","Category","Action","Token","Amount","Usd","Status"
+  //
+  // Format B — Token transfer export:
+  //   "Block Time","Signature","From","To","Token","Amount","Status"
+  //
+  // Both formats produce TRADE transactions where an Action column
+  // says "swap" or "buy"/"sell". Transfers produce RECEIVE/SEND.
+  // Unknown rows are flagged needsReview for manual classification.
+  function parseSolscanCSV(text, accountId) {
+    const rows = parseCSV(text);
+    const out  = [];
+
+    for (const r of rows) {
+      // Status check (skip failed/pending if present)
+      const status = (r['Status'] || r['status'] || 'success').toUpperCase();
+      if (status === 'FAIL' || status === 'ERROR' || status === 'FAILED') continue;
+
+      const txHash = r['Signature'] || r['signature'] || r['TxHash'] || r['txhash'] || '';
+      // Date: Solscan uses "2024-01-15 14:30:22" or ISO formats
+      const rawDate = r['Time'] || r['Block Time'] || r['Timestamp'] || r['date'] || '';
+      const date    = parseDate(rawDate);
+      if (!date) continue;
+
+      const token   = (r['Token'] || r['Symbol'] || r['Asset'] || '').trim().toUpperCase();
+      const rawAmt  = parseFloat(r['Amount'] || r['amount'] || 0);
+      const amount  = Math.abs(rawAmt);
+      if (isNaN(amount) || amount === 0) continue;
+
+      // Normalise token symbol (handle Solscan's occasional full mint addresses)
+      const resolvedSym = looksLikeContractAddress(token)
+        ? (mintToSym(token) || token.slice(0, 8))
+        : normalizeAssetSymbol(token);
+
+      // Classify by Action / Category
+      const action   = (r['Action']   || r['action']   || '').toLowerCase();
+      const category = (r['Category'] || r['category'] || '').toLowerCase();
+
+      let txType = 'receive'; // default
+      let txNotes = `Solscan: ${r['Action'] || category || 'transfer'}`;
+
+      if (action.includes('swap') || action.includes('buy') || category.includes('swap')) {
+        // Swap row — we get the single leg; mark as trade needing review
+        txType = 'trade';
+        txNotes = `Solscan swap (one leg) — pair opposite side not in this row`;
+      } else if (action.includes('sell') && rawAmt < 0) {
+        txType = 'sell';
+      } else if (action.includes('sell') || rawAmt < 0) {
+        txType = 'send';
+      } else if (action.includes('receive') || action.includes('transfer in') || rawAmt > 0) {
+        txType = 'receive';
+      } else if (action.includes('send') || action.includes('transfer out')) {
+        txType = 'send';
+      } else if (action.includes('stake') || action.includes('deposit')) {
+        txType = 'transfer_out';
+      } else if (action.includes('unstake') || action.includes('withdraw')) {
+        txType = 'transfer_in';
+      }
+
+      out.push(normalizeTransaction({
+        txHash: txHash || ('solscan_' + date + '_' + resolvedSym),
+        date,
+        type: txType,
+        assetSymbol: resolvedSym,
+        amount,
+        contractAddress: looksLikeContractAddress(token) ? token : null,
+        feeSEK: 0,
+        needsReview: txType === 'trade',
+        reviewReason: txType === 'trade' ? 'solscan_swap_single_leg' : null,
+        notes: txNotes,
+      }, accountId, 'solscan_csv'));
+    }
+
+    return out;
+  }
+
   // Revolut exports a CSV with columns:
   // Type, Product, Started Date, Completed Date, Description,
   // Amount, Currency, Fiat amount, Fiat amount (inc. fees), Fee, Base currency, State, Balance
@@ -3128,58 +3228,299 @@ const TaxEngine = (() => {
     }
   }
 
+  // ════════════════════════════════════════════════════════════
+  // SOLANA SWAP RECONSTRUCTION
+  //
+  // Helius API returns raw Solana transactions with separate
+  // nativeTransfers (SOL) and tokenTransfers arrays. A Jupiter/
+  // Raydium/Orca swap may involve 5–20 token transfer legs from
+  // routing hops and liquidity pools — none of which are the
+  // user's wallet address. The key insight is to compute NET
+  // flows for the wallet and collapse everything into ONE trade.
+  //
+  // Root causes of "fake profits" in prior version:
+  //   1. SOL→Token buy: out=null (SOL in nativeTransfers, not
+  //      tokenTransfers), so swap detection fails → only a
+  //      transfer_out SOL is stored; token never enters inventory
+  //   2. Token→SOL sell: inc=null, same failure → only a
+  //      transfer_in SOL is stored; token disposal never fires
+  //   3. Result: every SOL→token→SOL round-trip generates a
+  //      phantom SOL "income" and the token gain/loss = 0 for the
+  //      token (since it has no history) while any later SOL sale
+  //      gets full proceeds treated as gain
+  // ════════════════════════════════════════════════════════════
+
+  // Rough SOL→SEK rate used only for transaction fee estimation at
+  // import time (the pricing pipeline will use real historical prices).
+  const SOL_FEE_PRICE_SEK = 2000; // ≈ $200 USD × 10 SEK/USD
+
   function normalizeSolanaTx(tx, walletAddr, accountId) {
     try {
-      const ts = new Date((tx.timestamp || 0) * 1000).toISOString();
-      const tt = tx.tokenTransfers || [];
-      const nt = tx.nativeTransfers || [];
+      const ts  = new Date((tx.timestamp || 0) * 1000).toISOString();
+      const tt  = tx.tokenTransfers  || [];
+      const nt  = tx.nativeTransfers || [];
       const fee = (tx.fee || 0) / 1e9; // lamports → SOL
+      const sig = tx.signature;
 
-      // Swap (SWAP type or has both in and out token transfers)
-      if (tx.type === 'SWAP' || (tt.length >= 2)) {
-        const out = tt.find(t => t.fromUserAccount === walletAddr);
-        const inc = tt.find(t => t.toUserAccount === walletAddr);
-        if (out && inc) {
-          return normalizeTransaction({
-            txHash: tx.signature, date: ts, type: 'swap',
-            assetSymbol: mintToSym(out.mint) || out.mint?.slice(0, 8),
-            amount: out.tokenAmount || 0,
-            inAsset: mintToSym(inc.mint) || inc.mint?.slice(0, 8),
-            inAmount: inc.tokenAmount || 0,
-            feeSEK: fee * 150, // approx SOL price * fee SOL
-            needsReview: true, notes: 'Solana swap',
-          }, accountId, 'solana_wallet');
-        }
+      // ── Step 1: Compute NET wallet-level flows ──────────────
+      // SOL: sum all in/out lamports for this wallet address
+      let netSolLamports = 0;
+      for (const n of nt) {
+        if (n.fromUserAccount === walletAddr) netSolLamports -= (n.amount || 0);
+        if (n.toUserAccount   === walletAddr) netSolLamports += (n.amount || 0);
+      }
+      const netSol = netSolLamports / 1e9; // positive = received, negative = sent
+
+      // Tokens: net per mint (cancels out routing hops that briefly
+      // touch the wallet then leave — e.g. Jupiter intermediate steps)
+      const tokenNet = {};
+      for (const t of tt) {
+        const mint = t.mint;
+        if (!mint) continue;
+        tokenNet[mint] = (tokenNet[mint] || 0);
+        if (t.fromUserAccount === walletAddr) tokenNet[mint] -= (t.tokenAmount || 0);
+        if (t.toUserAccount   === walletAddr) tokenNet[mint] += (t.tokenAmount || 0);
       }
 
-      // SOL transfer
-      if (nt.length > 0) {
-        const isOut = nt.some(n => n.fromUserAccount === walletAddr);
-        const amt = nt.reduce((s, n) => s + (n.amount || 0), 0) / 1e9;
+      // Separate into meaningful inflows/outflows (ignore dust < 1e-9)
+      const DUST = 1e-9;
+      const tokenIn  = Object.entries(tokenNet).filter(([, v]) => v >  DUST);
+      const tokenOut = Object.entries(tokenNet).filter(([, v]) => v < -DUST);
+
+      const hasSolIn  = netSol >  DUST;
+      const hasSolOut = netSol < -DUST;
+
+      // Helper: resolve mint → symbol
+      const sym = mint => mintToSym(mint) || mint?.slice(0, 8) || 'UNKNOWN';
+      // Helper: pick largest absolute flow from a list of [mint, amount] pairs
+      const biggest = list => list.reduce((a, b) => Math.abs(a[1]) >= Math.abs(b[1]) ? a : b);
+
+      const feeSEK = fee * SOL_FEE_PRICE_SEK;
+      const isExplicitSwap = tx.type === 'SWAP' || !!(tx.events?.swap);
+
+      // ── Step 2: Swap reconstruction ─────────────────────────
+      //
+      // Pattern A — SOL → Token  (memecoin buy — THE most common case)
+      //   nativeTransfers: SOL OUT from wallet
+      //   tokenTransfers:  Token IN to wallet
+      if (hasSolOut && tokenIn.length > 0 && tokenOut.length === 0) {
+        const [inMint, inAmt] = biggest(tokenIn);
+        const inSym = sym(inMint);
+        const solSpent = Math.abs(netSol); // does NOT include tx fee (that's separate)
         return normalizeTransaction({
-          txHash: tx.signature, date: ts,
-          type: isOut ? 'transfer_out' : 'transfer_in',
-          assetSymbol: 'SOL', amount: amt,
-          feeSEK: fee * 150, needsReview: true, notes: 'SOL transfer',
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: 'SOL',   amount: solSpent,
+          inAsset: inSym,       inAmount: Math.abs(inAmt),
+          feeSEK,               contractAddress: inMint,
+          needsReview: false,
+          notes: `DEX buy: ${solSpent.toFixed(6)} SOL → ${Math.abs(inAmt)} ${inSym}`,
+          solanaSwapType: 'sol_to_token',
         }, accountId, 'solana_wallet');
       }
 
-      // Token transfer
-      const inc = tt.find(t => t.toUserAccount === walletAddr);
-      const out = tt.find(t => t.fromUserAccount === walletAddr);
-      if (inc) return normalizeTransaction({
-        txHash: tx.signature, date: ts, type: 'transfer_in',
-        assetSymbol: mintToSym(inc.mint) || inc.mint?.slice(0, 8), amount: inc.tokenAmount || 0,
-        feeSEK: fee * 150, needsReview: true,
-      }, accountId, 'solana_wallet');
-      if (out) return normalizeTransaction({
-        txHash: tx.signature, date: ts, type: 'transfer_out',
-        assetSymbol: mintToSym(out.mint) || out.mint?.slice(0, 8), amount: out.tokenAmount || 0,
-        feeSEK: fee * 150, needsReview: true,
-      }, accountId, 'solana_wallet');
+      // Pattern B — Token → SOL  (memecoin sell — THE most common case)
+      //   tokenTransfers:  Token OUT from wallet
+      //   nativeTransfers: SOL IN to wallet
+      if (hasSolIn && tokenOut.length > 0 && tokenIn.length === 0) {
+        const [outMint, outAmt] = biggest(tokenOut);
+        const outSym = sym(outMint);
+        const solReceived = Math.abs(netSol);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: outSym,   amount: Math.abs(outAmt),
+          inAsset: 'SOL',        inAmount: solReceived,
+          feeSEK,                contractAddress: outMint,
+          needsReview: false,
+          notes: `DEX sell: ${Math.abs(outAmt)} ${outSym} → ${solReceived.toFixed(6)} SOL`,
+          solanaSwapType: 'token_to_sol',
+        }, accountId, 'solana_wallet');
+      }
 
-    } catch { return null; }
+      // Pattern C — Token → Token  (cross-token swap, e.g. Jupiter USDC→BONK)
+      //   Only token flows, no net SOL change (or minor SOL for fee only)
+      if (tokenOut.length > 0 && tokenIn.length > 0) {
+        const [outMint, outAmt] = biggest(tokenOut);
+        const [inMint, inAmt]   = biggest(tokenIn);
+        const outSym = sym(outMint);
+        const inSym  = sym(inMint);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: outSym,  amount: Math.abs(outAmt),
+          inAsset: inSym,       inAmount: Math.abs(inAmt),
+          feeSEK,               contractAddress: outMint,
+          needsReview: false,
+          notes: `DEX swap: ${outSym} → ${inSym}`,
+          solanaSwapType: 'token_to_token',
+        }, accountId, 'solana_wallet');
+      }
+
+      // Pattern D — SOL → Token WITH explicit SWAP flag but only SOL moved (edge case)
+      // e.g. SOL→wrapped SOL→token where wrapping is internal to DEX
+      if (isExplicitSwap && hasSolOut && tokenIn.length === 0) {
+        // Can't reconstruct fully — record as SOL send flagged for review
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRANSFER_OUT,
+          assetSymbol: 'SOL', amount: Math.abs(netSol),
+          feeSEK, needsReview: true,
+          reviewReason: 'unresolved_solana_swap',
+          notes: 'Solana swap: no token inflow detected — re-import to resolve',
+        }, accountId, 'solana_wallet');
+      }
+
+      // ── Step 3: Pure SOL transfer (no token activity) ───────
+      if (nt.length > 0 && tokenIn.length === 0 && tokenOut.length === 0) {
+        if (Math.abs(netSol) < DUST) return null; // pure fee / no-op
+        const isOut = netSol < 0;
+        return normalizeTransaction({
+          txHash: sig, date: ts,
+          category: isOut ? CAT.SEND : CAT.RECEIVE,
+          assetSymbol: 'SOL', amount: Math.abs(netSol),
+          feeSEK, needsReview: false,
+          notes: `SOL ${isOut ? 'sent' : 'received'}`,
+        }, accountId, 'solana_wallet');
+      }
+
+      // ── Step 4: Pure token transfer (no SOL movement) ───────
+      if (tokenIn.length > 0 && tokenOut.length === 0 && !hasSolOut) {
+        const [inMint, inAmt] = biggest(tokenIn);
+        const inSym = sym(inMint);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.RECEIVE,
+          assetSymbol: inSym, amount: Math.abs(inAmt),
+          feeSEK, contractAddress: inMint,
+          needsReview: true,
+          reviewReason: 'unmatched_solana_receive',
+          notes: 'Token received — verify source (airdrop, bridge, or unmatched swap leg)',
+        }, accountId, 'solana_wallet');
+      }
+      if (tokenOut.length > 0 && tokenIn.length === 0 && !hasSolIn) {
+        const [outMint, outAmt] = biggest(tokenOut);
+        const outSym = sym(outMint);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.SEND,
+          assetSymbol: outSym, amount: Math.abs(outAmt),
+          feeSEK, contractAddress: outMint,
+          needsReview: true,
+          reviewReason: 'unmatched_solana_send',
+          notes: 'Token sent — verify destination (transfer, bridge, or unmatched swap leg)',
+        }, accountId, 'solana_wallet');
+      }
+
+      // ── Step 5: Mixed pattern — best-effort reconstruction ──
+      // SOL out + token in already handled by Pattern A.
+      // SOL in + token out already handled by Pattern B.
+      // Remaining: both SOL and tokens flow, or complex LP/staking tx.
+      if (hasSolOut && tokenIn.length > 0) {
+        // LP deposit or NFT mint — looks like a buy, flag for review
+        const [inMint, inAmt] = biggest(tokenIn);
+        const inSym = sym(inMint);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: 'SOL',  amount: Math.abs(netSol),
+          inAsset: inSym,      inAmount: Math.abs(inAmt),
+          feeSEK, contractAddress: inMint,
+          needsReview: true,
+          reviewReason: 'unresolved_solana_swap',
+          notes: 'Possible LP/staking deposit — verify if this is a swap or LP action',
+        }, accountId, 'solana_wallet');
+      }
+      if (hasSolIn && tokenOut.length > 0) {
+        const [outMint, outAmt] = biggest(tokenOut);
+        const outSym = sym(outMint);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: outSym,  amount: Math.abs(outAmt),
+          inAsset: 'SOL',       inAmount: Math.abs(netSol),
+          feeSEK, contractAddress: outMint,
+          needsReview: true,
+          reviewReason: 'unresolved_solana_swap',
+          notes: 'Possible LP/staking withdrawal — verify if this is a swap or LP action',
+        }, accountId, 'solana_wallet');
+      }
+
+    } catch (e) {
+      console.warn('[SolTx] normalization error:', e.message, tx?.signature);
+      return null;
+    }
     return null;
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // SOLANA SWAP POST-PROCESSOR
+  //
+  // For previously-imported Solana transactions that were split
+  // into separate transfer_in/transfer_out rows (the old bug),
+  // this function groups by txHash, finds matching pairs on the
+  // same account, and merges them into a single TRADE.
+  //
+  // Call via:  TaxEngine.reprocessSolanaSwaps(accountId)
+  // The caller receives {toDelete:[], toAdd:[]} and should then
+  // call addTransactions(toAdd) + delete toDelete ids.
+  // ════════════════════════════════════════════════════════════
+  function reprocessSolanaSwaps(accountId) {
+    const allTxns = getTransactions();
+    const solanaTxns = allTxns.filter(t =>
+      t.source === 'solana_wallet' &&
+      (accountId ? t.accountId === accountId : true)
+    );
+
+    // Group by txHash (only hashes with >1 transaction — those are the split ones)
+    const byHash = {};
+    for (const t of solanaTxns) {
+      if (!t.txHash) continue;
+      if (!byHash[t.txHash]) byHash[t.txHash] = [];
+      byHash[t.txHash].push(t);
+    }
+
+    const toDelete = [];
+    const toAdd    = [];
+    let merged = 0;
+
+    for (const [, txns] of Object.entries(byHash)) {
+      if (txns.length < 2) continue;
+
+      // We're looking for: one "out" tx and one "in" tx from same hash
+      // This pattern = old broken swap reconstruction
+      const outs = txns.filter(t => [CAT.SEND, CAT.TRANSFER_OUT].includes(t.category));
+      const ins  = txns.filter(t => [CAT.RECEIVE, CAT.TRANSFER_IN].includes(t.category));
+
+      if (outs.length === 0 || ins.length === 0) continue;
+
+      // Pick primary out and primary in by amount (largest)
+      const outTx = outs.reduce((a, b) => (a.amount || 0) >= (b.amount || 0) ? a : b);
+      const inTx  = ins.reduce((a, b) => (a.amount || 0) >= (b.amount || 0) ? a : b);
+
+      // Skip if same asset — this is probably a self-transfer, not a swap
+      if (outTx.assetSymbol === inTx.assetSymbol) continue;
+
+      const tradeTx = normalizeTransaction({
+        id: outTx.id,  // keep original id for dedup key
+        txHash: outTx.txHash,
+        date: outTx.date,
+        category: CAT.TRADE,
+        assetSymbol: outTx.assetSymbol,
+        amount: outTx.amount,
+        inAsset: inTx.assetSymbol,
+        inAmount: inTx.amount,
+        feeSEK: (outTx.feeSEK || 0) + (inTx.feeSEK || 0),
+        priceSEKPerUnit: outTx.priceSEKPerUnit || 0,
+        costBasisSEK: outTx.costBasisSEK || 0,
+        contractAddress: outTx.contractAddress || inTx.contractAddress,
+        needsReview: false,
+        notes: `Reconstructed swap: ${outTx.assetSymbol} → ${inTx.assetSymbol} (was split)`,
+        solanaSwapType: outTx.assetSymbol === 'SOL' ? 'sol_to_token'
+                      : inTx.assetSymbol  === 'SOL' ? 'token_to_sol'
+                      : 'token_to_token',
+      }, outTx.accountId, outTx.source);
+
+      // Mark ALL txns with this hash for deletion (including any extra legs)
+      txns.forEach(t => toDelete.push(t.id));
+      toAdd.push(tradeTx);
+      merged++;
+    }
+
+    console.log(`[SolanaReprocess] Merged ${merged} split swap pairs into TRADE transactions`);
+    return { toDelete, toAdd, merged };
   }
 
   // Full mint address → symbol (Solana)
@@ -3823,9 +4164,11 @@ const TaxEngine = (() => {
     getReviewIssues, isTaxableCategory,
     // CSV parsers
     parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
-    parseRevolutCSV, parseMEXCCSV,
+    parseRevolutCSV, parseMEXCCSV, parseSolscanCSV,
     // Blockchain import
     importSolanaWallet, importEthWallet,
+    // Solana post-processing
+    reprocessSolanaSwaps,
     // Portfolio live data
     fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory, buildCostBasisHistory,
     // Token name resolution

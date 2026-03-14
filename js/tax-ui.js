@@ -993,6 +993,18 @@ const TaxUI = (() => {
     const txns = TaxEngine.getTransactions();
     const txnCount = txns.length;
 
+    // Detect Solana accounts with potentially stale imports (old broken split-swap format).
+    // A stale import has multiple solana_wallet transactions sharing a txHash but categorised
+    // as transfer_in/transfer_out instead of a single TRADE row.
+    const solanaTxns = txns.filter(t => t.source === 'solana_wallet');
+    const solanaTxByHash = {};
+    for (const t of solanaTxns) {
+      if (!t.txHash) continue;
+      solanaTxByHash[t.txHash] = (solanaTxByHash[t.txHash] || 0) + 1;
+    }
+    const splitHashCount = Object.values(solanaTxByHash).filter(v => v >= 2).length;
+    const hasStaleSolana = splitHashCount > 0;
+
     // Cloud sync status line
     const cloudMeta = (typeof SUPABASE_READY !== 'undefined' && SUPABASE_READY)
       ? (S._cloudSyncedAt
@@ -1014,6 +1026,26 @@ const TaxUI = (() => {
             </button>
           </div>
         </div>
+
+        <!-- ── Solana stale-import warning ──────────────────── -->
+        ${hasStaleSolana ? `
+        <div class="tax-warn-banner tax-warn-banner--info" style="margin-bottom:14px">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:18px;flex-shrink:0">◎</span>
+            <div style="flex:1">
+              <div style="font-weight:700;font-size:13px;margin-bottom:4px">Solana-importer behöver rekonstrueras</div>
+              <div style="font-size:12px;color:var(--text-secondary)">
+                Vi har hittat <strong>${splitHashCount}</strong> Solana-transaktion${splitHashCount !== 1 ? 'er' : ''} som är upplupna som separata transfer-rader istället för som en TRADE.
+                Det här orsakar falska vinster eftersom kostnasbas för memecoins sätts till 0.
+                Klicka på <strong>Rekonstruera swappar</strong> nedan för att åtgärda, sedan kör pipeline igen.
+              </div>
+            </div>
+            <button class="tax-btn tax-btn-sm" style="background:#6366f1;color:#fff;flex-shrink:0;white-space:nowrap"
+              onclick="TaxUI.reprocessAndSaveSolana()">
+              ◎ Rekonstruera swappar
+            </button>
+          </div>
+        </div>` : ''}
 
         <!-- ── Cross-browser cloud sync info bar ─────────────── -->
         ${txnCount > 0 ? `
@@ -1055,7 +1087,12 @@ const TaxUI = (() => {
                   <div class="acc-row-type"><span class="tax-badge">${src.name}</span></div>
                   <div class="acc-row-tx tax-mono">${cnt.toLocaleString()}</div>
                   <div class="acc-row-actions">
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-sync">🔄</button>
+                    ${acc.type === 'solana_bc' || acc.type === 'phantom' || acc.type === 'solflare'
+                        ? `<button class="tax-btn tax-btn-xs tax-btn-ghost" style="color:#9945FF"
+                             onclick="TaxUI.reprocessAndSaveSolana('${acc.id}')"
+                             title="Rekonstruera Solana-swappar för detta konto">◎ Fix</button>`
+                        : ''}
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.resyncAccount('${acc.id}')" title="Re-import all transactions">🔄</button>
                     <button class="tax-btn tax-btn-xs tax-btn-ghost" style="color:#f87171" onclick="TaxUI.removeAccount('${acc.id}')">✕</button>
                   </div>
                 </div>`;
@@ -1229,6 +1266,14 @@ const TaxUI = (() => {
         '1. Logga in på MEXC', '2. Gå till Orders → Order History',
         '3. Klicka "Export" → välj All time', '4. Ladda ned CSV och ladda upp nedan',
       ], warning: null
+    },
+    solscan: {
+      icon: '◎', name: 'Solscan', steps: [
+        '1. Öppna Solscan.io och sök din Solana-adress',
+        '2. Gå till DeFi Activities eller Token Transfers',
+        '3. Klicka "Export" knappen (CSV)',
+        '4. Ladda ned och ladda upp filen nedan',
+      ], warning: 'Solscan CSV innehåller bara en rad per swap-ben. Pararen rekonstruerar automatiskt hela swappen. För bästa resultat, importera Solana-plånbok via Helius API istället.'
     },
     csv: {
       icon: '📄', name: 'CSV File', steps: [
@@ -2881,6 +2926,7 @@ const TaxUI = (() => {
       else if (parser === 'coinbase') txns = P.parseCoinbaseCSV(_pendingCSVText, acc.id);
       else if (parser === 'revolut') txns = P.parseRevolutCSV(_pendingCSVText, acc.id);
       else if (parser === 'mexc') txns = P.parseMEXCCSV(_pendingCSVText, acc.id);
+      else if (parser === 'solscan') txns = P.parseSolscanCSV(_pendingCSVText, acc.id);
       else txns = P.parseGenericCSV(_pendingCSVText, acc.id);
     } catch (e) {
       if (st) st.innerHTML = `<div class="tax-import-error">❌ Parse error: ${e.message}</div>`;
@@ -3117,7 +3163,7 @@ const TaxUI = (() => {
     const acc = TaxEngine.getAccounts().find(a => a.id === accountId);
     if (acc) {
       showTaxToast('🔄', 'Re-syncing', `Re-importing ${acc.name}…`, 'info');
-      if (acc.type === 'solana' || acc.type === 'phantom_sol') {
+      if (acc.type === 'solana_bc' || acc.type === 'solana' || acc.type === 'phantom_sol' || acc.type === 'solflare') {
         await importWallet('SOL');
       } else if (acc.type === 'metamask' || acc.type === 'phantom_eth' || acc.type === 'eth') {
         await importWallet('ETH');
@@ -3125,6 +3171,49 @@ const TaxUI = (() => {
         showTaxToast('ℹ️', 'Manual re-import needed', 'Please upload the CSV file again.', 'info');
         render();
       }
+    }
+  }
+
+  // Reconstruct split Solana swap pairs that were imported with the old
+  // buggy normalizer. Merges transfer_in+transfer_out pairs sharing the
+  // same txHash into a single TRADE, then triggers pipeline re-run so
+  // cost basis and K4 numbers are recalculated correctly.
+  async function reprocessAndSaveSolana(accountId) {
+    showTaxToast('⏳', 'Rekonstruerar Solana-swappar…', 'Analyserar transaktioner med samma txHash', 'info');
+    try {
+      const result = TaxEngine.reprocessSolanaSwaps(accountId || null);
+
+      if (result.merged === 0) {
+        showTaxToast('ℹ️', 'Inga delade swappar hittades', 'Antingen är alla swappar redan korrekt rekonstruerade, eller importera om plånboken med 🔄', 'info');
+        return;
+      }
+
+      // Apply: delete old split rows, add new TRADE rows
+      const allTxns = TaxEngine.getTransactions();
+      const toDeleteSet = new Set(result.toDelete);
+      const filtered = allTxns.filter(t => !toDeleteSet.has(t.id));
+
+      // Add new TRADE rows (avoid duplicates by txHash)
+      const existingHashes = new Set(filtered.map(t => `${t.txHash}|${t.accountId}`));
+      for (const nt of result.toAdd) {
+        const key = `${nt.txHash}|${nt.accountId}`;
+        if (!existingHashes.has(key)) {
+          filtered.push(nt);
+          existingHashes.add(key);
+        }
+      }
+
+      TaxEngine.saveTransactions(filtered);
+      S.taxResult = null;
+
+      showTaxToast('✅',
+        `${result.merged} swap${result.merged !== 1 ? 'par' : ''} rekonstruerade`,
+        'Kör pipeline (▶ Kör pipeline) för att uppdatera skatteberäkningarna.',
+        'success');
+      reRenderMain();
+    } catch (e) {
+      console.error('[reprocessSolana]', e);
+      showTaxToast('❌', 'Rekonstruktion misslyckades', e.message, 'error');
     }
   }
 
@@ -3282,7 +3371,7 @@ const TaxUI = (() => {
     bulkAutoInfer, toggleReviewGroup,
     deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
-    setUserInfo, resyncAccount, manualCloudSync,
+    setUserInfo, resyncAccount, manualCloudSync, reprocessAndSaveSolana,
     // Transactions page — expanded row & manual entry
     expandTxRow, setExpandedTab,
     toggleAddTxMenu, toggleTxTypeMenu, toggleTxWalletMenu, toggleTxLabelMenu,

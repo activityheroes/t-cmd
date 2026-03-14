@@ -1892,35 +1892,48 @@
   width: 100%;
 }
 
-/* Column widths (6 cols): Beteckning / Antal / Sälj / Omk / Vinst / Förlust */
+/* Column widths (7 cols): Beteckning / Antal / Sälj / Omk / Vinst / Förlust / Tillförlitlighet */
 .tax-k4-preview th:nth-child(1),
 .tax-k4-preview td:nth-child(1) {
-  width: 32%;
+  width: 26%;
 }
 
 .tax-k4-preview th:nth-child(2),
 .tax-k4-preview td:nth-child(2) {
-  width: 14%;
+  width: 12%;
 }
 
 .tax-k4-preview th:nth-child(3),
 .tax-k4-preview td:nth-child(3) {
-  width: 16%;
+  width: 14%;
 }
 
 .tax-k4-preview th:nth-child(4),
 .tax-k4-preview td:nth-child(4) {
-  width: 16%;
+  width: 14%;
 }
 
 .tax-k4-preview th:nth-child(5),
 .tax-k4-preview td:nth-child(5) {
-  width: 11%;
+  width: 9%;
 }
 
 .tax-k4-preview th:nth-child(6),
 .tax-k4-preview td:nth-child(6) {
-  width: 11%;
+  width: 9%;
+}
+
+.tax-k4-preview th:nth-child(7),
+.tax-k4-preview td:nth-child(7) {
+  width: 16%;
+}
+
+/* Uncertain K4 rows — swap-at-cost or unknown acquisition */
+.tax-k4-row--uncertain td {
+  background: rgba(251, 191, 36, 0.04);
+}
+.tax-k4-row--uncertain td:first-child {
+  border-left: 2px solid rgba(251, 191, 36, 0.4);
 }
 
 /* Sticky header row — rendered as a table so columns align */

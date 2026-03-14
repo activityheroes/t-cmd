@@ -49,6 +49,8 @@ const TaxUI = (() => {
     _cloudSyncedAt: null,  // ISO timestamp of last successful cloud sync
     // Review page: which groups are collapsed (received_not_sold starts collapsed)
     collapsedGroups: new Set(['received_not_sold']),
+    // Review page: active tab filter
+    reviewTab: 'blockers',  // 'blockers' | 'warnings' | 'info' | 'all'
   };
 
   let _pendingCSVText = null;
@@ -2015,50 +2017,136 @@ const TaxUI = (() => {
 
   // REVIEW PAGE — exceptions only
   // ════════════════════════════════════════════════════════════
+  // Navigate review page tab
+  window.setReviewTab = function(tab) {
+    S.reviewTab = tab;
+    render();
+  };
+
   function renderReview() {
     const taxResult  = S.taxResult || null;
     const issues     = TaxEngine.getReviewIssues(null, taxResult);
-    const groups     = groupByReason(issues);
     const collapsed  = S.collapsedGroups || new Set(['received_not_sold']);
+    const activeTab  = S.reviewTab || 'blockers';
 
-    const k4Blockers     = issues.filter(i => i.isK4Blocker || ['negative_balance','unknown_acquisition'].includes(i.reason)).length;
-    const warnings       = issues.filter(i => ['duplicate','unmatched_transfer','outlier','split_trade'].includes(i.reason)).length;
-    const lowPri         = issues.filter(i => i.priority === 'low' || ['received_not_sold','spam_token'].includes(i.reason)).length;
-    const trueIssues     = issues.length - lowPri;
-    const receivedUnsold = issues.filter(i => i.reason === 'received_not_sold').length;
-    const missingTotal   = issues.filter(i => i.reason === 'missing_sek_price').length;
+    // ── Issue counts per tab category ──
+    const BLOCKER_REASONS = new Set(['missing_sek_price','unknown_acquisition','negative_balance','ambiguous_swap','unclassified']);
+    const WARNING_REASONS = new Set(['duplicate','unmatched_transfer','outlier','split_trade','bridge_review','unknown_asset','unsupported_defi','unknown_contract','special_transaction']);
+    const INFO_REASONS    = new Set(['received_not_sold','spam_token']);
 
-    // Determine how many of the missing-price items can potentially be auto-resolved
+    const blockersAll = issues.filter(i => BLOCKER_REASONS.has(i.reason) || i.isK4Blocker);
+    const warningsAll = issues.filter(i => WARNING_REASONS.has(i.reason) && !i.isK4Blocker);
+    const infoAll     = issues.filter(i => INFO_REASONS.has(i.reason));
+    const nBlockers   = blockersAll.length;
+    const nWarnings   = warningsAll.length;
+    const nInfo       = infoAll.length;
+
+    // Filtered issues for active tab
+    const filteredIssues = activeTab === 'blockers' ? blockersAll
+      : activeTab === 'warnings' ? warningsAll
+      : activeTab === 'info'     ? infoAll
+      : issues;
+
+    const groups = groupByReason(filteredIssues);
+
     const canAutoInfer = issues.filter(i =>
       i.reason === 'missing_sek_price' && ['market_api_failed','swap_inference_failed'].includes(i.priceBlockReason)
     ).length;
 
+    // ── Stale Solana import detection ──
+    const allTxns = TaxEngine.getTransactions();
+    const solTxByHash = {};
+    for (const t of allTxns) {
+      if (t.source !== 'solana_wallet' || !t.txHash || t.txHash.startsWith('manual_')) continue;
+      solTxByHash[t.txHash] = (solTxByHash[t.txHash] || 0) + 1;
+    }
+    const staleSolanaCount = Object.values(solTxByHash).filter(v => v >= 2).length;
+
+    // ── Swap-at-cost count in active tax result ──
+    const swapAtCostTotal = taxResult && taxResult.disposals
+      ? taxResult.disposals.filter(d => d.proceedsSource === 'swap_at_cost').length
+      : 0;
+
     return `
       <div class="tax-page">
         <div class="tax-page-header">
-          <h1 class="tax-page-title">Review</h1>
-          <span class="tax-page-subtitle">${trueIssues} exception${trueIssues !== 1 ? 's' : ''} require attention${lowPri > 0 ? ` · ${lowPri} informational` : ''}</span>
+          <h1 class="tax-page-title">Granska transaktioner</h1>
+          <span class="tax-page-subtitle">${nBlockers} K4-blockerare · ${nWarnings} varningar · ${nInfo} informations</span>
           ${issues.length > 0 ? `
             <div class="tax-page-actions" style="gap:8px">
-              ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-infer ${canAutoInfer}</button>` : ''}
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Re-run pipeline</button>
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Mark all OK</button>
+              ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-inferera ${canAutoInfer}</button>` : ''}
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Kör om pipeline</button>
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Markera alla OK</button>
             </div>` : ''}
         </div>
+
+        ${staleSolanaCount > 0 ? `
+        <div style="margin-bottom:12px;padding:12px 16px;border-radius:10px;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.3);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <span style="font-size:20px">◎</span>
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:600;color:#a78bfa">Solana-plånbok behöver re-importeras</div>
+            <div style="font-size:12px;color:var(--tax-muted);margin-top:2px">
+              ${staleSolanaCount} Solana-transaktioner hittades i äldre format (separata transfer-rader istället för TRADE-rader).
+              Re-importera plånboken för korrekt byteskonstruktion.
+            </div>
+          </div>
+          <button class="tax-btn tax-btn-sm" style="background:rgba(139,92,246,.2);color:#c4b5fd;border:1px solid rgba(139,92,246,.3);white-space:nowrap" onclick="TaxUI.navigate('accounts')">
+            Gå till konton →
+          </button>
+        </div>` : ''}
+
+        ${swapAtCostTotal > 0 ? `
+        <div style="margin-bottom:12px;padding:10px 14px;border-radius:10px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:16px">⚠️</span>
+          <div style="flex:1;font-size:12px;color:#fbbf24">
+            <strong>${swapAtCostTotal} swap</strong> saknade prisdata — deras försäljningspris uppskattades via <em>swap-at-cost</em>-metoden
+            (noll vinst/förlust per byte). Riktigt pris kan avvika.
+            <a href="#" style="color:#a78bfa;margin-left:4px" onclick="window.setReviewTab('blockers');return false">Granska K4-blockerare →</a>
+          </div>
+        </div>` : ''}
 
         ${issues.length === 0 ? `
           <div class="tax-review-done">
             <div style="font-size:48px">✅</div>
-            <div class="tax-review-done-title">All clear!</div>
-            <div class="tax-review-done-sub">No exceptions. Tax calculations are based on complete data.</div>
+            <div class="tax-review-done-title">Allt klart!</div>
+            <div class="tax-review-done-sub">Inga undantag. Skatteberäkningarna är baserade på fullständig data.</div>
           </div>
         ` : `
-          <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
-            ${k4Blockers > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171;font-size:12px;font-weight:600">🔴 ${k4Blockers} K4 blocker${k4Blockers !== 1 ? 's' : ''}</div>` : ''}
-            ${warnings > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24;font-size:12px;font-weight:600">🟡 ${warnings} warning${warnings !== 1 ? 's' : ''}</div>` : ''}
-            ${receivedUnsold > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.15);color:#818cf8;font-size:12px;cursor:pointer" onclick="TaxUI.toggleReviewGroup('received_not_sold')">📥 ${receivedUnsold} received-not-sold ${collapsed.has('received_not_sold') ? '▶' : '▼'}</div>` : ''}
-            ${canAutoInfer > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.15);color:#a5b4fc;font-size:12px">💡 ${canAutoInfer} may auto-resolve</div>` : ''}
-          </div>
+
+        <!-- Tab bar -->
+        <div style="display:flex;gap:4px;margin-bottom:16px;padding:4px;background:rgba(255,255,255,.03);border:1px solid var(--tax-border);border-radius:10px;width:fit-content">
+          ${[
+            { key: 'blockers', label: 'K4-blockerare', count: nBlockers, color: nBlockers > 0 ? '#f87171' : null },
+            { key: 'warnings', label: 'Varningar',     count: nWarnings, color: nWarnings > 0 ? '#fbbf24' : null },
+            { key: 'info',     label: 'Informations',  count: nInfo,     color: nInfo > 0 ? '#818cf8' : null },
+            { key: 'all',      label: 'Alla',          count: issues.length, color: null },
+          ].map(({ key, label, count, color }) => {
+            const isActive = activeTab === key;
+            return `<button
+              onclick="window.setReviewTab('${key}')"
+              style="padding:6px 14px;border-radius:7px;border:none;cursor:pointer;font-size:12px;font-weight:${isActive ? '600' : '400'};
+                     background:${isActive ? 'rgba(255,255,255,.07)' : 'transparent'};
+                     color:${isActive ? (color || '#e2e8f0') : 'var(--tax-muted)'};
+                     transition:all .15s">
+              ${label}
+              ${count > 0 ? `<span style="margin-left:5px;padding:1px 6px;border-radius:9px;font-size:10px;background:${isActive && color ? color.replace(')', ',.15)').replace('rgb','rgba') : 'rgba(148,163,184,.12)'};color:${color || 'var(--tax-muted)'}">${count}</span>` : ''}
+            </button>`;
+          }).join('')}
+        </div>
+
+          ${filteredIssues.length === 0 ? `
+          <div style="text-align:center;padding:40px 20px;color:var(--tax-muted)">
+            <div style="font-size:36px;margin-bottom:8px">✅</div>
+            <div style="font-size:14px;font-weight:500;color:#e2e8f0">
+              ${activeTab === 'blockers' ? 'Inga K4-blockerare!' :
+                activeTab === 'warnings' ? 'Inga varningar!' :
+                activeTab === 'info' ? 'Inga informations-poster!' :
+                'Inga undantag!'}
+            </div>
+            <div style="font-size:12px;margin-top:4px">
+              ${activeTab !== 'all' ? `<a href="#" style="color:#818cf8" onclick="window.setReviewTab('all');return false">Visa alla flikar →</a>` : 'Skatteberäkningarna är baserade på fullständig data.'}
+            </div>
+          </div>` : ''}
 
           <div class="tax-review-groups">
             ${groups.map(({ reason, meta, items, subGroups }) => {
@@ -2179,12 +2267,37 @@ const TaxUI = (() => {
   // ════════════════════════════════════════════════════════════
   // REPORTS PAGE — K4 Section D, per-asset grouping
   // ════════════════════════════════════════════════════════════
+  // Helper: render K4 confidence badge for a k4Row
+  function k4ConfBadge(row) {
+    if (!row.confidence || row.confidence === 'exact') return '';
+    if (row.confidence === 'unknown') {
+      return `<span title="Okänd anskaffning — kostnadsbas 0 kr. Granska i Review-fliken." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.18);color:#f87171;font-weight:600;cursor:help">⚠ Okänd</span>`;
+    }
+    if (row.confidence === 'estimated') {
+      const n = row.swapAtCostCount || '';
+      return `<span title="${n} swap${n !== 1 ? 's' : ''} prissatt via swap-at-cost-uppskattning. Oklart exakt pris vid byte." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(251,191,36,.15);color:#fbbf24;cursor:help">~ Uppskattad</span>`;
+    }
+    if (row.confidence === 'zero_cost') {
+      return `<span title="Kostnadsbas 0 kr — saknar inköpshistorik för denna tillgång." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;cursor:help">0 Kostnadsbas</span>`;
+    }
+    return '';
+  }
+
   function renderReports() {
     const result = getOrComputeTaxResult();
     const { summary, disposals } = result;
     const k4 = TaxEngine.generateK4Report(result);
     const issues = TaxEngine.getReviewIssues(null, result).length;
     const deductibleLoss = summary.deductibleLoss || (summary.totalLosses * 0.70);
+    const health = TaxEngine.computeReportHealth ? TaxEngine.computeReportHealth(result) : null;
+
+    // ── Health banner colors ──
+    const healthStyle = !health ? null : {
+      invalid:      { bg: 'rgba(239,68,68,.12)',    border: 'rgba(239,68,68,.35)',    color: '#f87171',    icon: '🔴' },
+      needs_review: { bg: 'rgba(251,191,36,.1)',    border: 'rgba(251,191,36,.3)',    color: '#fbbf24',    icon: '🟡' },
+      warnings:     { bg: 'rgba(251,191,36,.08)',   border: 'rgba(251,191,36,.2)',    color: '#fbbf24',    icon: '⚠️' },
+      ok:           { bg: 'rgba(34,197,94,.08)',    border: 'rgba(34,197,94,.25)',    color: '#4ade80',    icon: '✅' },
+    }[health.status] || { bg: 'rgba(148,163,184,.06)', border: 'rgba(148,163,184,.15)', color: '#94a3b8', icon: 'ℹ️' };
 
     return `
       <div class="tax-page">
@@ -2193,7 +2306,24 @@ const TaxUI = (() => {
           <span class="tax-page-subtitle">${S.taxYear} — Skatteverket K4</span>
         </div>
 
-        ${issues > 0 ? `
+        ${health ? `
+        <div style="margin-bottom:16px;padding:12px 16px;border-radius:10px;background:${healthStyle.bg};border:1px solid ${healthStyle.border}">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="font-size:20px">${healthStyle.icon}</span>
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:600;color:${healthStyle.color}">${health.label}</div>
+              ${health.sublabel ? `<div style="font-size:12px;color:var(--tax-muted);margin-top:2px">${health.sublabel}</div>` : ''}
+              ${health.details && health.details.length > 0 ? `
+              <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+                ${health.details.map(d => `<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,0,0,.2);color:var(--tax-muted)">${d}</span>`).join('')}
+              </div>` : ''}
+            </div>
+            ${health.status !== 'ok' ? `
+            <button class="tax-btn tax-btn-sm" style="color:${healthStyle.color};border-color:${healthStyle.border};background:transparent;white-space:nowrap" onclick="TaxUI.navigate('review')">
+              Granska →
+            </button>` : ''}
+          </div>
+        </div>` : issues > 0 ? `
         <div class="tax-warn-box" style="margin-bottom:16px">
           ⚠️ ${issues} transactions still need review. Tax results may be incomplete.
           <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.navigate('review')" style="margin-left:8px">Fix →</button>
@@ -2272,10 +2402,11 @@ const TaxUI = (() => {
                   <th class="ta-r">Omkostnadsbelopp (SEK)</th>
                   <th class="ta-r">Vinst</th>
                   <th class="ta-r">Förlust</th>
+                  <th style="min-width:90px">Tillförlitlighet</th>
                 </tr></thead>
                 <tbody>
                   ${k4.k4Rows.map((r, i) => `
-                    <tr class="${(i + 1) % ROWS_PER_K4_FORM === 0 && i !== k4.k4Rows.length - 1 ? 'tax-k4-page-break' : ''}">
+                    <tr class="${(i + 1) % ROWS_PER_K4_FORM === 0 && i !== k4.k4Rows.length - 1 ? 'tax-k4-page-break' : ''}${r.confidence && r.confidence !== 'exact' ? ' tax-k4-row--uncertain' : ''}">
                       <td>
                         <div class="tax-asset-cell">
                           <span class="tax-asset-name">${r.displayName || r.sym}</span>
@@ -2287,14 +2418,15 @@ const TaxUI = (() => {
                       <td class="ta-r tax-mono">${TaxEngine.formatSEK(r.cost)}</td>
                       <td class="ta-r tax-mono ${r.gain > 0 ? 'tax-green' : ''}">${r.gain ? TaxEngine.formatSEK(r.gain) : ''}</td>
                       <td class="ta-r tax-mono ${r.loss > 0 ? 'tax-red' : ''}">${r.loss ? TaxEngine.formatSEK(r.loss) : ''}</td>
+                      <td>${k4ConfBadge(r) || '<span style="font-size:10px;color:var(--tax-muted)">✓ Exakt</span>'}</td>
                     </tr>`).join('')}
                   <tr class="tax-k4-sum-row">
-                    <td colspan="4"><strong>Summa</strong></td>
+                    <td colspan="5"><strong>Summa</strong></td>
                     <td class="ta-r tax-green"><strong>${TaxEngine.formatSEK(k4.totalGains)}</strong></td>
                     <td class="ta-r tax-red"><strong>${TaxEngine.formatSEK(k4.totalLosses)}</strong></td>
                   </tr>
                   <tr class="tax-k4-net-row">
-                    <td colspan="4" style="font-size:11px;color:var(--tax-muted)">
+                    <td colspan="5" style="font-size:11px;color:var(--tax-muted)">
                       Skattepliktig vinst = ${TaxEngine.formatSEK(k4.totalGains)} − (${TaxEngine.formatSEK(k4.totalLosses)} × 70%)
                     </td>
                     <td colspan="2" class="ta-r" style="font-size:12px;font-weight:600;color:#e2e8f0">

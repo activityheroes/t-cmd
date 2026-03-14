@@ -2515,15 +2515,61 @@ const TaxEngine = (() => {
         case CAT.TRADE: {
           const inSym  = t.inAsset;
           const inAmt  = t.inAmount || 0;
+
+          // ── Swap-at-cost fallback ───────────────────────────────────────────
+          // When the pricing chain could not price the out-side asset (memecoin
+          // with no market data), proceedsSEK = 0. Storing 0 as the in-side cost
+          // cascades into phantom gains every time the received asset (e.g. SOL)
+          // is later disposed of.
+          //
+          // Fallback strategy (in priority order):
+          //   1. proceedsSEK > 0 from pricing chain → use it directly (happy path)
+          //   2. avg(inSym) > 0 → use avg cost of received asset × qty as a
+          //      neutral "swap at cost" estimate (no gain, no loss on this trade)
+          //   3. avg(sym) > 0 → use avg cost of out-side × qty (your cost basis
+          //      is used as proceeds — zero-gain treatment)
+          //   4. Fall through with 0 (unresolvable, flagged in review)
+          //
+          // The 'proceedsSource: swap_at_cost' field is propagated to the disposal
+          // record so the health checker and UI can flag these rows distinctly from
+          // fully-priced disposals.
+          let effectiveProceedsSEK = proceedsSEK;
+          let swapAtCost = false;
+
+          if (effectiveProceedsSEK <= 0 && inSym && inAmt > 0) {
+            ensure(inSym);
+            const inAvgCost = avg(inSym);
+            if (inAvgCost > 0) {
+              // Use the avg cost of the received asset as a proxy for trade value.
+              // This is defensible: we know what we received is worth at least its
+              // average purchase price. Result: trade is revenue-neutral.
+              effectiveProceedsSEK = inAvgCost * inAmt;
+              swapAtCost = true;
+            } else {
+              // Received asset has 0 avg cost (also unknown). Try out-side avg cost.
+              const outAvgCost = avg(sym);
+              if (outAvgCost > 0) {
+                effectiveProceedsSEK = outAvgCost * t.amount;
+                swapAtCost = true;
+              }
+            }
+          }
+
           // Out side: disposal of `sym`
-          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK,
-            { isTrade: true, inAsset: inSym, inAmount: inAmt });
+          const tradeExtra = { isTrade: true, inAsset: inSym, inAmount: inAmt };
+          if (swapAtCost) {
+            tradeExtra.proceedsSource = 'swap_at_cost';
+            tradeExtra.swapAtCostEstimate = effectiveProceedsSEK;
+            // Keep needsReview = true so these show in the review queue
+            tradeExtra.needsReview = true;
+          }
+          const d = recordDisposal(t, sym, t.amount, effectiveProceedsSEK, feeSEK, tradeExtra);
           if (inYear) disposals.push(d);
           // In side: acquisition of `inSym` at cost = FMV of what was given up
           if (inSym && inAmt > 0) {
             ensure(inSym);
             holdings[inSym].totalQty     += inAmt;
-            holdings[inSym].totalCostSEK += proceedsSEK; // FMV of out-side = cost of in-side
+            holdings[inSym].totalCostSEK += effectiveProceedsSEK; // FMV of out-side = cost of in-side
           }
           break;
         }
@@ -2606,6 +2652,93 @@ const TaxEngine = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
+  // REPORT HEALTH — sanity check before presenting K4 totals
+  // Analyses the disposals list for signs that the numbers are
+  // unreliable, and returns a health status with actionable details.
+  // ════════════════════════════════════════════════════════════
+  function computeReportHealth(taxResult) {
+    if (!taxResult || !taxResult.disposals) {
+      return { status: 'unknown', level: -1, label: 'Inga data', canFile: false, details: [] };
+    }
+    const { disposals, summary } = taxResult;
+    const total = disposals.length;
+
+    if (total === 0) {
+      return { status: 'ok', level: 3, label: 'Inga avyttringar att deklarera', canFile: true, details: [] };
+    }
+
+    // Count problem categories
+    const unknownAcqCount = disposals.filter(d => d.unknownAcquisition).length;
+    const swapAtCostCount = disposals.filter(d => d.proceedsSource === 'swap_at_cost').length;
+    // Zero-cost disposals that are NOT flagged as unknownAcquisition (silent 0-cost rows)
+    const silentZeroCost  = disposals.filter(d =>
+      !d.unknownAcquisition &&
+      d.proceedsSEK > 100 &&
+      d.costBasisSEK === 0 &&
+      d.proceedsSource !== 'swap_at_cost'
+    ).length;
+    const k4Blockers = unknownAcqCount + silentZeroCost;
+
+    // Fraction of disposals with unresolved pricing
+    const pctUnresolved = total > 0 ? k4Blockers / total : 0;
+    // Is the gain suspiciously large relative to proceeds? (>10× gain ratio = likely phantom)
+    const gainRatio = (summary.totalProceeds || 0) > 1000
+      ? (summary.totalGains || 0) / (summary.totalProceeds || 1)
+      : 0;
+    const suspiciouslyHighGain = gainRatio > 0.95 && (summary.totalGains || 0) > 50000;
+
+    const details = [];
+    if (unknownAcqCount > 0)  details.push(`${unknownAcqCount} avyttring${unknownAcqCount !== 1 ? 'ar' : ''} med okänd anskaffning (kostnadsbas = 0)`);
+    if (silentZeroCost > 0)   details.push(`${silentZeroCost} avyttring${silentZeroCost !== 1 ? 'ar' : ''} med saknat pris (0 kr kostnadsbas)`);
+    if (swapAtCostCount > 0)  details.push(`${swapAtCostCount} swap${swapAtCostCount !== 1 ? 's' : ''} prissatt med uppskattning (swap-at-cost)`);
+    if (suspiciouslyHighGain) details.push(`Vinst/försäljningspris-kvot ${(gainRatio * 100).toFixed(0)}% — ovanligt hög, kontrollera importhistorik`);
+
+    // Status levels: 0 = invalid, 1 = needs_review, 2 = warnings, 3 = ok
+    if (pctUnresolved > 0.25 || suspiciouslyHighGain) {
+      return {
+        status: 'invalid',
+        level: 0,
+        label: 'Sannolikt felaktigt — granska innan inlämning',
+        sublabel: 'Många avyttringar saknar korrekt kostnadsbas. Kontrollera importhistoriken.',
+        canFile: false,
+        details,
+        k4Blockers, unknownAcqCount, swapAtCostCount, silentZeroCost,
+      };
+    }
+    if (pctUnresolved > 0.05 || unknownAcqCount > 3 || (swapAtCostCount > 10 && unknownAcqCount > 0)) {
+      return {
+        status: 'needs_review',
+        level: 1,
+        label: 'Granska innan inlämning',
+        sublabel: `${k4Blockers} avyttring${k4Blockers !== 1 ? 'ar' : ''} kräver granskning.`,
+        canFile: false,
+        details,
+        k4Blockers, unknownAcqCount, swapAtCostCount, silentZeroCost,
+      };
+    }
+    if (unknownAcqCount > 0 || swapAtCostCount > 0 || silentZeroCost > 0) {
+      return {
+        status: 'warnings',
+        level: 2,
+        label: 'Klar med varningar',
+        sublabel: details.join(' · '),
+        canFile: true,
+        details,
+        k4Blockers, unknownAcqCount, swapAtCostCount, silentZeroCost,
+      };
+    }
+    return {
+      status: 'ok',
+      level: 3,
+      label: 'Klar för inlämning',
+      sublabel: `${total} avyttring${total !== 1 ? 'ar' : ''} — fullständig importhistorik`,
+      canFile: true,
+      details: [],
+      k4Blockers: 0, unknownAcqCount: 0, swapAtCostCount: 0, silentZeroCost: 0,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
   // K4 SECTION D EXPORT — SKV 2104
   // Simplified method: one row per asset per gain/loss side.
   // Per Skatteverket guidelines for crypto.
@@ -2630,18 +2763,32 @@ const TaxEngine = (() => {
         ? `${td.name} (${td.symbol || sym})`
         : (td.symbol || sym);
       if (gains.length > 0) {
-        const qty = gains.reduce((s, d) => s + d.amountSold, 0);
+        const qty  = gains.reduce((s, d) => s + d.amountSold, 0);
         const proc = gains.reduce((s, d) => s + d.proceedsSEK, 0);
         const cost = gains.reduce((s, d) => s + d.costBasisSEK, 0);
         const gain = gains.reduce((s, d) => s + d.gainLossSEK, 0);
-        k4Rows.push({ sym, displayName, side: 'gain', qty, proc, cost, gain, loss: 0 });
+        const unknownAcqCount = gains.filter(d => d.unknownAcquisition).length;
+        const swapAtCostCount = gains.filter(d => d.proceedsSource === 'swap_at_cost').length;
+        const confidence = unknownAcqCount > 0 ? 'unknown'
+          : swapAtCostCount > 0 ? 'estimated'
+          : cost === 0 && proc > 0 ? 'zero_cost'
+          : 'exact';
+        k4Rows.push({ sym, displayName, side: 'gain', qty, proc, cost, gain, loss: 0,
+          confidence, unknownAcqCount, swapAtCostCount });
       }
       if (losses.length > 0) {
-        const qty = losses.reduce((s, d) => s + d.amountSold, 0);
+        const qty  = losses.reduce((s, d) => s + d.amountSold, 0);
         const proc = losses.reduce((s, d) => s + d.proceedsSEK, 0);
         const cost = losses.reduce((s, d) => s + d.costBasisSEK, 0);
         const loss = Math.abs(losses.reduce((s, d) => s + d.gainLossSEK, 0));
-        k4Rows.push({ sym, displayName, side: 'loss', qty, proc, cost, gain: 0, loss });
+        const unknownAcqCount = losses.filter(d => d.unknownAcquisition).length;
+        const swapAtCostCount = losses.filter(d => d.proceedsSource === 'swap_at_cost').length;
+        const confidence = unknownAcqCount > 0 ? 'unknown'
+          : swapAtCostCount > 0 ? 'estimated'
+          : cost === 0 && proc > 0 ? 'zero_cost'
+          : 'exact';
+        k4Rows.push({ sym, displayName, side: 'loss', qty, proc, cost, gain: 0, loss,
+          confidence, unknownAcqCount, swapAtCostCount });
       }
     }
 
@@ -4157,7 +4304,7 @@ const TaxEngine = (() => {
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine
-    computeTaxYear,
+    computeTaxYear, computeReportHealth,
     // K4 export
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review

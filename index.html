@@ -470,7 +470,7 @@
   </script>
 
   <!-- ── Scripts ─────────────────────────────────────────── -->
-  <script src="js/keys.js"></script><!-- local API keys — gitignored -->
+  <script src="js/keys.js" onerror="window.TCMD_KEYS=window.TCMD_KEYS||{}"></script><!-- local API keys — gitignored, absent on GitHub Pages is fine -->
   <script src="js/config.js"></script>
   <script src="js/supabase.js"></script>
   <script src="js/api.js"></script>

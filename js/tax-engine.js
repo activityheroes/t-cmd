@@ -3003,6 +3003,79 @@ const TaxEngine = (() => {
     });
   }
 
+  // ── Revolut CSV parser ─────────────────────────────────────
+  // Revolut exports a CSV with columns:
+  // Type, Product, Started Date, Completed Date, Description,
+  // Amount, Currency, Fiat amount, Fiat amount (inc. fees), Fee, Base currency, State, Balance
+  function parseRevolutCSV(text, accountId) {
+    const rows = parseCSV(text);
+    const out = [];
+    for (const r of rows) {
+      const state = (r['State'] || '').toUpperCase();
+      if (state !== 'COMPLETED') continue; // skip pending/failed
+      const type = (r['Type'] || '').toUpperCase();
+      const sym = (r['Currency'] || '').toUpperCase();
+      const amount = Math.abs(parseFloat(r['Amount'] || 0));
+      if (!sym || amount === 0) continue;
+      const date = r['Completed Date'] || r['Started Date'] || '';
+      const fiat = Math.abs(parseFloat(r['Fiat amount (inc. fees)'] || r['Fiat amount'] || 0));
+      const fee = Math.abs(parseFloat(r['Fee'] || 0));
+      const baseCcy = (r['Base currency'] || '').toUpperCase();
+      const fiatSEK = (baseCcy === 'SEK' || baseCcy === '') ? fiat : 0;
+      const isStable = STABLES.has(sym);
+      let txType = 'receive';
+      if (type === 'EXCHANGE') txType = amount > 0 ? 'trade' : 'trade';
+      else if (type === 'TRANSFER' && parseFloat(r['Amount'] || 0) < 0) txType = 'send';
+      else if (type === 'TRANSFER') txType = 'receive';
+      else if (type === 'CARD_PAYMENT' || type === 'PAYMENT') txType = 'sell';
+      else if (type === 'TOPUP') txType = 'buy';
+      out.push(normalizeTransaction({
+        txHash: r['Reference'] || `rev_${date}_${sym}_${amount}`,
+        date,
+        type: txType,
+        assetSymbol: sym,
+        amount,
+        costBasisSEK: fiatSEK > 0 ? fiatSEK : undefined,
+        feeSEK: fee > 0 && baseCcy === 'SEK' ? fee : 0,
+        needsReview: !fiatSEK,
+        notes: `Revolut ${r['Type'] || ''} — ${r['Description'] || ''}`.trim(),
+      }, accountId, 'revolut_csv'));
+    }
+    return out;
+  }
+
+  // ── MEXC CSV parser ────────────────────────────────────────
+  // MEXC exports: Date, Pairs, Type, Price, Order Amount, Order Total, Trade Amount, Trade Total, Avg.Price, Status
+  function parseMEXCCSV(text, accountId) {
+    const rows = parseCSV(text);
+    return rows.map(r => {
+      const pair = (r['Pairs'] || r['Symbol'] || r['Market'] || '').toUpperCase();
+      const side = (r['Type'] || r['Side'] || '').toUpperCase();
+      const quoteMatch = pair.match(/(USDT|USDC|BUSD|BTC|ETH|BNB|EUR|USD)$/i);
+      const quoteAsset = quoteMatch ? quoteMatch[1].toUpperCase() : 'USDT';
+      const base = pair.replace(new RegExp(quoteAsset + '$', 'i'), '').toUpperCase() || 'UNKNOWN';
+      const tradeAmt = parseFloat(r['Trade Amount'] || r['Order Amount'] || r['Amount'] || 0);
+      const tradeTotal = parseFloat(r['Trade Total'] || r['Order Total'] || r['Total'] || 0);
+      const price = parseFloat(r['Avg.Price'] || r['Price'] || 0) || (tradeAmt > 0 && tradeTotal > 0 ? tradeTotal / tradeAmt : 0);
+      const fee = parseFloat(r['Fee'] || 0);
+      const date = r['Date'] || r['Time'] || r['Timestamp'] || '';
+      return normalizeTransaction({
+        txHash: r['Order ID'] || r['Trade ID'] || `mexc_${date}_${base}_${tradeAmt}`,
+        date,
+        type: side.includes('BUY') ? 'buy' : side.includes('SELL') ? 'sell' : 'trade',
+        assetSymbol: base,
+        amount: tradeAmt,
+        inAsset: quoteAsset,
+        inAmount: tradeTotal,
+        rawTradePrice: price,
+        rawTradeCurrency: quoteAsset,
+        feeSEK: fee,
+        needsReview: true,
+        notes: `MEXC ${side} ${base} at ${price} ${quoteAsset}`,
+      }, accountId, 'mexc_csv');
+    }).filter(t => t.amount > 0);
+  }
+
   // ════════════════════════════════════════════════════════════
   // BLOCKCHAIN IMPORT — full history pagination
   // ════════════════════════════════════════════════════════════
@@ -3241,46 +3314,77 @@ const TaxEngine = (() => {
   // token transfers (tokentx), deduplicates, detects DEX swaps.
   // Key priority: localStorage → window.TCMD_KEYS → error
   // ════════════════════════════════════════════════════════════
-  async function importEthWallet(address, accountId, onProgress) {
+  // chainId: 1=Ethereum, 137=Polygon, 8453=Base, 42161=Arbitrum → Etherscan V2
+  //          56=BNB Chain → BSCScan API
+  //          43114=Avalanche → Snowtrace (Routescan) API
+  async function importEthWallet(address, accountId, onProgress, chainId = 1) {
+    const isBSC     = chainId === 56;
+    const isAVAX    = chainId === 43114;
+    const isEVM     = !isBSC && !isAVAX; // Etherscan V2 covers eth, polygon, base, arbitrum
+
+    const CHAIN_NATIVE = { 1: 'ETH', 137: 'MATIC', 8453: 'ETH', 42161: 'ETH', 56: 'BNB', 43114: 'AVAX' };
+    const nativeSym = CHAIN_NATIVE[chainId] || 'ETH';
+    const chainSource = isBSC ? 'bsc_wallet' : isAVAX ? 'avax_wallet' : 'eth_wallet';
+
     // Priority: ChainAPIs (Supabase) → config.js/keys.js (TCMD_KEYS)
     const keys = (typeof ChainAPIs !== 'undefined' && ChainAPIs.getKeys) ? ChainAPIs.getKeys() : {};
-    const etherscanKey = keys.etherscan
-      || (typeof window !== 'undefined' && window.TCMD_KEYS?.etherscan)
-      || '';
+    const etherscanKey = isEVM
+      ? (keys.etherscan   || (typeof window !== 'undefined' && window.TCMD_KEYS?.etherscan) || '')
+      : isBSC
+        ? (keys.bscscan   || (typeof window !== 'undefined' && window.TCMD_KEYS?.bscscan)   || '')
+        : (keys.snowtrace || (typeof window !== 'undefined' && window.TCMD_KEYS?.snowtrace) || '');
     if (!etherscanKey) {
+      const keyName = isBSC ? 'BSCScan' : isAVAX ? 'Snowtrace' : 'Etherscan';
       return {
-        txns: [], error: 'No Etherscan API key configured. Add it in the Admin panel → API Keys.',
+        txns: [], error: `No ${keyName} API key configured. Add it in the Admin panel → API Keys.`,
         missingKey: true,
       };
     }
 
     const addrLow = address.toLowerCase();
-    setImportStatus(accountId, { status: 'syncing', source: 'ethereum', address });
+    const chainLabel = isBSC ? 'bsc' : isAVAX ? 'avalanche' : `ethereum (chainId ${chainId})`;
+    setImportStatus(accountId, { status: 'syncing', source: chainLabel, address });
 
     try {
-      // Live ETH price in SEK for accurate fee calculation
-      let ethSEK = 28000; // safe fallback (≈ ETH $2700 × SEK 10.4)
+      // Live native-asset price in SEK for accurate fee calculation
+      const NATIVE_FALLBACK_SEK = { ETH: 28000, MATIC: 5, BNB: 3700, AVAX: 280 };
+      let nativeSEK = NATIVE_FALLBACK_SEK[nativeSym] || 10000;
       try {
-        const [sekRate, ethMap] = await Promise.all([
+        const [sekRate, priceMap] = await Promise.all([
           fetchLiveSEKRate(),
-          fetchLivePrices(['ETH']),
+          fetchLivePrices([nativeSym]),
         ]);
-        const ethUSD = ethMap.get('ETH')?.priceUsd || 0;
-        if (sekRate && ethUSD > 0) ethSEK = ethUSD * sekRate;
+        const nativeUSD = priceMap.get(nativeSym)?.priceUsd || 0;
+        if (sekRate && nativeUSD > 0) nativeSEK = nativeUSD * sekRate;
       } catch { /* use fallback */ }
+      const ethSEK = nativeSEK; // alias kept for compatibility with code below
 
       // ── Etherscan paginator ──────────────────────────────────
       // Free tier: 3 req/s hard limit. We run txlist then tokentx
       // sequentially (never concurrent) and sleep 400ms between pages.
       // Rate-limit responses (status!='1', message contains "rate") are
       // retried once after a 1.2s back-off before throwing.
+      // Build chain-specific URL
+      function makeApiUrl(action, page) {
+        if (isBSC) {
+          return `https://api.bscscan.com/api?module=account&action=${action}` +
+            `&address=${addrLow}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
+        }
+        if (isAVAX) {
+          // Routescan (Snowtrace) uses the same format as Etherscan
+          return `https://api.routescan.io/v2/network/mainnet/evm/43114/etherscan/api?module=account&action=${action}` +
+            `&address=${addrLow}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
+        }
+        // Etherscan V2 — supports all EVM chains via ?chainid=N
+        return `https://api.etherscan.io/v2/api?chainid=${chainId}&module=account&action=${action}` +
+          `&address=${addrLow}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
+      }
+
       async function paginate(action, label) {
         const rows = [];
         let page = 1, hasMore = true;
         while (hasMore) {
-          // V2 endpoint — lowercase address required for V2
-          const url = `https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}` +
-            `&address=${addrLow}&sort=asc&page=${page}&offset=100&apikey=${etherscanKey}`;
+          const url = makeApiUrl(action, page);
 
           let data;
           for (let attempt = 0; attempt < 2; attempt++) {
@@ -3383,11 +3487,11 @@ const TaxEngine = (() => {
             inAsset: inSym, inAmount: inAmt,
             feeSEK: gasSEK,
             needsReview: false,
-          }, accountId, 'eth_wallet'));
+          }, accountId, chainSource));
 
         } else if (ins.length > 0) {
           // ── Token received ────────────────────────────────────
-          // If the same tx also sent ETH out → it was a buy (ETH→token)
+          // If the same tx also sent native coin out → it was a buy (native→token)
           const nativeEthOut = native?.from?.toLowerCase() === addrLow
             && parseInt(native.value || 0) > 0;
           const inTx = ins[0];
@@ -3399,11 +3503,11 @@ const TaxEngine = (() => {
             amount: ins.reduce((s, t) => s + parseAmt(t), 0),
             feeSEK: gasSEK,
             needsReview: !nativeEthOut,
-          }, accountId, 'eth_wallet'));
+          }, accountId, chainSource));
 
         } else if (outs.length > 0) {
           // ── Token sent ────────────────────────────────────────
-          // If same tx received ETH in → it was a sell (token→ETH)
+          // If same tx received native coin in → it was a sell (token→native)
           const nativeEthIn = native?.to?.toLowerCase() === addrLow
             && parseInt(native.value || 0) > 0;
           const outTx = outs[0];
@@ -3415,7 +3519,7 @@ const TaxEngine = (() => {
             amount: outs.reduce((s, t) => s + parseAmt(t), 0),
             feeSEK: gasSEK,
             needsReview: !nativeEthIn,
-          }, accountId, 'eth_wallet'));
+          }, accountId, chainSource));
         }
       }
 
@@ -3430,15 +3534,16 @@ const TaxEngine = (() => {
         const gasSEK = isIn ? 0  // receiver doesn't pay gas
           : (parseInt(tx.gasUsed || 0) * parseInt(tx.gasPrice || 0) / 1e18) * ethSEK;
         const date = new Date(parseInt(tx.timeStamp) * 1000).toISOString();
+        const CHAIN_NAMES = { ETH: 'Ethereum', MATIC: 'Polygon (MATIC)', BNB: 'BNB Chain', AVAX: 'Avalanche' };
         txns.push(normalizeTransaction({
           txHash: tx.hash, date,
           type: isIn ? 'receive' : 'send',
-          assetSymbol: 'ETH',
-          assetName: 'Ethereum',
+          assetSymbol: nativeSym,
+          assetName: CHAIN_NAMES[nativeSym] || nativeSym,
           amount: parseInt(tx.value) / 1e18,
           feeSEK: gasSEK,
           needsReview: true,
-        }, accountId, 'eth_wallet'));
+        }, accountId, chainSource));
       }
 
       const totalFetched = nativeTxs.length + tokenTxs.length;
@@ -3718,6 +3823,7 @@ const TaxEngine = (() => {
     getReviewIssues, isTaxableCategory,
     // CSV parsers
     parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
+    parseRevolutCSV, parseMEXCCSV,
     // Blockchain import
     importSolanaWallet, importEthWallet,
     // Portfolio live data

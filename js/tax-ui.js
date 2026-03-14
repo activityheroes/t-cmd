@@ -1087,7 +1087,7 @@ const TaxUI = (() => {
                   </div>
                   <div class="acc-row-sync">${stIcon} <span title="${lastSync}">${lastSync}</span></div>
                   <div class="acc-row-type"><span class="tax-badge">${src.name}</span></div>
-                  <div class="acc-row-tx tax-mono">${cnt.toLocaleString()}</div>
+                  <div class="acc-row-tx tax-mono">${cnt.toLocaleString()}${st.filteredFailed > 0 ? `<span title="${st.filteredFailed} failed/non-economic transactions skipped at import" style="color:#f59e0b;font-size:10px;margin-left:4px">✗${st.filteredFailed}</span>` : ''}</div>
                   <div class="acc-row-actions">
                     ${acc.type === 'solana_bc' || acc.type === 'phantom' || acc.type === 'solflare'
                         ? `<button class="tax-btn tax-btn-xs tax-btn-ghost" style="color:#9945FF"
@@ -3148,7 +3148,10 @@ const TaxUI = (() => {
     S.walletImportFrom = 'beginning'; S.walletImportDate = '';
     S.taxResult = null; S.page = 'transactions';
     render();
-    showTaxToast('✅', `Imported ${added} transactions`, `Total fetched: ${res.totalFetched || 0}`);
+    const filtMsg = res.filteredCount > 0
+      ? `${res.totalFetched} raw · ${res.filteredCount} failed/non-economic skipped`
+      : `${res.totalFetched || 0} fetched`;
+    showTaxToast('✅', `Imported ${added} new transactions`, filtMsg);
     setTimeout(triggerPipeline, 500);
   }
 
@@ -3455,6 +3458,11 @@ const TaxUI = (() => {
     S.taxYear = TaxEngine.getSettings().taxYear;
     S.taxResult = null;
     bindPipelineEvents();
+
+    // Wire CSV parsers into the 12-stage pipeline (safe no-op if TaxPipeline not loaded)
+    if (typeof TaxPipeline !== 'undefined') {
+      TaxPipeline.registerAllParsers();
+    }
 
     // Load user info (name/personnummer) for K4 header
     try {

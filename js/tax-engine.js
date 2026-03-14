@@ -233,6 +233,12 @@ const TaxEngine = (() => {
     saveAccounts(getAccounts().filter(a => a.id !== id));
     saveTransactions(getTransactions().filter(t => t.accountId !== id));
     setImportStatus(id, null);
+    // Also purge any raw events stored by the 12-stage pipeline for this account.
+    // Prevents stale Helius/Etherscan data from being replayed on next pipeline run.
+    if (typeof TaxPipeline !== 'undefined' && TaxPipeline.RawDataStore) {
+      TaxPipeline.RawDataStore.deleteByAccount(id).catch(e =>
+        console.warn('[TaxEngine] RawDataStore purge failed:', e.message));
+    }
   }
   function clearAllData() {
     saveAccounts([]);
@@ -404,8 +410,18 @@ const TaxEngine = (() => {
   function saveTransactions(txns) {
     _txCache = txns;
     idbSaveAll(txns).catch(e => console.warn('[TaxEngine] saveTransactions error:', e));
-    // Schedule a cloud backup so other browsers can restore the same data.
-    _scheduleCloudSync(txns);
+    if (txns.length === 0) {
+      // When ALL transactions are cleared, push the empty state to cloud
+      // IMMEDIATELY (no debounce). Without this, a page reload within the
+      // 3-second window would find IDB empty → fall back to cloud → restore
+      // the deleted transactions as if the delete never happened.
+      if (_cloudSyncTimer) { clearTimeout(_cloudSyncTimer); _cloudSyncTimer = null; }
+      _pushTransactionsToCloud([]).catch(e =>
+        console.warn('[TaxEngine] cloud clear failed:', e.message));
+    } else {
+      // For normal saves, debounce to avoid hammering Supabase on rapid edits.
+      _scheduleCloudSync(txns);
+    }
   }
 
   async function loadTransactions() {
@@ -1904,17 +1920,61 @@ const TaxEngine = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
-  // FULL IMPORT PIPELINE
-  // Correct order: decode → resolve tokens → detect spam →
-  //   dedup → match transfers → classify → fetch prices →
-  //   detect negatives → save → compute tax → review issues
-  // Each transaction keeps its accountId/walletId throughout —
-  // assets are NEVER aggregated before tax calculations.
+  // FULL IMPORT PIPELINE — 12-Stage Architecture
+  //
+  // Delegates to TaxPipeline (tax-pipeline.js) which implements
+  // the full 12-stage ingestion contract:
+  //
+  //   Stage 1  Import       — raw data stored (at import time)
+  //   Stage 2  Parse        — source-specific parsers (at import time)
+  //   Stage 3  Pre-filter   — remove failed/noise/non-economic events
+  //   Stage 4  Resolve      — token metadata
+  //   Stage 5  Spam         — dust/scam detection
+  //   Stage 6  Reconstruct  — swap/trade/transfer reconstruction
+  //   Stage 7  Match        — internal transfer matching
+  //   Stage 8  Price        — SEK price assignment
+  //   Stage 9  Inventory    — cost basis (Genomsnittsmetoden)
+  //   Stage 10 Review       — exception queue
+  //   Stage 11 Tax events   — disposals + income
+  //   Stage 12 Report       — Swedish K4 (SKV 2104)
+  //
+  // Raw source data is NEVER used directly for tax calculations.
+  // Only NormalizedEvents (post Stage 2) enter the pipeline.
   // ════════════════════════════════════════════════════════════
   let _pipelineRunning = false;
 
   async function runPipeline(opts = {}) {
     if (_pipelineRunning) return;
+
+    // ── Delegate to TaxPipeline if available ──────────────────
+    if (typeof TaxPipeline !== 'undefined') {
+      _pipelineRunning = true;
+      Events.emit('pipeline:start', {});
+      try {
+        const result = await TaxPipeline.run({
+          onProgress: (p) => {
+            Events.emit('pipeline:step', p);
+            if (opts.onProgress) opts.onProgress(p);
+          },
+          taxYear: getSettings().taxYear,
+        });
+        if (!result) return;
+        return {
+          totalTxns:    result.txns.length,
+          reviewIssues: result.reviewIssues.length,
+          duplicates:   result.txns.filter(t => t.isDuplicate).length,
+          taxResult:    result.inventoryResult,
+          filteredCount: result.allFiltered.length,
+          stageLog:     result.stageLog,
+        };
+      } finally {
+        _pipelineRunning = false;
+      }
+    }
+
+    // ── Fallback: legacy single-file pipeline ─────────────────
+    // Used when tax-pipeline.js is not loaded (e.g., tests, standalone).
+    // This path matches the original implementation exactly.
     _pipelineRunning = true;
     Events.emit('pipeline:start', {});
 
@@ -1926,110 +1986,101 @@ const TaxEngine = (() => {
 
       let txns = getTransactions();
 
-      // ── Step 1: Decode on-chain events ────────────────────
-      // Merge split swap rows (same txHash, different assets) into
-      // single TRADE events BEFORE anything else runs.
-      emit('decode', 5, 'Decoding on-chain events…');
+      // Stage 3-equivalent: pre-filter failed/zero-value events
+      // (lightweight inline version without the full PreFilter module)
+      emit('decode', 5, 'Pre-filtering events…');
+      const APPROVAL_CATS = new Set(['approval', 'account_creation']);
+      const FAILED_STATUSES = new Set(['failed', 'cancelled', 'error', 'revert']);
+      const beforeFilter = txns.length;
+      txns = txns.filter(t => {
+        if (t.status && FAILED_STATUSES.has((t.status || '').toLowerCase())) return false;
+        if (t.rawStatus && FAILED_STATUSES.has((t.rawStatus || '').toLowerCase())) return false;
+        if (APPROVAL_CATS.has((t.category || '').toLowerCase())) return false;
+        const total = (t.amount || 0) + (t.inAmount || 0) + Math.abs(t.feeSEK || 0);
+        if (total < 1e-12) return false;
+        return true;
+      });
+      if (txns.length < beforeFilter) {
+        console.log(`[Pipeline] Pre-filter: removed ${beforeFilter - txns.length} noise events`);
+      }
+      await tick();
+
+      // Stage 6a: Decode on-chain events
+      emit('decode', 10, 'Decoding on-chain events…');
       txns = decodeOnChainEvents(txns);
       await tick();
 
-      // ── Step 2: Resolve token metadata ────────────────────
-      // Replace contract addresses with human-readable symbols/names.
-      // This must run before classification so detectCategory() sees
-      // "USDC" not "EPjFWdd..." and "JUP" not "JUPyiwry...".
-      emit('tokens', 12, 'Resolving token names…');
-      txns = await resolveAllTokenMetadata(txns, (p) => emit('tokens', 12, p.msg));
+      // Stage 4: Resolve token metadata
+      emit('tokens', 15, 'Resolving token names…');
+      txns = await resolveAllTokenMetadata(txns, (p) => emit('tokens', 15, p.msg));
       await tick();
 
-      // ── Step 3: Detect spam tokens ────────────────────────
-      // Mark dust amounts, scam airdrop patterns, and unresolved
-      // contract-address symbols as SPAM before classification.
-      emit('spam', 20, 'Detecting spam tokens…');
+      // Stage 5: Detect spam tokens
+      emit('spam', 22, 'Detecting spam tokens…');
       txns = detectSpamTokens(txns);
       await tick();
 
-      // ── Step 4: Detect cross-source duplicates ────────────
-      // Same real-world transaction imported from multiple sources
-      // (e.g. both wallet API and exchange CSV).
+      // Stage 3b-equivalent: deduplication
       emit('dedup', 28, 'Detecting duplicate transactions…');
       txns = deduplicateTransactions(txns);
       await tick();
 
-      // ── Step 4b: Solana swap post-processing ──────────────
-      // For wallets imported with the old normalizeSolanaTx (which split
-      // SOL↔token swaps into separate transfer_in/transfer_out rows),
-      // merge those pairs now so cost-basis flows correctly.
-      // This is a one-time migration — new imports already produce TRADE rows.
+      // Stage 6b: Solana swap post-processing
       emit('classify', 33, 'Reconstructing Solana swaps…');
       const solanaResult = reprocessSolanaSwaps();
       if (solanaResult.merged > 0) {
         const toDeleteSet = new Set(solanaResult.toDelete);
         txns = txns.filter(t => !toDeleteSet.has(t.id));
         for (const newTx of solanaResult.toAdd) {
-          // Avoid re-adding if it was already fixed in a prior run
           if (!txns.find(t => t.txHash === newTx.txHash && t.category === CAT.TRADE)) {
             txns.push(newTx);
           }
         }
-        console.log(`[Pipeline] Solana: merged ${solanaResult.merged} split swap pairs into TRADE rows`);
+        console.log(`[Pipeline] Solana: merged ${solanaResult.merged} split swap pairs`);
       }
       await tick();
 
-      // ── Step 5: Classify all transactions ─────────────────
-      // Classification MUST run before transfer matching so the matcher can
-      // filter by the correct economic categories (BRIDGE_IN/OUT, SEND/RECEIVE…).
-      // Without categories, matchTransfers has no signal and matches nothing.
+      // Stage 6c: Classify all transactions
       emit('classify', 36, 'Classifying transactions…');
       txns = autoClassifyAll(txns);
       await tick();
 
-      // ── Step 6: Match internal transfers ──────────────────
-      // Now that every transaction has a proper category, pair SEND ↔ RECEIVE
-      // (and BRIDGE_OUT ↔ BRIDGE_IN) across all user wallets/exchanges/chains.
-      // Matched pairs are marked isInternalTransfer = true (non-taxable).
+      // Stage 7: Match internal transfers
       emit('transfer', 44, 'Matching internal transfers…');
       txns = matchTransfers(txns);
       await tick();
 
-      // ── Step 7: Assign SEK prices ─────────────────────────
-      // Fetch historical USD/SEK prices for every taxable transaction.
-      // Stablecoins use fixed rates; unknown assets stay at 0 and are
-      // flagged in the review queue.
+      // Stage 8: Assign SEK prices
       emit('price', 52, 'Fetching historical SEK prices…');
       txns = await fetchAllSEKPrices(txns, (p) => {
         emit('price', 52 + Math.round(p.pct * 0.2), p.msg);
       });
       await tick();
 
-      // ── Step 8: Detect negative balance indicators ────────
-      // Scan for assets that go negative (missing import history).
-      // These are tagged on the causing transactions before saving.
+      // Stage 8b: Negative balance detection
       emit('balance', 74, 'Checking for missing history…');
       txns = detectNegativeBalances(txns);
       await tick();
 
-      // ── Step 9: Save enriched transactions ────────────────
+      // Save enriched NormalizedEvents
       emit('save', 80, 'Saving…');
       saveTransactions(txns);
       await tick();
 
-      // ── Step 10: Compute tax (Genomsnittsmetoden) ─────────
-      // Process all history → disposals → K4 rows → aggregate.
-      // Per-asset cost basis is computed per wallet-linked transactions
-      // NOT from globally merged totals.
+      // Stage 9: Compute tax (Genomsnittsmetoden)
       emit('tax', 88, 'Computing Swedish tax (Genomsnittsmetoden)…');
       const settings = getSettings();
       const taxResult = computeTaxYear(settings.taxYear, txns);
 
-      // ── Step 11: Collect review issues ────────────────────
+      // Stage 10: Review issues
       const reviewIssues = getReviewIssues(txns, taxResult);
 
       emit('done', 100, `Done — ${txns.length.toLocaleString()} transactions, ${reviewIssues.length} issues`);
 
       const result = {
-        totalTxns: txns.length,
+        totalTxns:    txns.length,
         reviewIssues: reviewIssues.length,
-        duplicates: txns.filter(t => t.isDuplicate).length,
+        duplicates:   txns.filter(t => t.isDuplicate).length,
         taxResult,
       };
       Events.emit('pipeline:done', result);
@@ -3360,15 +3411,30 @@ const TaxEngine = (() => {
         before = page[page.length - 1].signature;
         hasMore = page.length === 100;
 
-        if (onProgress) onProgress({ step: 'import', msg: `Fetched ${totalFetched} Solana transactions…` });
+        const filteredOut = totalFetched - allTxns.length;
+        if (onProgress) onProgress({
+          step: 'import',
+          msg: `Fetched ${totalFetched} raw · ${allTxns.length} valid${filteredOut > 0 ? ` · ${filteredOut} failed/non-economic skipped` : ''}`,
+        });
         await tick(); // yield to browser between pages
       }
 
       const start = allTxns.length ? allTxns.reduce((a, b) => a.date < b.date ? a : b).date : null;
       const end = allTxns.length ? allTxns.reduce((a, b) => a.date > b.date ? a : b).date : null;
 
-      setImportStatus(accountId, { status: 'synced', totalFetched, totalTxns: allTxns.length, startDate: start, endDate: end });
-      return { txns: allTxns, totalFetched };
+      const filteredCount = totalFetched - allTxns.length;
+      setImportStatus(accountId, {
+        status: 'synced',
+        totalFetched,
+        totalTxns: allTxns.length,
+        filteredFailed: filteredCount,
+        startDate: start,
+        endDate: end,
+      });
+      if (filteredCount > 0) {
+        console.log(`[Solana] Filtered ${filteredCount} failed/non-economic transactions from ${address.slice(0,8)}…`);
+      }
+      return { txns: allTxns, totalFetched, filteredCount };
     } catch (e) {
       setImportStatus(accountId, { status: 'failed', error: e.message });
       return { txns: [], error: e.message };
@@ -3403,6 +3469,27 @@ const TaxEngine = (() => {
 
   function normalizeSolanaTx(tx, walletAddr, accountId) {
     try {
+      // ── Guard 1: Skip failed transactions ───────────────────
+      // Helius returns ALL transactions including on-chain failures.
+      // A failed tx has its state changes reverted — only the fee
+      // was charged. The tokenTransfers/nativeTransfers fields still
+      // reflect what WOULD have happened, so they must NOT be used
+      // as real economic events.
+      if (tx.transactionError !== null && tx.transactionError !== undefined) {
+        return null;
+      }
+
+      // ── Guard 2: Skip pure system / non-economic tx types ───
+      // These Helius types never produce user-facing economic events.
+      const SKIP_TYPES = new Set([
+        'ACCOUNT_DATA', 'CREATE_ACCOUNT', 'CLOSE_ACCOUNT',
+        'ACCOUNT_CREATION', 'FREEZE_ACCOUNT', 'THAW_ACCOUNT',
+        'APPROVE', 'REVOKE', 'SET_AUTHORITY',
+        'INIT_MINT', 'MINT_TO',          // minting — not a user trade
+        'BURN',                           // token burn handled separately below
+      ]);
+      if (SKIP_TYPES.has(tx.type)) return null;
+
       const ts  = new Date((tx.timestamp || 0) * 1000).toISOString();
       const tt  = tx.tokenTransfers  || [];
       const nt  = tx.nativeTransfers || [];

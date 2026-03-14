@@ -37,6 +37,8 @@ const TaxUI = (() => {
     userName: '',
     userPnr: '',
     _cloudSyncedAt: null,  // ISO timestamp of last successful cloud sync
+    // Review page: which groups are collapsed (received_not_sold starts collapsed)
+    collapsedGroups: new Set(['received_not_sold']),
   };
 
   let _pendingCSVText = null;
@@ -1569,24 +1571,90 @@ const TaxUI = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
+  // ── Confidence badge for a priced/unpriced transaction ─────
+  function confidenceBadge(txn) {
+    const ps = txn.priceSource, pc = txn.priceConfidence;
+    if (!ps || ps === 'missing') return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;font-weight:600" title="No price found">missing</span>';
+    if (ps === 'manual')               return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(99,102,241,.15);color:#818cf8" title="Price entered manually">manual</span>';
+    if (ps === 'trade_exact')          return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(34,197,94,.12);color:#4ade80" title="Exact exchange price">exact</span>';
+    if (ps === 'swap_implied')         return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(251,191,36,.12);color:#fbbf24" title="Derived from swap counterpart">swap-leg</span>';
+    if (ps === 'back_derived')         return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(251,191,36,.10);color:#fbbf24" title="Inferred from later disposal price">back-derived</span>';
+    if (ps === 'stable_historical_fx' || ps === 'stable_approx') return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(34,197,94,.10);color:#4ade80" title="Stablecoin × FX rate">stable</span>';
+    if (ps === 'spam_zero' || pc === 'spam_zero') return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(107,114,128,.12);color:#9ca3af" title="Auto-detected spam">spam</span>';
+    // market_api / dex_market → "inferred"
+    return '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(99,102,241,.12);color:#a5b4fc" title="Historical market price">inferred</span>';
+  }
+
+  // ── Suggested-action button for a single review row ─────────
+  function suggestedActionBtn(issue) {
+    const { txn, suggestedAction, reason } = issue;
+    if (reason === 'received_not_sold') {
+      return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.markReviewed('${txn.id}')" title="Ignore — this token was never sold, no K4 impact">Ignore</button>`;
+    }
+    switch (suggestedAction) {
+      case 'rerun_pipeline':
+        return `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.triggerPipeline()" title="Has a priced swap partner — re-run pipeline to resolve">Re-run pipeline</button>`;
+      case 'batch_price_lookup':
+        return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.bulkShowPriceSearch('missing_sek_price')" title="Known token — fetch historical price from API">Fetch price</button>`;
+      case 'mark_spam':
+        return `<button class="tax-btn tax-btn-xs" style="background:rgba(107,114,128,.1);color:#9ca3af;border:1px solid rgba(107,114,128,.2)" onclick="TaxUI.markSpam('${txn.id}')" title="Looks like spam or worthless token — set to zero value">Mark spam</button>`;
+      case 'enter_price':
+      default:
+        return `<button class="tax-btn tax-btn-xs tax-btn-primary" onclick="TaxUI.editTx('${txn.id}')" title="Enter SEK price manually">Enter price</button>`;
+    }
+  }
+
+  // ── Render a single review row ────────────────────────────────
+  function renderReviewRow(issue) {
+    const { txn, isK4Blocker: itemK4 } = issue;
+    const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(txn.assetSymbol) : { symbol: txn.assetSymbol, name: '' };
+    const displaySym  = td.symbol || txn.assetSymbol || '?';
+    const displayName = td.name || txn.assetName || '';
+    const acct        = TaxEngine.getAccounts().find(a => a.id === txn.accountId);
+    const acctLabel   = acct ? (acct.label || acct.type || acct.id.slice(-6)) : 'Unknown wallet';
+    const blockInfo   = issue.priceBlockReason ? BLOCK_REASON_LABELS[issue.priceBlockReason] : null;
+    return `
+    <div class="tax-review-item">
+      <div class="tax-ri-left" style="flex:1;min-width:0">
+        <span class="tax-asset-sym" title="${txn.assetSymbol}">${displaySym}</span>
+        ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:var(--tax-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${displayName}">${displayName}</span>` : ''}
+        <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
+        <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
+        ${txn.category ? `<span class="tax-badge" style="font-size:10px">${txn.category}</span>` : ''}
+        <span class="tax-badge" style="font-size:10px;opacity:.6">${acctLabel}</span>
+        ${itemK4 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;font-weight:600">K4</span>` : ''}
+        ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
+        ${confidenceBadge(txn)}
+        ${blockInfo ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(148,163,184,.08);color:#64748b;border:1px solid rgba(148,163,184,.15)" title="${blockInfo.tip}">${blockInfo.label}</span>` : ''}
+      </div>
+      <div class="tax-ri-right">
+        ${suggestedActionBtn(issue)}
+        <button class="tax-btn tax-btn-xs" style="color:#94a3b8" onclick="TaxUI.editTx('${txn.id}')" title="Edit transaction">✏️</button>
+        <button class="tax-btn tax-btn-xs" style="color:#64748b" onclick="TaxUI.markSpam('${txn.id}')" title="Mark as spam (zero value)">🚫</button>
+        <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')" title="Dismiss">OK</button>
+      </div>
+    </div>`;
+  }
+
   // REVIEW PAGE — exceptions only
   // ════════════════════════════════════════════════════════════
   function renderReview() {
-    // Pass taxResult context so getReviewIssues can do outlier detection
-    const taxResult = S.taxResult || null;
-    const issues = TaxEngine.getReviewIssues(null, taxResult);
-    const groups = groupByReason(issues);
+    const taxResult  = S.taxResult || null;
+    const issues     = TaxEngine.getReviewIssues(null, taxResult);
+    const groups     = groupByReason(issues);
+    const collapsed  = S.collapsedGroups || new Set(['received_not_sold']);
 
-    // Severity buckets — use priority field set by engine when available
-    const k4Blockers = issues.filter(i => i.isK4Blocker || ['negative_balance','unknown_acquisition'].includes(i.reason)).length;
-    const critical   = issues.filter(i => i.priority === 'critical' || ['missing_sek_price','unknown_asset','ambiguous_swap'].includes(i.reason)).length;
-    const warnings   = issues.filter(i => ['duplicate','unmatched_transfer','outlier','split_trade'].includes(i.reason)).length;
-    const lowPri     = issues.filter(i => i.priority === 'low' || ['received_not_sold','spam_token'].includes(i.reason)).length;
-    const trueIssues = issues.length - lowPri;
+    const k4Blockers     = issues.filter(i => i.isK4Blocker || ['negative_balance','unknown_acquisition'].includes(i.reason)).length;
+    const warnings       = issues.filter(i => ['duplicate','unmatched_transfer','outlier','split_trade'].includes(i.reason)).length;
+    const lowPri         = issues.filter(i => i.priority === 'low' || ['received_not_sold','spam_token'].includes(i.reason)).length;
+    const trueIssues     = issues.length - lowPri;
+    const receivedUnsold = issues.filter(i => i.reason === 'received_not_sold').length;
+    const missingTotal   = issues.filter(i => i.reason === 'missing_sek_price').length;
 
-    // Count missing-price disposals (true K4 blockers) vs received-not-sold (informational)
-    const missingDisposals = issues.filter(i => i.reason === 'missing_sek_price' && i.isK4Blocker).length;
-    const receivedUnsold   = issues.filter(i => i.reason === 'received_not_sold').length;
+    // Determine how many of the missing-price items can potentially be auto-resolved
+    const canAutoInfer = issues.filter(i =>
+      i.reason === 'missing_sek_price' && ['market_api_failed','swap_inference_failed'].includes(i.priceBlockReason)
+    ).length;
 
     return `
       <div class="tax-page">
@@ -1595,8 +1663,9 @@ const TaxUI = (() => {
           <span class="tax-page-subtitle">${trueIssues} exception${trueIssues !== 1 ? 's' : ''} require attention${lowPri > 0 ? ` · ${lowPri} informational` : ''}</span>
           ${issues.length > 0 ? `
             <div class="tax-page-actions" style="gap:8px">
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Mark all OK</button>
+              ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-infer ${canAutoInfer}</button>` : ''}
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Re-run pipeline</button>
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Mark all OK</button>
             </div>` : ''}
         </div>
 
@@ -1607,93 +1676,75 @@ const TaxUI = (() => {
             <div class="tax-review-done-sub">No exceptions. Tax calculations are based on complete data.</div>
           </div>
         ` : `
-          <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
-            ${k4Blockers > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171;font-size:13px;font-weight:600">🔴 ${k4Blockers} K4 blocker${k4Blockers !== 1 ? 's' : ''} — missing price on disposal</div>` : ''}
-            ${warnings > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24;font-size:13px;font-weight:600">🟡 ${warnings} warnings</div>` : ''}
-            ${receivedUnsold > 0 ? `<div style="padding:8px 14px;border-radius:8px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);color:#818cf8;font-size:13px">📥 ${receivedUnsold} received-not-sold — not K4 blocking</div>` : ''}
-          </div>
-
-          <div class="tax-info-box" style="margin-bottom:20px">
-            <span>ℹ️</span>
-            <span>Only genuine exceptions are shown. Spam airdrops and dust are auto-zeroed. <strong>K4 blockers are disposals (sales/trades) with no SEK price</strong> — fix these first. "Received-not-sold" items are informational only.</span>
+          <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+            ${k4Blockers > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171;font-size:12px;font-weight:600">🔴 ${k4Blockers} K4 blocker${k4Blockers !== 1 ? 's' : ''}</div>` : ''}
+            ${warnings > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24;font-size:12px;font-weight:600">🟡 ${warnings} warning${warnings !== 1 ? 's' : ''}</div>` : ''}
+            ${receivedUnsold > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.15);color:#818cf8;font-size:12px;cursor:pointer" onclick="TaxUI.toggleReviewGroup('received_not_sold')">📥 ${receivedUnsold} received-not-sold ${collapsed.has('received_not_sold') ? '▶' : '▼'}</div>` : ''}
+            ${canAutoInfer > 0 ? `<div style="padding:6px 12px;border-radius:8px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.15);color:#a5b4fc;font-size:12px">💡 ${canAutoInfer} may auto-resolve</div>` : ''}
           </div>
 
           <div class="tax-review-groups">
-            ${groups.map(({ reason, meta, items }) => {
+            ${groups.map(({ reason, meta, items, subGroups }) => {
               const isK4Critical = items.some(i => i.isK4Blocker) || ['negative_balance','unknown_acquisition'].includes(reason);
               const isCritical   = isK4Critical || ['missing_sek_price','unknown_asset','ambiguous_swap'].includes(reason);
               const isLowPri     = ['received_not_sold','spam_token'].includes(reason);
-              const borderColor  = isK4Critical ? 'rgba(239,68,68,.3)'
-                                 : isCritical   ? 'rgba(239,68,68,.2)'
-                                 : isLowPri     ? 'rgba(99,102,241,.1)'
-                                 : 'rgba(99,102,241,.15)';
-              const badgeBg    = isK4Critical ? 'rgba(239,68,68,.25)' : isLowPri ? 'rgba(99,102,241,.15)' : 'rgba(251,191,36,.15)';
-              const badgeColor = isK4Critical ? '#f87171' : isLowPri ? '#818cf8' : '#fbbf24';
+              const isCollapsed  = collapsed.has(reason);
+              const borderColor  = isK4Critical ? 'rgba(239,68,68,.3)' : isCritical ? 'rgba(239,68,68,.2)' : isLowPri ? 'rgba(99,102,241,.08)' : 'rgba(99,102,241,.15)';
+              const badgeBg      = isK4Critical ? 'rgba(239,68,68,.25)' : isLowPri ? 'rgba(99,102,241,.12)' : 'rgba(251,191,36,.15)';
+              const badgeColor   = isK4Critical ? '#f87171' : isLowPri ? '#818cf8' : '#fbbf24';
 
               // Per-group bulk action buttons
               const bulkActions = (meta.bulkActions || []).map(action => {
                 switch (action) {
-                  case 'mark_spam':    return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkSpam('${reason}')">🚫 Mark all as spam</button>`;
-                  case 'enter_price':  return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkShowPriceSearch('${reason}')">💰 Batch price lookup</button>`;
-                  case 'mark_zero_cost': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkZeroCost('${reason}')">0️⃣ Set zero cost basis</button>`;
-                  case 'mark_income':  return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkReclassify('${reason}','income')">💼 Reclassify as income</button>`;
-                  case 'ignore_received': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Mark all OK</button>`;
-                  case 'confirm_spam': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Confirm all spam</button>`;
+                  case 'mark_spam':       return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkSpam('${reason}')">🚫 Mark all spam</button>`;
+                  case 'enter_price':     return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkShowPriceSearch('${reason}')">💰 Batch price lookup</button>`;
+                  case 'mark_zero_cost':  return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkZeroCost('${reason}')">0️⃣ Set zero cost</button>`;
+                  case 'mark_income':     return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkReclassify('${reason}','income')">💼 Reclassify as income</button>`;
+                  case 'ignore_received': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Ignore all</button>`;
+                  case 'confirm_spam':    return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Confirm spam</button>`;
                   default: return '';
                 }
               }).join('');
 
+              // For missing_sek_price, add an auto-infer button when applicable
+              const extraBulk = reason === 'missing_sek_price'
+                ? `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-infer all</button>`
+                : '';
+
               return `
               <div class="tax-review-group" style="border-color:${borderColor}">
-                <div class="tax-review-group-header">
+                <div class="tax-review-group-header" style="cursor:pointer" onclick="TaxUI.toggleReviewGroup('${reason}')">
                   <span class="tax-review-group-icon">${meta.icon}</span>
                   <div style="flex:1">
                     <div class="tax-review-group-title">
                       ${meta.label}
                       <span class="tax-section-count" style="background:${badgeBg};color:${badgeColor}">${items.length}</span>
                       ${isK4Critical ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(239,68,68,.15);color:#f87171;margin-left:4px;font-weight:600">K4 BLOCKER</span>' : ''}
-                      ${isLowPri ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(99,102,241,.1);color:#818cf8;margin-left:4px">informational</span>' : ''}
+                      ${isLowPri ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(99,102,241,.08);color:#818cf8;margin-left:4px">informational</span>' : ''}
                     </div>
                     <div class="tax-review-group-why">${meta.why}</div>
                   </div>
+                  <span style="color:var(--tax-muted);font-size:12px;margin-left:8px">${isCollapsed ? '▶' : '▼'}</span>
                 </div>
+                ${isCollapsed ? '' : `
                 <div class="tax-review-fix-tip">
                   💡 ${meta.fix}
                   ${reason === 'duplicate' ? `<button class="tax-btn tax-btn-xs" style="margin-left:8px;background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteDuplicates()">🗑 Delete all duplicates</button>` : ''}
-                  <span style="display:inline-flex;gap:6px;margin-left:8px">${bulkActions}</span>
+                  <span style="display:inline-flex;gap:6px;margin-left:8px">${extraBulk}${bulkActions}</span>
                 </div>
                 <div class="tax-review-items">
-                  ${items.map(({ txn, isK4Blocker: itemK4 }) => {
-                    const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(txn.assetSymbol) : { symbol: txn.assetSymbol, name: '' };
-                    const displaySym = td.symbol || txn.assetSymbol || '?';
-                    const displayName = td.name || txn.assetName || '';
-                    const acct = TaxEngine.getAccounts().find(a => a.id === txn.accountId);
-                    const acctLabel = acct ? (acct.label || acct.type || acct.id.slice(-6)) : 'Unknown wallet';
-                    const confidenceDot = txn.priceConfidence === 'spam_zero' ? '🗑️'
-                      : txn.priceConfidence === 'received_unsold' ? '📥'
-                      : txn.priceConfidence === 'unknown_manual' ? '❓' : '';
-                    return `
-                    <div class="tax-review-item">
-                      <div class="tax-ri-left" style="flex:1;min-width:0">
-                        <span class="tax-asset-sym" title="${txn.assetSymbol}">${displaySym}</span>
-                        ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:var(--tax-muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${displayName}">${displayName}</span>` : ''}
-                        <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
-                        <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
-                        <span class="tax-badge" style="font-size:10px;opacity:.7">${acctLabel}</span>
-                        ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
-                        ${txn.category ? `<span class="tax-badge" style="font-size:10px">${txn.category}</span>` : ''}
-                        ${itemK4 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171">K4</span>` : ''}
-                        ${confidenceDot ? `<span title="Price confidence: ${txn.priceConfidence}" style="font-size:11px">${confidenceDot}</span>` : ''}
-                      </div>
-                      <div class="tax-ri-right">
-                        <button class="tax-btn tax-btn-xs tax-btn-primary" onclick="TaxUI.editTx('${txn.id}')">Edit</button>
-                        <button class="tax-btn tax-btn-xs" style="color:#94a3b8" onclick="TaxUI.markSpam('${txn.id}')" title="Mark as spam (zero value)">🚫</button>
-                        <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')">OK</button>
-                        <button class="tax-btn tax-btn-xs" style="color:#f87171" onclick="TaxUI.deleteTx('${txn.id}')" title="Delete">🗑</button>
-                      </div>
-                    </div>`;
-                  }).join('')}
-                </div>
+                  ${subGroups && subGroups.length > 1
+                    ? subGroups.map(sg => `
+                        <div style="padding:6px 12px 4px;background:rgba(148,163,184,.04);border-bottom:1px solid rgba(148,163,184,.08)">
+                          <span style="font-size:11px;font-weight:600;color:#64748b">${sg.label}</span>
+                          <span style="font-size:10px;color:#475569;margin-left:6px">${sg.items.length} transaction${sg.items.length !== 1 ? 's' : ''}</span>
+                          ${sg.tip ? `<span style="font-size:10px;color:#475569;margin-left:8px">· ${sg.tip}</span>` : ''}
+                        </div>
+                        ${sg.items.map(issue => renderReviewRow(issue)).join('')}
+                      `).join('')
+                    : items.map(issue => renderReviewRow(issue)).join('')
+                  }
+                </div>`}
               </div>`;
             }).join('')}
           </div>
@@ -1704,14 +1755,38 @@ const TaxUI = (() => {
     `;
   }
 
+  // Human-readable labels for priceBlockReason values
+  const BLOCK_REASON_LABELS = {
+    no_market_listing:      { label: 'No market listing',     tip: 'Not listed on CoinGecko/CoinMarketCap — price must come from swap context or be entered manually.' },
+    no_priced_swap_leg:     { label: 'No priced swap leg',    tip: 'Part of a swap where the counterpart asset also has no price — enter the price of either side.' },
+    market_api_failed:      { label: 'Price API failed',      tip: 'Listed token but price API returned no data for this date — try Batch Price Lookup.' },
+    swap_inference_failed:  { label: 'Inference failed',      tip: 'Has a priced swap partner but derivation failed — try re-running the pipeline.' },
+    no_swap_context:        { label: 'No transaction context', tip: 'Standalone transaction with no swap data — price must be entered manually.' },
+  };
+
   function groupByReason(issues) {
     const groups = {};
     for (const issue of issues) {
-      if (!groups[issue.reason]) groups[issue.reason] = { reason: issue.reason, meta: issue.meta, items: [], hasK4: false };
+      if (!groups[issue.reason]) groups[issue.reason] = { reason: issue.reason, meta: issue.meta, items: [], hasK4: false, subGroups: null };
       groups[issue.reason].items.push(issue);
       if (issue.isK4Blocker) groups[issue.reason].hasK4 = true;
     }
-    // Return in priority order matching engine sort
+    // For missing_sek_price, build sub-groups by priceBlockReason
+    if (groups.missing_sek_price) {
+      const subMap = {};
+      for (const issue of groups.missing_sek_price.items) {
+        const key = issue.priceBlockReason || 'no_swap_context';
+        if (!subMap[key]) subMap[key] = [];
+        subMap[key].push(issue);
+      }
+      // Sub-group order: API failed first (easiest to fix) → no_priced_swap_leg → no_market_listing → rest
+      const SUB_ORDER = ['swap_inference_failed','market_api_failed','no_priced_swap_leg','no_market_listing','no_swap_context'];
+      groups.missing_sek_price.subGroups = Object.entries(subMap).sort(([a],[b]) => {
+        const ai = SUB_ORDER.indexOf(a), bi = SUB_ORDER.indexOf(b);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      }).map(([key, items]) => ({ key, ...BLOCK_REASON_LABELS[key], items }));
+    }
+    // Return in priority order
     const ORDER = [
       'unknown_acquisition','negative_balance','missing_sek_price','unknown_asset',
       'duplicate','ambiguous_swap','unmatched_transfer','outlier','split_trade',
@@ -2190,6 +2265,48 @@ const TaxUI = (() => {
     render();
   }
 
+  // Toggle a review group's collapsed state
+  function toggleReviewGroup(reason) {
+    if (!S.collapsedGroups) S.collapsedGroups = new Set(['received_not_sold']);
+    if (S.collapsedGroups.has(reason)) S.collapsedGroups.delete(reason);
+    else S.collapsedGroups.add(reason);
+    render();
+  }
+
+  // Auto-infer prices for all still-missing transactions by re-applying the full
+  // pricing chain on just the unpriced subset, then merging results back.
+  async function bulkAutoInfer() {
+    const allTxns    = TaxEngine.getTransactions();
+    const unpriced   = allTxns.filter(t => !t.priceSEKPerUnit && !t.costBasisSEK && !t.isInternalTransfer);
+    if (!unpriced.length) {
+      showTaxToast('ℹ️', 'Nothing to infer', 'All transactions already have prices.', 'info'); return;
+    }
+    showTaxToast('⏳', 'Running inference…',
+      `Applying swap-leg + propagation + back-derive on ${unpriced.length} unpriced transactions…`, 'info');
+    try {
+      // fetchAllSEKPrices re-runs the full pricing chain (all passes)
+      const repriced = await TaxEngine.fetchAllSEKPrices(allTxns, () => {});
+      TaxEngine.saveTransactions(repriced);
+      const resolved = repriced.filter(t => {
+        const was = allTxns.find(x => x.id === t.id);
+        return was && !was.priceSEKPerUnit && t.priceSEKPerUnit > 0;
+      }).length;
+      S.taxResult = null;
+      showTaxToast(
+        resolved > 0 ? '✅' : '⚠️',
+        resolved > 0 ? `Resolved ${resolved} transaction${resolved !== 1 ? 's' : ''}` : 'No new prices found',
+        resolved > 0
+          ? `${resolved} previously unpriced transaction${resolved !== 1 ? 's' : ''} now have inferred SEK prices.`
+          : 'Could not derive prices — enter them manually or mark as spam.',
+        resolved > 0 ? 'success' : 'warning'
+      );
+      render();
+    } catch (e) {
+      console.error('[AutoInfer]', e);
+      showTaxToast('❌', 'Inference failed', e.message, 'error');
+    }
+  }
+
   function removeAccount(id) {
     const acc = TaxEngine.getAccounts().find(a => a.id === id);
     const txCount = TaxEngine.getTransactions().filter(t => t.accountId === id).length;
@@ -2603,6 +2720,7 @@ const TaxUI = (() => {
     toggleSelectAll, toggleSelectTx, deleteSelected, deleteAllFiltered, clearSelection,
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
+    bulkAutoInfer, toggleReviewGroup,
     deleteDuplicates, removeAccount, clearAllData,
     downloadK4CSV, downloadK4PDF, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, manualCloudSync,

@@ -1527,6 +1527,49 @@ const TaxEngine = (() => {
     return txns;
   }
 
+  // Pass 2.5: Propagate derived prices to same-symbol same-day transactions.
+  // After the multi-round cross-tx loop some tokens gain swap-implied prices.
+  // This pass spreads those prices to any remaining unpriced transactions for
+  // the same symbol on the exact same calendar day, capturing e.g.:
+  //   • multiple PEIPEI buys on the same day as the priced swap
+  //   • transfer-in of a token bought elsewhere on the same day
+  // Source priority: trade_exact / stable > market_api > swap_implied / back_derived
+  function propagateSameDayPrices(txns) {
+    const SRC_PRIORITY = {
+      [PS.TRADE_EXACT]: 5, [PS.STABLE_HIST_FX]: 4, [PS.STABLE_APPROX]: 4,
+      [PS.MARKET_API]: 3, [PS.DEX_MARKET]: 3,
+      [PS.SWAP_IMPLIED]: 2, [PS.PAIR_DERIVED]: 2, [PS.BACK_DERIVED]: 1,
+    };
+    // Build best-price-per-day map
+    const dayMap = new Map(); // "SYM|YYYY-MM-DD" → { price, source, priority }
+    for (const t of txns) {
+      if (!t.priceSEKPerUnit || t.priceSEKPerUnit <= 0) continue;
+      if (t.priceSource === PS.MISSING) continue;
+      const key = `${(t.assetSymbol||'').toUpperCase()}|${(t.date||'').slice(0,10)}`;
+      const pri  = SRC_PRIORITY[t.priceSource] ?? 0;
+      const cur  = dayMap.get(key);
+      if (!cur || pri > cur.priority) dayMap.set(key, { price: t.priceSEKPerUnit, source: t.priceSource, priority: pri });
+    }
+    // Apply to unpriced transactions
+    return txns.map(t => {
+      if (t.priceSEKPerUnit > 0 || t.priceSource !== PS.MISSING) return t;
+      if (t.isInternalTransfer) return t;
+      if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) return t;
+      const key = `${(t.assetSymbol||'').toUpperCase()}|${(t.date||'').slice(0,10)}`;
+      const entry = dayMap.get(key);
+      if (!entry || entry.price <= 0) return t;
+      const amt = t.amount || 0;
+      if (!amt) return t;
+      return {
+        ...t,
+        priceSEKPerUnit: entry.price, costBasisSEK: entry.price * amt,
+        priceSource: entry.source, priceConfidence: PC.INFERRED_MED,
+        pricePropagatedSameDay: true,
+        needsReview: false, reviewReason: null,
+      };
+    });
+  }
+
   // Pass 3: Price fee rows using the same-date price of the fee asset
   function priceFees(txns, cache, fxByYear) {
     // Build a quick symbol-price map from already-priced transactions
@@ -1660,14 +1703,16 @@ const TaxEngine = (() => {
   }
 
   // Full pricing chain application
-  // Pass 1: independent per-transaction pricing (CoinGecko + stablecoin + inline swap derivation)
-  // Pass 2: cross-transaction derivation (same txHash + sibling prices) — up to 4 rounds
-  // Pass 3: fee row pricing
-  // Pass 4: back-derive acquisition price from later disposal of the same asset
-  // Final: tag any remaining unpriced taxable transactions for manual review
+  // Pass 1:   independent per-transaction pricing (CoinGecko + stablecoin + inline swap derivation)
+  // Pass 2:   cross-transaction derivation (same txHash + sibling prices) — up to 4 rounds
+  // Pass 2.5: propagate derived prices to same-symbol same-day transactions
+  // Pass 3:   fee row pricing
+  // Pass 4:   back-derive acquisition price from later disposal of the same asset
+  // Final:    tag any remaining unpriced taxable transactions for manual review
   function applyPricingChain(txns, cache, fxByYear) {
     let result = txns.map(t => priceOneTxn(t, cache, fxByYear)); // Pass 1
     result = deriveFromContext(result, cache, fxByYear);           // Pass 2 (multi-round)
+    result = propagateSameDayPrices(result);                      // Pass 2.5
     result = priceFees(result, cache, fxByYear);                  // Pass 3
     result = backDeriveFromDisposals(result);                     // Pass 4
     // Final: smart confidence triage — not all missing prices are equal
@@ -2120,6 +2165,14 @@ const TaxEngine = (() => {
 
     const flaggedIds = new Set(issues.map(i => i.txnId));
 
+    // ── Build txHash → tx[] map for swap-context analysis ──
+    const txsByHash = {};
+    for (const t of txns) {
+      if (t.txHash && !t.txHash.startsWith('manual_')) {
+        (txsByHash[t.txHash] = txsByHash[t.txHash] || []).push(t);
+      }
+    }
+
     // ── Pass 2: Structural checks (independent of per-tx flags) ──
     const taxableCats = new Set([
       CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY,
@@ -2148,9 +2201,34 @@ const TaxEngine = (() => {
         }
         // Group D: true unknown — K4 blocker (disposals) or high-priority acquisition
         const isDisposal = [CAT.SELL, CAT.TRADE, CAT.NFT_SALE].includes(t.category);
+        // Determine WHY this transaction is still unpriced, and the best fix
+        const sym = (t.assetSymbol || '').toUpperCase();
+        const hashGroup  = t.txHash ? (txsByHash[t.txHash] || []) : [];
+        const pricedPeers = hashGroup.filter(x => x.id !== t.id && x.priceSEKPerUnit > 0 && x.priceSource !== PS.MISSING);
+        const swapPeers   = hashGroup.filter(x => x.id !== t.id);
+        const hasKnownId  = !!(CC_IDS[sym] || t.coinGeckoId || STABLES.has(sym));
+        let priceBlockReason, suggestedAction;
+        if (pricedPeers.length > 0) {
+          // Has a priced swap partner — inference should have resolved this; signal re-pipeline
+          priceBlockReason = 'swap_inference_failed';
+          suggestedAction  = 'rerun_pipeline';
+        } else if (swapPeers.length > 0) {
+          // Has swap context but the counterpart is also unpriced
+          priceBlockReason = 'no_priced_swap_leg';
+          suggestedAction  = isDisposal ? 'enter_price' : 'enter_price';
+        } else if (!hasKnownId) {
+          // Token not in any price database — no external pricing possible
+          priceBlockReason = 'no_market_listing';
+          suggestedAction  = isDisposal ? 'enter_price' : 'mark_spam';
+        } else {
+          // Known token but API returned no data (delisted, missing date range, rate-limited)
+          priceBlockReason = 'market_api_failed';
+          suggestedAction  = 'batch_price_lookup';
+        }
         issues.push({ txnId: t.id, txn: t, reason: 'missing_sek_price',
           meta: REVIEW_DESCRIPTIONS.missing_sek_price,
-          priority: isDisposal ? 'critical' : 'high', isK4Blocker: isDisposal });
+          priority: isDisposal ? 'critical' : 'high', isK4Blocker: isDisposal,
+          priceBlockReason, suggestedAction });
         flaggedIds.add(t.id); continue;
       }
 

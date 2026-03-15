@@ -1086,6 +1086,10 @@ const TaxUI = (() => {
     );
     const hasPhantomSolana = phantomSolTxns.length > 0;
 
+    // Detect corrupt/legacy transactions that need the data migration cleanup
+    const cleanupStats = TaxEngine.getCleanupStats ? TaxEngine.getCleanupStats() : null;
+    const hasCorruptData = cleanupStats && cleanupStats.affected > 0;
+
     // Cloud sync status line
     const cloudMeta = (typeof SUPABASE_READY !== 'undefined' && SUPABASE_READY)
       ? (S._cloudSyncedAt
@@ -1144,6 +1148,31 @@ const TaxUI = (() => {
             <button class="tax-btn tax-btn-sm" style="background:#ef4444;color:#fff;flex-shrink:0;white-space:nowrap"
               onclick="TaxUI.purgeAndResync()">
               🧹 Rensa & reimportera
+            </button>
+          </div>
+        </div>` : ''}
+
+        <!-- ── Corrupt/legacy data migration warning ──────────── -->
+        ${hasCorruptData ? `
+        <div class="tax-warn-banner" style="margin-bottom:14px;border-color:#f59e0b99;background:rgba(245,158,11,0.08)">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:20px;flex-shrink:0">🛠</span>
+            <div style="flex:1">
+              <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:#fbbf24">
+                ${cleanupStats.affected} transaktioner med korrupta importvärden
+              </div>
+              <div style="font-size:12px;color:var(--text-secondary);line-height:1.6">
+                Gamla Solana-importer innehåller felaktiga belopp (lamport-skalningsfel, felaktiga priser inlagda från swap-rekonstruktion).
+                Dessa kan inflatera skattevinsten med miljontals kronor.
+                <strong>Kör datarensning</strong> för att rätta till dem — alla berörda transaktioner omprissätts och felaktiga värden tas bort.
+                ${cleanupStats.byType.corrupt_sol_inamount ? `<br>• ${cleanupStats.byType.corrupt_sol_inamount} med felaktigt SOL-belopp (lamport-artefakt)` : ''}
+                ${cleanupStats.byType.corrupt_stored_price ? `<br>• ${cleanupStats.byType.corrupt_stored_price} med extremt högt lagrat pris` : ''}
+                ${cleanupStats.byType.previously_flagged   ? `<br>• ${cleanupStats.byType.previously_flagged} redan flaggade som misstänkta` : ''}
+              </div>
+            </div>
+            <button class="tax-btn tax-btn-sm" style="background:#f59e0b;color:#000;flex-shrink:0;white-space:nowrap;font-weight:700"
+              onclick="TaxUI.runDataCleanup()">
+              🛠 Kör datarensning
             </button>
           </div>
         </div>` : ''}
@@ -1260,6 +1289,68 @@ const TaxUI = (() => {
           </div>` : ''}
           <button class="acc-add-btn" style="margin-top:16px" onclick="TaxUI.openAddAccountModal()">＋ Add account</button>
         </div>`}
+
+        <!-- ── Data maintenance section ─────────────────────── -->
+        ${txnCount > 0 ? `
+        <div class="tax-section" style="margin-top:24px">
+          <div class="tax-section-header" style="margin-bottom:10px">
+            <h2 style="font-size:13px;color:var(--tax-muted)">🛠 Dataunderhåll</h2>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">
+
+            <!-- Corruption cleanup card -->
+            <div style="padding:12px 14px;background:${hasCorruptData ? 'rgba(245,158,11,0.06)' : 'rgba(255,255,255,.02)'};border:1px solid ${hasCorruptData ? 'rgba(245,158,11,0.35)' : 'var(--tax-border)'};border-radius:8px">
+              <div style="font-size:12px;font-weight:600;color:${hasCorruptData ? '#fbbf24' : 'var(--tax-muted)'};margin-bottom:4px">
+                ${hasCorruptData ? `⚠ ${cleanupStats.affected} korrupta poster` : '✅ Databasen är ren'}
+              </div>
+              <div style="font-size:11px;color:var(--tax-muted);margin-bottom:8px;line-height:1.5">
+                ${hasCorruptData
+                  ? 'Felaktiga belopp/priser från gamla Solana-importer. Kan inflatera K4-siffror.'
+                  : 'Inga korrupta belopp eller prisartefakter hittades i databasen.'}
+              </div>
+              <button class="tax-btn tax-btn-xs ${hasCorruptData ? '' : 'tax-btn-ghost'}"
+                style="${hasCorruptData ? 'background:#f59e0b;color:#000;font-weight:700' : ''}"
+                onclick="TaxUI.runDataCleanup()">
+                ${hasCorruptData ? '🛠 Kör datarensning' : '🔍 Kör kontroll'}
+              </button>
+            </div>
+
+            <!-- Swap reconstruction card -->
+            <div style="padding:12px 14px;background:${hasStaleSolana ? 'rgba(99,102,241,0.07)' : 'rgba(255,255,255,.02)'};border:1px solid ${hasStaleSolana ? 'rgba(99,102,241,0.3)' : 'var(--tax-border)'};border-radius:8px">
+              <div style="font-size:12px;font-weight:600;color:${hasStaleSolana ? '#818cf8' : 'var(--tax-muted)'};margin-bottom:4px">
+                ${hasStaleSolana ? `◎ ${splitHashCount} swappar behöver rekonstrueras` : '✅ Solana-swappar OK'}
+              </div>
+              <div style="font-size:11px;color:var(--tax-muted);margin-bottom:8px;line-height:1.5">
+                ${hasStaleSolana
+                  ? 'Gamla TRADE-händelser är uppdelade som separata transfers. Ger fel kostnadsbas.'
+                  : 'Alla Solana-swappar är korrekt rekonstruerade som TRADE-händelser.'}
+              </div>
+              ${hasStaleSolana ? `
+              <button class="tax-btn tax-btn-xs" style="background:#6366f1;color:#fff"
+                onclick="TaxUI.reprocessAndSaveSolana()">
+                ◎ Rekonstruera swappar
+              </button>` : ''}
+            </div>
+
+            <!-- Phantom purge card -->
+            <div style="padding:12px 14px;background:${hasPhantomSolana ? 'rgba(239,68,68,0.06)' : 'rgba(255,255,255,.02)'};border:1px solid ${hasPhantomSolana ? 'rgba(239,68,68,0.3)' : 'var(--tax-border)'};border-radius:8px">
+              <div style="font-size:12px;font-weight:600;color:${hasPhantomSolana ? '#f87171' : 'var(--tax-muted)'};margin-bottom:4px">
+                ${hasPhantomSolana ? `🚨 ${phantomSolTxns.length} phantom-transaktioner` : '✅ Inga phantom-transaktioner'}
+              </div>
+              <div style="font-size:11px;color:var(--tax-muted);margin-bottom:8px;line-height:1.5">
+                ${hasPhantomSolana
+                  ? 'Misslyckade DEX-swappar importerade som riktiga — skapar felaktiga siffror.'
+                  : 'Inga misslyckade/phantom Solana-transaktioner hittades.'}
+              </div>
+              ${hasPhantomSolana ? `
+              <button class="tax-btn tax-btn-xs" style="background:#ef4444;color:#fff"
+                onclick="TaxUI.purgeAndResync()">
+                🧹 Rensa phantoms
+              </button>` : ''}
+            </div>
+
+          </div>
+        </div>` : ''}
 
         ${renderImportModal()}
         ${S.addAccountModal ? renderAddAccountModal() : ''}
@@ -1767,15 +1858,17 @@ const TaxUI = (() => {
 
   // Price source → short label + colour for the confidence dot in price column
   const PRICE_SOURCE_LABELS = {
-    trade_exact:            { label: 'Exchange',     dot: '#22c55e' },
-    market_api_coingecko:   { label: 'CoinGecko',    dot: '#22c55e' },
-    market_api_dex:         { label: 'DEX (GT)',     dot: '#34d399' },  // GeckoTerminal
-    swap_implied:           { label: 'Swap derived', dot: '#a78bfa' },
-    pair_derived:           { label: 'Derived',      dot: '#a78bfa' },
-    stable_historical_fx:   { label: 'FX',           dot: '#34d399' },
-    stable_approx:          { label: 'Approx',       dot: '#fbbf24' },
-    manual:                 { label: 'Manual',       dot: '#60a5fa' },
-    missing:                { label: 'Missing',      dot: '#f87171' },
+    trade_exact:            { label: 'Exchange',       dot: '#22c55e' },
+    market_api_coingecko:   { label: 'CoinGecko',      dot: '#22c55e' },
+    market_api_dex:         { label: 'DEX (GT)',        dot: '#34d399' },  // GeckoTerminal
+    swap_implied:           { label: 'Swap derived',   dot: '#a78bfa' },
+    pair_derived:           { label: 'Derived',        dot: '#a78bfa' },
+    stable_historical_fx:   { label: 'FX',             dot: '#34d399' },
+    stable_approx:          { label: 'Approx',         dot: '#fbbf24' },
+    manual:                 { label: 'Manual',         dot: '#60a5fa' },
+    back_derived:           { label: 'Back-derived',   dot: '#a78bfa' },
+    missing:                { label: 'Missing',        dot: '#f87171' },
+    outlier_suspect:        { label: '⚠ Misstänkt',   dot: '#ef4444' },  // corrupt import artifact
   };
 
   function renderTxRow(t) {
@@ -3827,6 +3920,65 @@ const TaxUI = (() => {
     }
   }
 
+  // ── Data cleanup / migration ─────────────────────────────
+  async function runDataCleanup() {
+    const stats = TaxEngine.getCleanupStats ? TaxEngine.getCleanupStats() : null;
+    if (!stats || stats.affected === 0) {
+      showTaxToast('✅', 'Databasen är ren', 'Inga korrupta transaktioner hittades.', 'success');
+      return;
+    }
+
+    const lines = [
+      `${stats.affected} transaktioner med korrupta värden hittades:\n`,
+      stats.byType.corrupt_sol_inamount  ? `• ${stats.byType.corrupt_sol_inamount} med felaktigt SOL-belopp (lamport-artefakt)` : '',
+      stats.byType.corrupt_stored_price  ? `• ${stats.byType.corrupt_stored_price} med extremt högt lagrat pris (>50 M kr)` : '',
+      stats.byType.previously_flagged    ? `• ${stats.byType.previously_flagged} redan flaggade som misstänkta` : '',
+      '',
+      'Datarensningen:\n 1. Rensar korrupta belopp och priser\n 2. Hämtar historiska priser från API\n 3. Omräknar kostnadsunderlag och K4\n\nFortsätt?',
+    ].filter(Boolean).join('\n');
+
+    if (!confirm(lines)) return;
+
+    S.pipelineRunning = true;
+    S.pipelinePct = 0;
+    S.pipelineMsg = 'Förbereder datarensning…';
+    S.taxResult   = null;
+    render();
+
+    let report;
+    try {
+      report = await TaxEngine.runSolanaDataCleanup((msg, pct) => {
+        S.pipelineMsg = msg;
+        S.pipelinePct = pct;
+        // Lightweight re-render: just update progress bar text if visible
+        const progressEl = document.getElementById('tax-pipeline-msg');
+        const pctEl      = document.getElementById('tax-pipeline-pct');
+        if (progressEl) progressEl.textContent = msg;
+        if (pctEl)      pctEl.style.width      = pct + '%';
+      });
+    } catch (err) {
+      S.pipelineRunning = false;
+      showTaxToast('❌', 'Datarensning misslyckades', err?.message || String(err), 'error');
+      render();
+      return;
+    }
+
+    S.pipelineRunning = false;
+    S.taxResult = null;  // force re-computation
+
+    // Show detailed results
+    const gainFmt = v => TaxEngine.formatSEK(v);
+    const deltaSign = report.gainDelta >= 0 ? '−' : '+';
+    const deltaAmt  = TaxEngine.formatSEK(Math.abs(report.gainDelta));
+    showTaxToast('🛠',
+      `Datarensning klar — ${report.affected} transaktioner`,
+      `${report.repriced} omprissatta, ${report.movedToReview} skickade till Granska. ` +
+      `Vinst: ${gainFmt(report.gainBefore)} → ${gainFmt(report.gainAfter)} (${deltaSign}${deltaAmt})`,
+      'success'
+    );
+    render();
+  }
+
   // ── Helpers ───────────────────────────────────────────────
   function getOrComputeTaxResult() {
     if (!S.taxResult || S.taxResult.year !== S.taxYear) {
@@ -3987,6 +4139,7 @@ const TaxUI = (() => {
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,
+    runDataCleanup,
     // Transactions page — expanded row & manual entry
     expandTxRow, setExpandedTab,
     toggleAddTxMenu, toggleTxTypeMenu, toggleTxWalletMenu, toggleTxLabelMenu,

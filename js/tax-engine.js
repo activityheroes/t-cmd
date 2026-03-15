@@ -1284,16 +1284,17 @@ const TaxEngine = (() => {
   // ════════════════════════════════════════════════════════════
 
   const PS = {
-    TRADE_EXACT:     'trade_exact',        // Exchange execution price (most reliable)
-    SWAP_IMPLIED:    'swap_implied',        // Derived from the other swap leg
-    MARKET_API:      'market_api_coingecko',// CoinGecko historical daily price
-    DEX_MARKET:      'market_api_dex',     // GeckoTerminal on-chain DEX OHLCV
-    PAIR_DERIVED:    'pair_derived',        // Inferred from priced counterpart in same tx
-    STABLE_HIST_FX:  'stable_historical_fx',// Stablecoin × historical USD/SEK FX rate
-    STABLE_APPROX:   'stable_approx',      // Stablecoin × hardcoded fallback rate
-    MANUAL:          'manual',             // User-entered price
-    BACK_DERIVED:    'back_derived',       // Inferred from a later disposal of the same asset
-    MISSING:         'missing',            // All passes failed — manual review required
+    TRADE_EXACT:      'trade_exact',         // Exchange execution price (most reliable)
+    SWAP_IMPLIED:     'swap_implied',         // Derived from the other swap leg
+    MARKET_API:       'market_api_coingecko', // CoinGecko historical daily price
+    DEX_MARKET:       'market_api_dex',       // GeckoTerminal on-chain DEX OHLCV
+    PAIR_DERIVED:     'pair_derived',         // Inferred from priced counterpart in same tx
+    STABLE_HIST_FX:   'stable_historical_fx', // Stablecoin × historical USD/SEK FX rate
+    STABLE_APPROX:    'stable_approx',        // Stablecoin × hardcoded fallback rate
+    MANUAL:           'manual',               // User-entered price
+    BACK_DERIVED:     'back_derived',         // Inferred from a later disposal of the same asset
+    MISSING:          'missing',              // All passes failed — manual review required
+    OUTLIER_SUSPECT:  'outlier_suspect',      // Value detected as anomalous / corrupt import artifact
   };
 
   // Price Confidence tiers — drive smart triage in getReviewIssues.
@@ -2695,14 +2696,26 @@ const TaxEngine = (() => {
     // astronomically wrong (e.g. 12,313 SEK/token from a lamport-scale
     // inAmount bug).  Strip any non-major token price whose total would
     // exceed 50 M SEK — they will show as "missing_price" in Review.
-    const SAFE_HIGH_PRICE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL']);
-    const MAX_STORED_PRICE_TOTAL = 50_000_000; // 50 M kr per disposal
+    // ── computeTaxYear sanity strip ──────────────────────────────────────
+    // Strip any baked-in price whose position value exceeds the sanity threshold
+    // for non-major assets. These are corrupt import artifacts (lamport-scale
+    // inAmount bug, etc.) that slipped past import-time guards on older rows.
+    // Marking them PS.OUTLIER_SUSPECT keeps them visible as a distinct status
+    // (not the same as "genuinely missing") and routes them to Review.
+    const SANITIZE_SAFE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL','WSOL']);
+    const SANITIZE_MAX_SEK     = 50_000_000; // 50 M kr per position for non-major assets
     txns = txns.map(t => {
-      if (!t.priceSEKPerUnit || SAFE_HIGH_PRICE_ASSETS.has((t.assetSymbol || '').toUpperCase())) return t;
-      if (t.priceSEKPerUnit * (t.amount || 0) > MAX_STORED_PRICE_TOTAL) {
-        return { ...t, priceSEKPerUnit: null, costBasisSEK: null,
-                 priceSource: 'missing', priceConfidence: null,
-                 needsReview: true, reviewReason: 'outlier' };
+      const sym = (t.assetSymbol || '').toUpperCase();
+      if (!t.priceSEKPerUnit || SANITIZE_SAFE_ASSETS.has(sym)) return t;
+      const positionSEK = t.priceSEKPerUnit * (t.amount || 0);
+      if (positionSEK > SANITIZE_MAX_SEK) {
+        return { ...t,
+          priceSEKPerUnit: null, costBasisSEK: null,
+          priceSource: PS.OUTLIER_SUSPECT, priceConfidence: null,
+          needsReview: true, reviewReason: 'outlier',
+          notes: (t.notes ? t.notes + ' | ' : '') +
+                 `[Sanity] ${sym}: ${Math.round(positionSEK/1e6)}M SEK position flagged as suspect`,
+        };
       }
       return t;
     });
@@ -4732,6 +4745,177 @@ const TaxEngine = (() => {
     return years;
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // SOLANA DATA CLEANUP & MIGRATION
+  // ─────────────────────────────────────────────────────────────────
+  // Detects and repairs transactions with corrupt stored values left
+  // over from old Solana imports (lamport-scale inAmount bug, stale
+  // baked-in prices).  The root-cause guard (Guard 3 in normalizeSolanaTx)
+  // already prevents new imports from carrying these bugs; this migration
+  // handles the legacy rows that already exist in IndexedDB.
+  // ═══════════════════════════════════════════════════════════════════
+
+  const CLEANUP_SOL_INAMOUNT_MAX = 10_000;   // SOL swap-leg > 10k → lamport artifact
+  const CLEANUP_PRICE_MAX_SEK    = 50_000_000; // > 50 M kr for non-major asset → corrupt
+  const CLEANUP_SAFE_ASSETS      = new Set(['BTC','WBTC','ETH','WETH','SOL','WSOL']);
+
+  // Returns a {type, detail} object if the transaction looks corrupt, or null.
+  function _detectCorruption(t) {
+    // 1. Corrupt SOL inAmount (lamport-scale error in old imports)
+    if ((t.inAsset || '').toUpperCase() === 'SOL' && (t.inAmount || 0) > CLEANUP_SOL_INAMOUNT_MAX) {
+      return {
+        type:   'corrupt_sol_inamount',
+        detail: `inAmount ${(t.inAmount || 0).toFixed(2)} SOL on swap leg — likely lamport-scale artifact`,
+      };
+    }
+    // 2. Corrupt baked-in price (position value > 50 M SEK for non-major token)
+    const sym = (t.assetSymbol || '').toUpperCase();
+    if (!CLEANUP_SAFE_ASSETS.has(sym) && (t.priceSEKPerUnit || 0) > 0) {
+      const positionSEK = t.priceSEKPerUnit * (t.amount || 0);
+      if (positionSEK > CLEANUP_PRICE_MAX_SEK) {
+        return {
+          type:   'corrupt_stored_price',
+          detail: `${sym}: ${t.priceSEKPerUnit.toFixed(2)} SEK/unit × ${(t.amount||0).toFixed(4)} = ` +
+                  `${Math.round(positionSEK/1e6)}M SEK — impossible for this token`,
+        };
+      }
+    }
+    // 3. Already flagged as suspect by a previous cleanup / sanity pass
+    if (t.priceSource === PS.OUTLIER_SUSPECT) {
+      return {
+        type:   'previously_flagged',
+        detail: t.notes ? t.notes.slice(0, 120) : 'Previously flagged by outlier guard',
+      };
+    }
+    return null;
+  }
+
+  // Apply in-memory fix to a corrupt transaction (no IDB write yet).
+  function _applyCleanupFix(t, issue) {
+    const fixed = { ...t };
+    // Fix corrupt SOL inAmount — zero out so swap reconstruction is not poisoned
+    if (issue.type === 'corrupt_sol_inamount') {
+      fixed.inAmount = 0;
+      fixed.inAsset  = null;
+    }
+    // Clear baked-in pricing so applyPricingChain can assign a fresh value
+    fixed.priceSEKPerUnit = null;
+    fixed.costBasisSEK    = null;
+    fixed.priceSource     = PS.OUTLIER_SUSPECT;
+    fixed.priceConfidence = null;
+    fixed.needsReview     = true;
+    fixed.reviewReason    = 'outlier';
+    fixed.notes           = `[Rensad ${new Date().toLocaleDateString('sv-SE')}] ${issue.detail}`;
+    return fixed;
+  }
+
+  // Synchronous preview — returns counts without modifying any data.
+  function getCleanupStats() {
+    const all    = getTransactions();
+    const byType = {};
+    let affected = 0;
+    for (const t of all) {
+      const issue = _detectCorruption(t);
+      if (!issue) continue;
+      affected++;
+      byType[issue.type] = (byType[issue.type] || 0) + 1;
+    }
+    return { total: all.length, affected, byType };
+  }
+
+  // Full async cleanup: detect → fix → re-price via fetchAllSEKPrices → save → report.
+  // onProgress(message, pct0to100) is called throughout.
+  async function runSolanaDataCleanup(onProgress) {
+    const log = (msg, pct) => onProgress?.(msg, pct);
+
+    log('Skannar transaktioner efter korrupta värden…', 2);
+    const all = getTransactions();
+
+    // ── Phase 1: Detect and fix corrupt records in-memory ──────
+    const affectedIds  = new Set();
+    const issuesByType = {};
+    let   gainBefore   = 0;
+
+    const cleaned = all.map(t => {
+      const issue = _detectCorruption(t);
+      if (!issue) return t;
+      affectedIds.add(t.id);
+      issuesByType[issue.type] = (issuesByType[issue.type] || 0) + 1;
+      return _applyCleanupFix(t, issue);
+    });
+
+    const affectedCount = affectedIds.size;
+    if (affectedCount === 0) {
+      return {
+        affected: 0, repriced: 0, movedToReview: 0, byType: {},
+        gainBefore: 0, gainAfter: 0, gainDelta: 0,
+        message: 'Inga korrupta transaktioner hittades — databasen är ren.',
+      };
+    }
+
+    log(`${affectedCount} korrupta poster hittades. Rensar och omprissätter…`, 10);
+
+    // Capture pre-cleanup gain for delta report
+    try {
+      const yr = (getSettings().taxYear) || new Date().getFullYear();
+      const beforeResult = computeTaxYear(yr, all);
+      gainBefore = (beforeResult.summary || {}).totalGains || 0;
+    } catch (_) {}
+
+    // ── Phase 2: Re-price all transactions through full chain ──
+    log('Hämtar historiska priser från API (kan ta en stund)…', 14);
+    let repriced = cleaned;
+    try {
+      repriced = await fetchAllSEKPrices(cleaned, (msg, pct) => {
+        log(msg || 'Prissätter transaktioner…', 14 + Math.round((pct || 0) * 0.74));
+      });
+    } catch (err) {
+      console.error('[cleanup] fetchAllSEKPrices error:', err);
+      // Save the cleaned (un-priced) data rather than failing completely
+    }
+
+    log('Räknar om skattesiffror…', 90);
+
+    // ── Phase 3: Compute before/after delta ───────────────────
+    let gainAfter = 0;
+    try {
+      const yr = (getSettings().taxYear) || new Date().getFullYear();
+      const afterResult = computeTaxYear(yr, repriced);
+      gainAfter = (afterResult.summary || {}).totalGains || 0;
+    } catch (_) {}
+
+    // ── Phase 4: Count pricing outcomes for affected rows ─────
+    let nowPriced = 0, movedToReview = 0;
+    for (const t of repriced) {
+      if (!affectedIds.has(t.id)) continue;
+      const hasPrice = (t.priceSEKPerUnit || 0) > 0
+                    && t.priceSource !== PS.MISSING
+                    && t.priceSource !== PS.OUTLIER_SUSPECT;
+      if (hasPrice) nowPriced++;
+      else          movedToReview++;
+    }
+
+    // ── Phase 5: Save to IDB ──────────────────────────────────
+    log('Sparar till databasen…', 94);
+    saveTransactions(repriced);
+
+    log('Datarensning slutförd!', 100);
+
+    const gainDelta = gainBefore - gainAfter;
+    return {
+      affected:      affectedCount,
+      repriced:      nowPriced,
+      movedToReview,
+      byType:        issuesByType,
+      gainBefore,
+      gainAfter,
+      gainDelta,
+      message: `${affectedCount} transaktioner rensade. ${nowPriced} omprissatta. ` +
+               `${movedToReview} skickade till Granska. ` +
+               `Vinst ändrades ${gainDelta >= 0 ? '−' : '+'}${Math.abs(Math.round(gainDelta/1000)).toLocaleString('sv-SE')} tkr.`,
+    };
+  }
+
   // ── Public API ────────────────────────────────────────────
   return {
     CAT, PS, PC, REVIEW_DESCRIPTIONS,
@@ -4758,6 +4942,8 @@ const TaxEngine = (() => {
     looksLikeContractAddress,
     // Re-sync / cleanup
     resyncAccount, purgeSolanaPhantoms,
+    // Data migration / corruption repair
+    getCleanupStats, runSolanaDataCleanup,
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine

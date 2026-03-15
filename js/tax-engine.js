@@ -4063,6 +4063,29 @@ const TaxEngine = (() => {
     Object.entries(KNOWN_MINTS).map(([mint, sym]) => [mint.slice(0, 8).toUpperCase(), sym])
   );
 
+  // Reverse: symbol → full mint address (for Solana token explorer links).
+  const SYM_TO_MINT = Object.fromEntries(
+    Object.entries(KNOWN_MINTS).map(([mint, sym]) => [sym, mint])
+  );
+
+  // Block explorer configs, keyed by account source type.
+  // Each entry has: name, tx(hash)→URL, token(mint)→URL, addr(address)→URL.
+  const CHAIN_EXPLORERS = {
+    solana_wallet: { name: 'Solscan',     tx: h => `https://solscan.io/tx/${h}`,           token: m => `https://solscan.io/token/${m}`,      addr: a => `https://solscan.io/account/${a}` },
+    eth_wallet:    { name: 'Etherscan',   tx: h => `https://etherscan.io/tx/${h}`,          token: m => `https://etherscan.io/token/${m}`,     addr: a => `https://etherscan.io/address/${a}` },
+    base_wallet:   { name: 'Basescan',    tx: h => `https://basescan.org/tx/${h}`,          token: m => `https://basescan.org/token/${m}`,     addr: a => `https://basescan.org/address/${a}` },
+    arb_wallet:    { name: 'Arbiscan',    tx: h => `https://arbiscan.io/tx/${h}`,           token: m => `https://arbiscan.io/token/${m}`,      addr: a => `https://arbiscan.io/address/${a}` },
+    avax_wallet:   { name: 'Snowtrace',   tx: h => `https://snowtrace.io/tx/${h}`,          token: m => `https://snowtrace.io/token/${m}`,     addr: a => `https://snowtrace.io/address/${a}` },
+    bnb_wallet:    { name: 'BscScan',     tx: h => `https://bscscan.com/tx/${h}`,           token: m => `https://bscscan.com/token/${m}`,      addr: a => `https://bscscan.com/address/${a}` },
+    polygon_wallet:{ name: 'Polygonscan', tx: h => `https://polygonscan.com/tx/${h}`,       token: m => `https://polygonscan.com/token/${m}`,  addr: a => `https://polygonscan.com/address/${a}` },
+  };
+
+  // Solana secondary explorers (shown as additional links alongside Solscan).
+  const SOL_SECONDARY_EXPLORERS = [
+    { name: 'SolanaFM', tx: h => `https://solana.fm/tx/${h}`,       token: m => `https://solana.fm/address/${m}` },
+    { name: 'Xray',     tx: h => `https://xray.helius.xyz/tx/${h}`, token: m => `https://xray.helius.xyz/account/${m}` },
+  ];
+
   // Resolve display {symbol, name} for any assetSymbol — handles both proper
   // symbols (SOL, ETH) and 8-char truncated Solana mint prefixes (JUPYIWRY → JUP).
   function resolveTokenDisplay(sym) {
@@ -4645,6 +4668,8 @@ const TaxEngine = (() => {
     fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory, buildCostBasisHistory,
     // Token name resolution
     resolveTokenDisplay, resolveUnknownTokenNames,
+    // Explorer configs (used by tax-ui.js)
+    CHAIN_EXPLORERS, SOL_SECONDARY_EXPLORERS, SYM_TO_MINT,
     // Utils
     formatSEK, formatCrypto, getAvailableTaxYears,
     isPipelineRunning: () => _pipelineRunning,

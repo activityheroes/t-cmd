@@ -497,6 +497,15 @@ const TaxUI = (() => {
     const ch24sek = h.change24hSEK;
     // Use resolved (clean) symbol for the CoinCap icon URL
     const icon = `https://assets.coincap.io/assets/icons/${displaySym.toLowerCase()}@2x.png`;
+    // Explorer link for this asset (Solana tokens only via SYM_TO_MINT reverse map)
+    const solMint = TaxEngine.SYM_TO_MINT && TaxEngine.SYM_TO_MINT[displaySym];
+    const solscanTokenUrl = solMint ? `https://solscan.io/token/${solMint}` : null;
+    // CoinGecko fallback for non-Solana tokens with known symbols
+    const geckoUrl = !solMint && displaySym ? `https://www.coingecko.com/en/coins/${displaySym.toLowerCase()}` : null;
+    const assetExplorerUrl = solscanTokenUrl || geckoUrl;
+    const assetExplorerName = solscanTokenUrl ? 'Solscan' : 'CoinGecko';
+    // 3-dot menu id (unique per row)
+    const menuId = `asset-menu-${displaySym.replace(/[^a-z0-9]/gi, '_')}`;
     return `<tr>
       <td>
         <div class="tax-asset-cell">
@@ -505,7 +514,20 @@ const TaxUI = (() => {
           <span class="tax-asset-icon" style="display:none;font-size:9px">${displaySym.slice(0, 3)}</span>
           <div>
             <div class="tax-asset-sym">${displayName}</div>
-            <div class="tax-asset-name">${displaySym}</div>
+            <div class="tax-asset-name" style="display:flex;align-items:center;gap:4px">
+              ${displaySym}
+              ${assetExplorerUrl ? `<a href="${assetExplorerUrl}" target="_blank" rel="noopener noreferrer"
+                class="tax-explorer-icon" title="View ${displaySym} on ${assetExplorerName}">↗</a>` : ''}
+            </div>
+          </div>
+          <div class="tax-asset-menu-wrap" style="position:relative;margin-left:auto">
+            <button class="tax-asset-menu-btn" title="Åtgärder"
+              onclick="event.stopPropagation();(function(id){var m=document.getElementById(id);if(m)m.style.display=m.style.display==='block'?'none':'block'})('${menuId}')">⋮</button>
+            <div id="${menuId}" class="tax-asset-dropdown" style="display:none">
+              <button onclick="TaxUI.filterTxsByAsset('${displaySym}')">📋 Visa transaktioner</button>
+              ${assetExplorerUrl ? `<a href="${assetExplorerUrl}" target="_blank" rel="noopener noreferrer">🔍 ${assetExplorerName} ↗</a>` : ''}
+              ${solMint ? `<a href="https://solana.fm/address/${solMint}" target="_blank" rel="noopener noreferrer">🔍 SolanaFM ↗</a>` : ''}
+            </div>
           </div>
         </div>
       </td>
@@ -1779,6 +1801,44 @@ const TaxUI = (() => {
     `;
   }
 
+  // ── Block explorer links helper ─────────────────────────────
+  // Returns HTML for clickable explorer badge(s) for a transaction/token.
+  // source: 'solana_wallet' | 'eth_wallet' | …
+  // txHash: raw transaction signature / hash
+  // tokenMint: optional — full Solana mint address or EVM contract address
+  function explorerLinks(source, txHash, tokenMint) {
+    if (!txHash || txHash.startsWith('manual_')) return '';
+    const cfg = TaxEngine.CHAIN_EXPLORERS && TaxEngine.CHAIN_EXPLORERS[source];
+    if (!cfg) return '';
+    const txUrl = cfg.tx(txHash);
+    let html = `<a href="${txUrl}" target="_blank" rel="noopener noreferrer"
+      class="tax-explorer-link" title="View transaction on ${cfg.name}">${cfg.name} ↗</a>`;
+    // Solana: add secondary explorers (SolanaFM, Xray)
+    if (source === 'solana_wallet' && TaxEngine.SOL_SECONDARY_EXPLORERS) {
+      for (const sec of TaxEngine.SOL_SECONDARY_EXPLORERS) {
+        html += `<a href="${sec.tx(txHash)}" target="_blank" rel="noopener noreferrer"
+          class="tax-explorer-link tax-explorer-link--secondary"
+          title="View on ${sec.name}">${sec.name} ↗</a>`;
+      }
+    }
+    // Token link (if mint/contract provided)
+    if (tokenMint) {
+      html += `<a href="${cfg.token(tokenMint)}" target="_blank" rel="noopener noreferrer"
+        class="tax-explorer-link tax-explorer-link--token"
+        title="View token on ${cfg.name}">Token ↗</a>`;
+    }
+    return `<span class="tax-explorer-links">${html}</span>`;
+  }
+
+  // Returns a single small ↗ icon link (for compact spaces like review rows).
+  function explorerIconLink(source, txHash) {
+    if (!txHash || txHash.startsWith('manual_')) return '';
+    const cfg = TaxEngine.CHAIN_EXPLORERS && TaxEngine.CHAIN_EXPLORERS[source];
+    if (!cfg) return '';
+    return `<a href="${cfg.tx(txHash)}" target="_blank" rel="noopener noreferrer"
+      class="tax-explorer-icon" title="View on ${cfg.name}">↗</a>`;
+  }
+
   // ── Expandable row panel ────────────────────────────────────
   function renderExpandedTxRow(t) {
     const tab = S.expandedTxTab || 'description';
@@ -1797,7 +1857,13 @@ const TaxUI = (() => {
         <div class="tx-expand-kv"><span class="tx-expand-k">Pris (SEK)</span><span class="tx-expand-v tax-mono">${t.priceSEKPerUnit ? TaxEngine.formatSEK(t.priceSEKPerUnit, 2) : '—'} ${psMeta ? `<span style="font-size:10px;color:var(--tax-muted)">(${psMeta.label})</span>` : ''}</span></div>
         <div class="tx-expand-kv"><span class="tx-expand-k">Värde (SEK)</span><span class="tx-expand-v tax-mono">${val ? TaxEngine.formatSEK(val) : '—'}</span></div>
         ${t.feeSEK ? `<div class="tx-expand-kv"><span class="tx-expand-k">Avgift (SEK)</span><span class="tx-expand-v tax-mono">${TaxEngine.formatSEK(t.feeSEK, 2)}</span></div>` : ''}
-        ${t.txHash ? `<div class="tx-expand-kv" style="grid-column:1/-1"><span class="tx-expand-k">TxHash</span><span class="tx-expand-v tax-mono" style="font-size:10px;word-break:break-all">${t.txHash}</span></div>` : ''}
+        ${t.txHash ? `<div class="tx-expand-kv" style="grid-column:1/-1">
+          <span class="tx-expand-k">TxHash</span>
+          <span class="tx-expand-v" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px">
+            <span class="tax-mono" style="font-size:10px;word-break:break-all;flex:1;min-width:0">${t.txHash}</span>
+            ${explorerLinks(t.source, t.txHash)}
+          </span>
+        </div>` : ''}
         ${t.notes ? `<div class="tx-expand-kv" style="grid-column:1/-1"><span class="tx-expand-k">Anteckningar</span><span class="tx-expand-v">${t.notes}</span></div>` : ''}
       </div>
       ${t.needsReview ? `
@@ -2131,6 +2197,7 @@ const TaxUI = (() => {
           ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:var(--tax-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${displayName}">${displayName}</span>` : ''}
           <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
           <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
+          ${explorerIconLink(txn.source, txn.txHash)}
           ${txn.category ? `<span class="tax-badge" style="font-size:10px">${txn.category}</span>` : ''}
           <span class="tax-badge" style="font-size:10px;opacity:.6">${acctLabel}</span>
           ${itemK4 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;font-weight:600">K4</span>` : ''}
@@ -2723,6 +2790,14 @@ const TaxUI = (() => {
   }
 
   function setFilter(key, val) { S.txFilter[key] = val; S.txPage = 0; reRenderMain(); }
+
+  // Navigate to transactions page with search pre-filtered to a specific asset symbol.
+  function filterTxsByAsset(sym) {
+    S.txFilter.search = sym;
+    S.txPage = 0;
+    S.page = 'transactions';
+    render();
+  }
   function sortTxns(field) {
     S.txSort.dir = S.txSort.field === field ? (S.txSort.dir === 'asc' ? 'desc' : 'asc') : 'desc';
     S.txSort.field = field;
@@ -3743,6 +3818,7 @@ const TaxUI = (() => {
     portSetRange, filterAssets, toggleSmallBalances,
     // expose for inline onclick patterns
     filterTxns, sortTxnsArr: txns => sortTxnsArr(txns),
+    filterTxsByAsset,
   };
 
 })();

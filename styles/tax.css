@@ -3265,3 +3265,120 @@
   color: #e2e8f0;
 }
 
+
+
+/* ============================================================
+   BLOCK EXPLORER LINKS
+   ============================================================ */
+
+/* Container for one or more explorer badge links */
+.tax-explorer-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Each explorer badge (e.g. "Solscan ↗") */
+.tax-explorer-link {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+  background: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  transition: background 0.15s, color 0.15s;
+}
+.tax-explorer-link:hover {
+  background: rgba(99, 102, 241, 0.22);
+  color: #a5b4fc;
+  text-decoration: none;
+}
+
+/* Secondary explorers (SolanaFM, Xray) — slightly muted */
+.tax-explorer-link--secondary {
+  background: rgba(148, 163, 184, 0.08);
+  color: #64748b;
+  border-color: rgba(148, 163, 184, 0.15);
+}
+.tax-explorer-link--secondary:hover {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+/* Token link badge */
+.tax-explorer-link--token {
+  background: rgba(52, 211, 153, 0.08);
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.2);
+}
+.tax-explorer-link--token:hover {
+  background: rgba(52, 211, 153, 0.16);
+  color: #6ee7b7;
+}
+
+/* Single icon-only link (↗) used in compact spaces */
+.tax-explorer-icon {
+  display: inline-block;
+  font-size: 10px;
+  color: #64748b;
+  text-decoration: none;
+  line-height: 1;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.tax-explorer-icon:hover { color: #818cf8; text-decoration: none; }
+
+/* ── Asset row 3-dot menu ── */
+.tax-asset-menu-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s;
+}
+.tax-asset-menu-btn:hover {
+  background: rgba(255,255,255,.07);
+  color: #e2e8f0;
+}
+
+.tax-asset-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 170px;
+  background: #1e293b;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  z-index: 200;
+  overflow: hidden;
+}
+.tax-asset-dropdown button,
+.tax-asset-dropdown a {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #cbd5e1;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s;
+}
+.tax-asset-dropdown button:hover,
+.tax-asset-dropdown a:hover {
+  background: rgba(255,255,255,.06);
+  color: #f1f5f9;
+}

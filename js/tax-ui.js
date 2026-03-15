@@ -174,6 +174,18 @@ const TaxUI = (() => {
       { id: 'review',        icon: '🔍', label: 'Review' },
       { id: 'reports',       icon: '📊', label: 'Reports' },
     ];
+
+    // ── Filing status pill (uses cached taxResult when available) ──
+    const health = (S.taxResult && TaxEngine.computeReportHealth)
+      ? TaxEngine.computeReportHealth(S.taxResult) : null;
+    const STATUS_PILL = {
+      ok:           { icon: '✅', label: 'Klar för inlämning',       c: '#4ade80', bg: 'rgba(34,197,94,.08)',   border: 'rgba(34,197,94,.2)'   },
+      warnings:     { icon: '⚠️', label: 'Klar med varningar',        c: '#fbbf24', bg: 'rgba(251,191,36,.07)', border: 'rgba(251,191,36,.2)'  },
+      needs_review: { icon: '🔍', label: 'Granska innan inlämning',   c: '#fbbf24', bg: 'rgba(251,191,36,.1)',  border: 'rgba(251,191,36,.3)'  },
+      invalid:      { icon: '🔴', label: 'Beräkning ofullständig',    c: '#f87171', bg: 'rgba(239,68,68,.1)',   border: 'rgba(239,68,68,.3)'   },
+    };
+    const pill = health ? (STATUS_PILL[health.status] || null) : null;
+
     return `
       <div class="tax-logo">
         <span class="tax-logo-icon">🇸🇪</span>
@@ -189,6 +201,14 @@ const TaxUI = (() => {
           ${years.map(y => `<option value="${y}" ${y == S.taxYear ? 'selected' : ''}>${y}</option>`).join('')}
         </select>
       </div>
+
+      ${pill ? `
+      <button onclick="TaxUI.navigate('reports')"
+        style="display:flex;align-items:center;gap:8px;width:100%;margin:8px 0 4px;padding:8px 12px;border-radius:8px;
+               background:${pill.bg};border:1px solid ${pill.border};cursor:pointer;text-align:left">
+        <span style="font-size:14px">${pill.icon}</span>
+        <span style="font-size:11px;font-weight:600;color:${pill.c};line-height:1.3">${pill.label}</span>
+      </button>` : ''}
 
       <nav class="tax-nav">
         ${pages.map(p => `
@@ -254,13 +274,33 @@ const TaxUI = (() => {
     return `
       <div class="tax-page tax-page--portfolio">
 
-        <!-- ── Review banner ──────────────────────────────── -->
-        ${issues > 0 ? `
-        <div class="tax-review-banner" onclick="TaxUI.navigate('review')">
-          <span>⚠️</span>
-          <span><strong>${issues} transaktioner</strong> behöver granskning — skatteberäkningen kan vara ofullständig</span>
-          <span class="tax-rb-link">Åtgärda →</span>
-        </div>` : ''}
+        <!-- ── Review / health banner ─────────────────────── -->
+        ${(() => {
+          const h = (S.taxResult && TaxEngine.computeReportHealth)
+            ? TaxEngine.computeReportHealth(S.taxResult) : null;
+          if (h?.status === 'invalid') return `
+            <div class="tax-review-banner tax-review-banner--error" onclick="TaxUI.navigate('review')" style="background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)">
+              <span>🔴</span>
+              <div style="flex:1">
+                <strong style="color:#f87171">Beräkning troligen felaktig</strong>
+                <span style="color:#94a3b8;font-size:12px;margin-left:6px">${h.k4Blockers || issues} poster med okänd kostnadsbas — siffrorna nedan är inte tillförlitliga</span>
+              </div>
+              <span class="tax-rb-link" style="color:#f87171">Åtgärda →</span>
+            </div>`;
+          if (h?.status === 'needs_review' || h?.status === 'warnings') return `
+            <div class="tax-review-banner" onclick="TaxUI.navigate('review')">
+              <span>🟡</span>
+              <span><strong>${issues} poster</strong> behöver granskning — ${h.k4Blockers} K4-blockerare kvar</span>
+              <span class="tax-rb-link">Åtgärda →</span>
+            </div>`;
+          if (issues > 0) return `
+            <div class="tax-review-banner" onclick="TaxUI.navigate('review')">
+              <span>⚠️</span>
+              <span><strong>${issues} transaktioner</strong> behöver granskning — skatteberäkningen kan vara ofullständig</span>
+              <span class="tax-rb-link">Åtgärda →</span>
+            </div>`;
+          return '';
+        })()}
 
         <!-- ── HERO: balance + chart ───────────────────────── -->
         <div class="tax-port-top">
@@ -2200,6 +2240,53 @@ const TaxUI = (() => {
           </div>
         </div>` : ''}
 
+        <!-- ── Guided steps for new users ───────────────────── -->
+        ${(() => {
+          // Count issues by plain-language category
+          const missingHistory = issues.filter(i => ['unknown_acquisition','negative_balance'].includes(i.reason)).length;
+          const missingPrice   = issues.filter(i => i.reason === 'missing_sek_price').length;
+          const unknownToken   = issues.filter(i => ['unknown_asset','unknown_contract','unclassified'].includes(i.reason)).length;
+          const possibleSpam   = issues.filter(i => i.reason === 'spam_token').length;
+          const unmatchedXfer  = issues.filter(i => ['unmatched_transfer','bridge_review'].includes(i.reason)).length;
+          const totalBlockers  = missingHistory + missingPrice;
+          if (issues.length === 0) return '';  // shown via done banner below
+
+          const stepRow = (num, label, count, reason, tab) => {
+            const done  = count === 0;
+            const color = done ? '#4ade80' : (num <= 2 ? '#f87171' : '#fbbf24');
+            const icon  = done ? '✅' : (num <= 2 ? '🔴' : '🟡');
+            return `<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;
+                               background:${done ? 'rgba(34,197,94,.04)' : 'rgba(255,255,255,.02)'};
+                               border:1px solid ${done ? 'rgba(34,197,94,.12)' : 'rgba(148,163,184,.1)'};cursor:${done ? 'default' : 'pointer'}"
+                        ${done ? '' : `onclick="window.setReviewTab('${tab}')"`}>
+              <span style="font-size:16px;flex-shrink:0">${icon}</span>
+              <div style="flex:1">
+                <span style="font-size:12px;font-weight:600;color:${done ? '#4ade80' : '#e2e8f0'}">Steg ${num} · ${label}</span>
+              </div>
+              ${!done ? `<span style="font-size:11px;padding:2px 8px;border-radius:12px;background:${num<=2?'rgba(239,68,68,.12)':'rgba(251,191,36,.1)'};color:${color};font-weight:600;flex-shrink:0">${count} kvar</span>` : ''}
+            </div>`;
+          };
+
+          return `
+          <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;background:rgba(255,255,255,.02);border:1px solid rgba(148,163,184,.12)">
+            <div style="font-size:12px;font-weight:700;color:#64748b;letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">Nästa steg</div>
+            <div style="display:grid;gap:6px">
+              ${stepRow(1, 'Åtgärda saknad köphistorik',  missingHistory, 'unknown_acquisition', 'blockers')}
+              ${stepRow(2, 'Åtgärda saknade priser',      missingPrice,   'missing_sek_price',   'blockers')}
+              ${stepRow(3, 'Omatchade överföringar',       unmatchedXfer,  'unmatched_transfer',  'warnings')}
+              ${stepRow(4, 'Okända tokens',                unknownToken,   'unknown_asset',       'warnings')}
+              <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;
+                          background:${totalBlockers===0?'rgba(34,197,94,.06)':'rgba(255,255,255,.02)'};
+                          border:1px solid ${totalBlockers===0?'rgba(34,197,94,.2)':'rgba(148,163,184,.1)'};cursor:pointer"
+                   onclick="TaxUI.navigate('reports')">
+                <span style="font-size:16px">${totalBlockers===0?'✅':'⬜'}</span>
+                <div style="flex:1"><span style="font-size:12px;font-weight:600;color:${totalBlockers===0?'#4ade80':'#94a3b8'}">Steg 5 · Generera K4 och deklarera</span></div>
+                <span style="font-size:11px;color:#818cf8">Rapporter →</span>
+              </div>
+            </div>
+          </div>`;
+        })()}
+
         ${issues.length === 0 ? `
           <div class="tax-review-done">
             <div style="font-size:48px">✅</div>
@@ -2417,20 +2504,25 @@ const TaxUI = (() => {
         </div>
 
         ${health ? `
-        <div style="margin-bottom:16px;padding:12px 16px;border-radius:10px;background:${healthStyle.bg};border:1px solid ${healthStyle.border}">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <span style="font-size:20px">${healthStyle.icon}</span>
+        <div style="margin-bottom:16px;padding:${health.status==='invalid'?'16px':'12px'} 16px;border-radius:12px;background:${healthStyle.bg};border:${health.status==='invalid'?'2px':'1px'} solid ${healthStyle.border}">
+          <div style="display:flex;align-items:${health.status==='invalid'?'flex-start':'center'};gap:12px;flex-wrap:wrap">
+            <span style="font-size:${health.status==='invalid'?'28px':'20px'}">${healthStyle.icon}</span>
             <div style="flex:1">
-              <div style="font-size:13px;font-weight:600;color:${healthStyle.color}">${health.label}</div>
-              ${health.sublabel ? `<div style="font-size:12px;color:var(--tax-muted);margin-top:2px">${health.sublabel}</div>` : ''}
+              <div style="font-size:${health.status==='invalid'?'15px':'13px'};font-weight:700;color:${healthStyle.color}">${health.label}</div>
+              ${health.sublabel ? `<div style="font-size:12px;color:var(--tax-muted);margin-top:3px">${health.sublabel}</div>` : ''}
+              ${health.status==='invalid' ? `
+              <div style="margin-top:8px;font-size:12px;color:#94a3b8;line-height:1.6">
+                Dessa siffror <strong style="color:#f87171">ska inte lämnas in</strong> förrän du har åtgärdat problemen under Granska.
+                Kostnadsbas saknas för ${health.k4Blockers} avyttringar — vinsten är troligen kraftigt överskattad.
+              </div>` : ''}
               ${health.details && health.details.length > 0 ? `
               <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
                 ${health.details.map(d => `<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,0,0,.2);color:var(--tax-muted)">${d}</span>`).join('')}
               </div>` : ''}
             </div>
             ${health.status !== 'ok' ? `
-            <button class="tax-btn tax-btn-sm" style="color:${healthStyle.color};border-color:${healthStyle.border};background:transparent;white-space:nowrap" onclick="TaxUI.navigate('review')">
-              Granska →
+            <button class="tax-btn tax-btn-sm" style="color:${healthStyle.color};border-color:${healthStyle.border};background:${health.status==='invalid'?'rgba(239,68,68,.15)':'transparent'};white-space:nowrap;font-weight:600" onclick="TaxUI.navigate('review')">
+              Åtgärda →
             </button>` : ''}
           </div>
         </div>` : issues > 0 ? `
@@ -2445,7 +2537,11 @@ const TaxUI = (() => {
           <input id="tax-user-pnr" class="tax-input" type="text" placeholder="Personnummer (YYYYMMDD-XXXX)" value="${S.userPnr || ''}" onchange="TaxUI.setUserInfo('pnr', this.value)" style="width:220px;height:30px;font-size:12px">
         </div>
 
-        <div class="tax-report-hero">
+        <div class="tax-report-hero" style="${health?.canFile===false?'border-color:rgba(239,68,68,.3)':''}">
+          ${health?.canFile===false ? `<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 12px;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.2);margin:-1px -1px 0;border-radius:12px 12px 0 0">
+            <span style="font-size:12px">🚫</span>
+            <span style="font-size:11px;font-weight:700;color:#f87171;letter-spacing:.06em;text-transform:uppercase">UTKAST — EJ REDO FÖR INLÄMNING</span>
+          </div>` : ''}
           <div class="tax-rh-year">${S.taxYear}</div>
           <div class="tax-rh-title">Sammanfattning — Inkomstdeklaration 1</div>
           <div class="tax-rh-grid">
@@ -2470,9 +2566,10 @@ const TaxUI = (() => {
               <div class="tax-rh-val">${TaxEngine.formatSEK(summary.taxableGain)}</div>
             </div>
           </div>
-          <div class="tax-rh-tax-est">
+          <div class="tax-rh-tax-est" style="${health?.canFile===false?'opacity:.45':''}">
             <span class="tax-rh-tax-label">Beräknad skatt (30%)</span>
             <span class="tax-rh-tax-val">${TaxEngine.formatSEK(summary.estimatedTax)}</span>
+            ${health?.canFile===false ? `<span style="display:block;font-size:10px;color:#f87171;margin-top:2px">⚠️ troligen felaktig — åtgärda K4-blockerare</span>` : ''}
           </div>
           ${(summary.totalProceeds || 0) > 0 ? `
           <div class="tax-rh-detail-row">

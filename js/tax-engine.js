@@ -1465,19 +1465,29 @@ const TaxEngine = (() => {
           }
         }
       }
+      // ── SOL inAmount corruption guard ──────────────────────────────────
+      // Old Solana imports (pre-fix) may have stored inAmount in lamports or
+      // with a 1e9 scale error (e.g. 28,974 SOL when the real amount was ~0.029 SOL).
+      // Guard 3 in normalizeSolanaTx now prevents this at import time, but existing
+      // stored transactions bypass that.  A single on-chain DEX swap receiving > 10,000
+      // SOL (≈ $1.3 M) is physically implausible for personal use — zero out the
+      // effectiveInAmt so Level 2 is skipped and we fall through to Level 3 / missing.
+      const MAX_SOL_IN_SWAP = 10_000;
+      if (inSym === 'SOL' && effectiveInAmt > MAX_SOL_IN_SWAP) {
+        effectiveInAmt = 0; // forces getSEKValue to return null → Level 2 skipped
+      }
       // 2a. In-side is stablecoin → its SEK value is the proceeds/cost
-      const inSEK = getSEKValue(inSym, effectiveInAmt, date, cache, fxByYear);
+      const inSEK = effectiveInAmt > 0
+        ? getSEKValue(inSym, effectiveInAmt, date, cache, fxByYear)
+        : null;
       if (inSEK && inSEK > 0 && amt > 0) {
         // ── Swap-value sanity guard ──────────────────────────────────────
-        // If the swap-implied total value is > 10 M SEK and the in-asset is
-        // NOT a recognised "expensive" coin (BTC, ETH, SOL, WBTC, WETH),
-        // the inAmount is almost certainly a corrupt value from an old import
-        // (e.g. lamports stored instead of SOL, or raw base units instead of
-        // decimal-adjusted token amount). Flag it as outlier / missing_price
-        // so it doesn't silently inflate K4 gains.
-        const SAFE_HIGH_VALUE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL']);
-        const MAX_SWAP_SEK = 10_000_000; // 10 M kr ≈ $960 K — implausible for on-chain DEX swap
-        if (inSEK > MAX_SWAP_SEK && !SAFE_HIGH_VALUE_ASSETS.has(inSym)) {
+        // If the total swap value is > 50 M SEK it is implausible for any
+        // on-chain DEX swap in a personal tax return.  Flag as outlier so it
+        // doesn't silently inflate K4 gains.  (Legitimate >50 M swaps can be
+        // confirmed manually via the Edit Price button in Review.)
+        const MAX_SWAP_SEK = 50_000_000; // 50 M kr ≈ $5 M per swap
+        if (inSEK > MAX_SWAP_SEK) {
           return {
             ...t,
             priceSEKPerUnit: null, costBasisSEK: null,
@@ -1515,10 +1525,11 @@ const TaxEngine = (() => {
       const cached = lookupCachedSEK(sym, date, cache, t.contractAddress);
       if (cached) {
         const cachedTotal = cached * amt;
-        // Same sanity guard: > 10 M SEK total for an unknown token is implausible
-        const SAFE_HIGH_VALUE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL']);
-        const MAX_MARKET_SEK = 10_000_000;
-        if (cachedTotal > MAX_MARKET_SEK && !SAFE_HIGH_VALUE_ASSETS.has(sym)) {
+        // Same sanity guard: > 50 M SEK total for any asset is implausible in
+        // a personal tax return.  Applies to ALL assets (including SOL/ETH) to
+        // catch wrong market-API cache entries.
+        const MAX_MARKET_SEK = 50_000_000;
+        if (cachedTotal > MAX_MARKET_SEK) {
           // Don't trust this cached price — clear it and let it fall through to missing
           return {
             ...t,
@@ -2678,6 +2689,23 @@ const TaxEngine = (() => {
         }
       }
     }
+
+    // ── Sanity-strip corrupt stored prices ───────────────────────────────────
+    // Old Solana imports may have baked-in priceSEKPerUnit values that are
+    // astronomically wrong (e.g. 12,313 SEK/token from a lamport-scale
+    // inAmount bug).  Strip any non-major token price whose total would
+    // exceed 50 M SEK — they will show as "missing_price" in Review.
+    const SAFE_HIGH_PRICE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL']);
+    const MAX_STORED_PRICE_TOTAL = 50_000_000; // 50 M kr per disposal
+    txns = txns.map(t => {
+      if (!t.priceSEKPerUnit || SAFE_HIGH_PRICE_ASSETS.has((t.assetSymbol || '').toUpperCase())) return t;
+      if (t.priceSEKPerUnit * (t.amount || 0) > MAX_STORED_PRICE_TOTAL) {
+        return { ...t, priceSEKPerUnit: null, costBasisSEK: null,
+                 priceSource: 'missing', priceConfidence: null,
+                 needsReview: true, reviewReason: 'outlier' };
+      }
+      return t;
+    });
 
     // Process ALL history (including prior years) to build correct cost basis
     const allSorted = [...txns]

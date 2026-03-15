@@ -1186,16 +1186,36 @@ const TaxUI = (() => {
             <span class="acc-th">Synced</span>
             <span class="acc-th">Type</span>
             <span class="acc-th acc-th-r">Tx</span>
+            <span class="acc-th acc-th-r">Värde</span>
             <span class="acc-th acc-th-r">Actions</span>
           </div>
-          ${accounts.map(acc => {
-      const st = TaxEngine.getImportStatus(acc.id);
-      const cnt = txns.filter(t => t.accountId === acc.id).length;
-      const src = ACC_SOURCES.find(s => s.type === acc.type) || { icon: '📂', name: acc.type, color: '#64748b' };
-      const stMap = { synced: ['✅', 'Synced'], syncing: ['⏳', 'Syncing…'], partial_sync: ['⚠️', 'Partial'], failed: ['❌', 'Failed'], never_synced: ['—', 'Not synced'] };
-      const [stIcon, stLabel] = stMap[st.status] || stMap.never_synced;
-      const lastSync = acc.lastSyncAt ? timeAgoShort(acc.lastSyncAt) : 'Never';
-      return `<div class="acc-row">
+          ${(() => {
+      // Pre-compute per-account cost basis for the value column.
+      // We use current portfolio snapshot (if available) to estimate market value,
+      // falling back to invested cost basis if no live prices are loaded.
+      const snap = S.portfolioSnap;
+      const ACCT_ACQUIS = new Set(['buy','receive','transfer_in','income','staking','airdrop','bridge_in']);
+      const totalInvested = txns.reduce((s, t) => s + (ACCT_ACQUIS.has(t.category) ? (t.costBasisSEK || 0) : 0), 0);
+      const totalSnapValue = snap ? (snap.totalValueSEK || null) : null;
+      return accounts.map(acc => {
+        const st = TaxEngine.getImportStatus(acc.id);
+        const cnt = txns.filter(t => t.accountId === acc.id).length;
+        const accInvested = txns.filter(t => t.accountId === acc.id && ACCT_ACQUIS.has(t.category))
+          .reduce((s, t) => s + (t.costBasisSEK || 0), 0);
+        // Estimate current value = share of portfolio × total snap value
+        const accValueEst = totalSnapValue !== null && totalInvested > 0
+          ? Math.round((accInvested / totalInvested) * totalSnapValue)
+          : null;
+        const valueDisplay = accValueEst !== null
+          ? `<div class="tax-mono" style="font-size:12px">${TaxEngine.formatSEK(accValueEst)}</div>
+             <div style="font-size:10px;color:var(--tax-muted)">~est.</div>`
+          : `<div class="tax-mono" style="font-size:12px;color:var(--tax-muted)">${TaxEngine.formatSEK(accInvested)}</div>
+             <div style="font-size:10px;color:var(--tax-muted)">investerat</div>`;
+        const src = ACC_SOURCES.find(s => s.type === acc.type) || { icon: '📂', name: acc.type, color: '#64748b' };
+        const stMap = { synced: ['✅', 'Synced'], syncing: ['⏳', 'Syncing…'], partial_sync: ['⚠️', 'Partial'], failed: ['❌', 'Failed'], never_synced: ['—', 'Not synced'] };
+        const [stIcon] = stMap[st.status] || stMap.never_synced;
+        const lastSync = acc.lastSyncAt ? timeAgoShort(acc.lastSyncAt) : 'Never';
+        return `<div class="acc-row">
                   <div class="acc-row-account">
                     <div class="acc-row-icon" style="background:${src.color}22;border:1px solid ${src.color}44">${src.icon}</div>
                     <div>
@@ -1206,6 +1226,7 @@ const TaxUI = (() => {
                   <div class="acc-row-sync">${stIcon} <span title="${lastSync}">${lastSync}</span></div>
                   <div class="acc-row-type"><span class="tax-badge">${src.name}</span></div>
                   <div class="acc-row-tx tax-mono">${cnt.toLocaleString()}${st.filteredFailed > 0 ? `<span title="${st.filteredFailed} failed/non-economic transactions skipped at import" style="color:#f59e0b;font-size:10px;margin-left:4px">✗${st.filteredFailed}</span>` : ''}</div>
+                  <div class="acc-row-tx" style="text-align:right">${valueDisplay}</div>
                   <div class="acc-row-actions">
                     ${acc.type === 'solana_bc' || acc.type === 'phantom' || acc.type === 'solflare'
                         ? `<button class="tax-btn tax-btn-xs tax-btn-ghost" style="color:#9945FF"
@@ -1216,7 +1237,8 @@ const TaxUI = (() => {
                     <button class="tax-btn tax-btn-xs tax-btn-ghost" style="color:#f87171" onclick="TaxUI.removeAccount('${acc.id}')">✕</button>
                   </div>
                 </div>`;
-    }).join('')}
+      }).join('');
+    })()}
         </div>` : `
         <div class="acc-empty-state">
           <div class="acc-empty-icon">🔗</div>
@@ -2228,6 +2250,30 @@ const TaxUI = (() => {
     const blockInfo   = issue.priceBlockReason ? BLOCK_REASON_LABELS[issue.priceBlockReason] : null;
     const hasRecon    = !!(txn._reconstruction);
     const panelId     = `recon_${txn.id}`;
+
+    // ── Token identity block (shown for missing_price / outlier) ──────────
+    // Helps user identify WHICH coin needs a price and where to look it up.
+    const needsTokenInfo = issue.reason === 'missing_sek_price' || issue.reason === 'outlier';
+    const mintAddr   = txn.contractAddress || null;
+    // Coin icon via CoinCap (works for known symbols like SOL, JUP, etc.)
+    const iconSrc    = `https://assets.coincap.io/assets/icons/${displaySym.toLowerCase()}@2x.png`;
+    // Explorer link for the TOKEN (not the tx) — lets user identify the coin
+    const cfgE       = TaxEngine.CHAIN_EXPLORERS && TaxEngine.CHAIN_EXPLORERS[txn.source];
+    const tokenPageUrl = cfgE && mintAddr ? cfgE.token(mintAddr) : null;
+    const geckoUrl   = `https://www.coingecko.com/en/coins/${displaySym.toLowerCase()}`;
+    const tokenInfoHtml = needsTokenInfo ? `
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)">
+        <img src="${iconSrc}" style="width:18px;height:18px;border-radius:50%;flex-shrink:0"
+          onerror="this.style.display='none'">
+        <div style="flex:1;min-width:0">
+          <span style="font-size:12px;font-weight:600;color:#e2e8f0">${displaySym}</span>
+          ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:#64748b;margin-left:4px">${displayName}</span>` : ''}
+          ${mintAddr ? `<span class="tax-mono" style="font-size:10px;color:#475569;margin-left:6px" title="${mintAddr}">${mintAddr.slice(0,8)}…${mintAddr.slice(-5)}</span>` : ''}
+        </div>
+        ${tokenPageUrl ? `<a href="${tokenPageUrl}" target="_blank" rel="noopener" class="tax-explorer-link" style="font-size:10px;white-space:nowrap">Solscan ↗</a>` : ''}
+        <a href="${geckoUrl}" target="_blank" rel="noopener" class="tax-explorer-link tax-explorer-link--secondary" style="font-size:10px;white-space:nowrap">CoinGecko ↗</a>
+      </div>` : '';
+
     return `
     <div class="tax-review-item" style="flex-direction:column;align-items:stretch">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
@@ -2252,6 +2298,7 @@ const TaxUI = (() => {
           <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')" title="Dismiss">OK</button>
         </div>
       </div>
+      ${tokenInfoHtml}
       ${renderReconPanel(txn)}
     </div>`;
   }

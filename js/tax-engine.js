@@ -1398,13 +1398,26 @@ const TaxEngine = (() => {
 
     // ── Already priced ─────────────────────────────────────
     if (t.priceSEKPerUnit > 0 && t.priceSource !== PS.MISSING) {
-      return {
-        ...t,
-        costBasisSEK: t.costBasisSEK || t.priceSEKPerUnit * amt,
-        priceSource:     t.priceSource     || PS.TRADE_EXACT,
-        priceConfidence: t.priceConfidence || 'high',
-        needsReview: false, reviewReason: null,
-      };
+      // Sanity guard: catch baked-in corrupt prices from old imports.
+      // If a non-major token's stored price implies > 10 M SEK total value,
+      // clear it and force repricing (or fall through to missing_price).
+      // This fixes "billions in K4" caused by old lamport-scale inAmount errors.
+      const SAFE_HIGH_VALUE = new Set(['BTC','WBTC','ETH','WETH','SOL']);
+      const storedTotal = t.priceSEKPerUnit * amt;
+      if (storedTotal > 10_000_000 && !SAFE_HIGH_VALUE.has(sym)) {
+        // Strip the bad price — fall through to full repricing below
+        // eslint-disable-next-line no-param-reassign
+        t = { ...t, priceSEKPerUnit: null, costBasisSEK: null, priceSource: PS.MISSING };
+        // (intentional fall-through — do NOT return here)
+      } else {
+        return {
+          ...t,
+          costBasisSEK: t.costBasisSEK || t.priceSEKPerUnit * amt,
+          priceSource:     t.priceSource     || PS.TRADE_EXACT,
+          priceConfidence: t.priceConfidence || 'high',
+          needsReview: false, reviewReason: null,
+        };
+      }
     }
 
     // ── Level 1: Direct exchange execution price ──────────
@@ -1455,6 +1468,24 @@ const TaxEngine = (() => {
       // 2a. In-side is stablecoin → its SEK value is the proceeds/cost
       const inSEK = getSEKValue(inSym, effectiveInAmt, date, cache, fxByYear);
       if (inSEK && inSEK > 0 && amt > 0) {
+        // ── Swap-value sanity guard ──────────────────────────────────────
+        // If the swap-implied total value is > 10 M SEK and the in-asset is
+        // NOT a recognised "expensive" coin (BTC, ETH, SOL, WBTC, WETH),
+        // the inAmount is almost certainly a corrupt value from an old import
+        // (e.g. lamports stored instead of SOL, or raw base units instead of
+        // decimal-adjusted token amount). Flag it as outlier / missing_price
+        // so it doesn't silently inflate K4 gains.
+        const SAFE_HIGH_VALUE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL']);
+        const MAX_SWAP_SEK = 10_000_000; // 10 M kr ≈ $960 K — implausible for on-chain DEX swap
+        if (inSEK > MAX_SWAP_SEK && !SAFE_HIGH_VALUE_ASSETS.has(inSym)) {
+          return {
+            ...t,
+            priceSEKPerUnit: null, costBasisSEK: null,
+            priceSource: PS.MISSING, priceConfidence: null,
+            needsReview: true, reviewReason: 'outlier',
+            notes: `${t.notes ? t.notes + ' | ' : ''}PRISFEL: implicerat swap-värde ${Math.round(inSEK / 1e6)}M SEK är orimligt — kontrollera manuellt (trolig gammal felimport)`,
+          };
+        }
         return {
           ...t,
           priceSEKPerUnit: inSEK / amt, costBasisSEK: inSEK,
@@ -1483,6 +1514,20 @@ const TaxEngine = (() => {
     if (!STABLES.has(sym)) {
       const cached = lookupCachedSEK(sym, date, cache, t.contractAddress);
       if (cached) {
+        const cachedTotal = cached * amt;
+        // Same sanity guard: > 10 M SEK total for an unknown token is implausible
+        const SAFE_HIGH_VALUE_ASSETS = new Set(['BTC','WBTC','ETH','WETH','SOL']);
+        const MAX_MARKET_SEK = 10_000_000;
+        if (cachedTotal > MAX_MARKET_SEK && !SAFE_HIGH_VALUE_ASSETS.has(sym)) {
+          // Don't trust this cached price — clear it and let it fall through to missing
+          return {
+            ...t,
+            priceSEKPerUnit: null, costBasisSEK: null,
+            priceSource: PS.MISSING, priceConfidence: null,
+            needsReview: true, reviewReason: 'outlier',
+            notes: `${t.notes ? t.notes + ' | ' : ''}PRISFEL: marknadspris ger ${Math.round(cachedTotal / 1e6)}M SEK — troligen felaktig API-data`,
+          };
+        }
         return {
           ...t,
           priceSEKPerUnit: cached, costBasisSEK: cached * amt,

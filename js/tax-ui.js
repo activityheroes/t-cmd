@@ -1057,6 +1057,12 @@ const TaxUI = (() => {
     const txns = TaxEngine.getTransactions();
     const txnCount = txns.length;
 
+    // Detect orphaned transactions: belong to accounts that no longer exist
+    const knownAccountIds = new Set(accounts.map(a => a.id));
+    const orphanedTxns = txns.filter(t => !knownAccountIds.has(t.accountId));
+    const orphanedCount = orphanedTxns.length;
+    const hasOrphans = orphanedCount > 0;
+
     // Detect Solana accounts with potentially stale imports (old broken split-swap format).
     // A stale import has multiple solana_wallet transactions sharing a txHash but categorised
     // as transfer_in/transfer_out instead of a single TRADE row.
@@ -1142,6 +1148,25 @@ const TaxUI = (() => {
           </div>
         </div>` : ''}
 
+        <!-- ── Orphaned transactions warning ───────────────────── -->
+        ${hasOrphans ? `
+        <div class="tax-warn-banner" style="margin-bottom:14px;border-color:#f59e0b66;background:rgba(245,158,11,0.08)">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:18px;flex-shrink:0">🧹</span>
+            <div style="flex:1">
+              <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:#fbbf24">${orphanedCount.toLocaleString()} transaktioner från borttagna konton</div>
+              <div style="font-size:12px;color:var(--text-secondary)">
+                Dessa transaktioner tillhör plånböcker/börser som du har tagit bort. De påverkar fortfarande
+                skatterapporten tills du tar bort dem. Det är troligen det som orsakar 641 granskningsproblem.
+              </div>
+            </div>
+            <button class="tax-btn tax-btn-sm" style="background:#f59e0b;color:#000;flex-shrink:0;white-space:nowrap;font-weight:700"
+              onclick="TaxUI.deleteOrphanedTransactions()">
+              🗑 Ta bort ${orphanedCount.toLocaleString()} transaktioner
+            </button>
+          </div>
+        </div>` : ''}
+
         <!-- ── Cross-browser cloud sync info bar ─────────────── -->
         ${txnCount > 0 ? `
         <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;background:rgba(255,255,255,0.03);border:1px solid var(--border-subtle);border-radius:10px;margin-bottom:16px;font-size:12px;">
@@ -1197,6 +1222,20 @@ const TaxUI = (() => {
           <div class="acc-empty-icon">🔗</div>
           <div class="acc-empty-title">No accounts connected yet</div>
           <div class="acc-empty-sub">Click <strong>+ Add account</strong> to import wallets and exchanges.</div>
+          ${hasOrphans ? `
+          <div style="margin-top:20px;padding:14px 18px;border-radius:10px;border:1px solid #f59e0b66;background:rgba(245,158,11,0.08);max-width:420px;text-align:left">
+            <div style="font-size:13px;font-weight:700;color:#fbbf24;margin-bottom:6px">
+              🧹 ${orphanedCount.toLocaleString()} kvarvarande transaktioner
+            </div>
+            <div style="font-size:12px;color:#94a3b8;margin-bottom:10px;line-height:1.5">
+              Du har ${orphanedCount.toLocaleString()} transaktioner från konton du tagit bort.
+              De syns fortfarande i skatterapporten. Klicka nedan för att rensa dem.
+            </div>
+            <button class="tax-btn tax-btn-sm" style="background:#f59e0b;color:#000;font-weight:700;width:100%"
+              onclick="TaxUI.deleteOrphanedTransactions()">
+              🗑 Ta bort alla ${orphanedCount.toLocaleString()} transaktioner
+            </button>
+          </div>` : ''}
           <button class="acc-add-btn" style="margin-top:16px" onclick="TaxUI.openAddAccountModal()">＋ Add account</button>
         </div>`}
 
@@ -3300,6 +3339,22 @@ const TaxUI = (() => {
     showTaxToast('🗑', 'Account removed', txCount > 0 ? `${txCount.toLocaleString()} transactions deleted.` : '', 'success');
   }
 
+  function deleteOrphanedTransactions() {
+    const txns = TaxEngine.getTransactions();
+    const ids = new Set(TaxEngine.getAccounts().map(a => a.id));
+    const orphaned = txns.filter(t => !ids.has(t.accountId));
+    if (orphaned.length === 0) {
+      showTaxToast('ℹ️', 'Inga orphan-transaktioner', 'Alla transaktioner har giltiga konton.'); return;
+    }
+    if (!confirm(`Ta bort ${orphaned.length.toLocaleString()} transaktioner från borttagna konton?\n\nDessa transaktioner tillhör plånböcker/börser du har tagit bort. De kan inte återställas utan en ny import.\n\nKontinuera?`)) return;
+    const removed = TaxEngine.deleteOrphanedTransactions();
+    S.taxResult = null;
+    S.portfolioSnap = null;
+    S.portfolioHist = null;
+    render();
+    showTaxToast('🗑', 'Transaktioner borttagna', `${removed.toLocaleString()} transaktioner raderades.`, 'success');
+  }
+
   function clearAllData() {
     const txCount = TaxEngine.getTransactions().length;
     const accCount = TaxEngine.getAccounts().length;
@@ -3817,7 +3872,7 @@ const TaxUI = (() => {
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
     bulkAutoInfer, toggleReviewGroup,
-    deleteDuplicates, removeAccount, clearAllData,
+    deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,
     // Transactions page — expanded row & manual entry

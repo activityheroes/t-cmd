@@ -267,6 +267,17 @@ const TaxEngine = (() => {
     _importStatusCache = {};
     SupabaseDB.setUserData('tax_import_status', {}).catch(() => {});
   }
+
+  // Delete transactions whose accountId has no corresponding account entry.
+  // Returns the number of transactions removed.
+  function deleteOrphanedTransactions() {
+    const ids = new Set(getAccounts().map(a => a.id));
+    const all = getTransactions();
+    const kept = all.filter(t => ids.has(t.accountId));
+    const removed = all.length - kept.length;
+    if (removed > 0) saveTransactions(kept);
+    return removed;
+  }
   function updateAccount(id, data) {
     saveAccounts(getAccounts().map(a => a.id === id ? { ...a, ...data } : a));
   }
@@ -4654,7 +4665,7 @@ const TaxEngine = (() => {
     // Settings
     getSettings, saveSettings, loadSettings,
     // Accounts
-    getAccounts, addAccount, removeAccount, updateAccount, loadAccounts, clearAllData,
+    getAccounts, addAccount, removeAccount, updateAccount, loadAccounts, clearAllData, deleteOrphanedTransactions,
     clearUserCache,  // call on login/logout to wipe stale user data from memory
     getImportStatus, setImportStatus, loadImportStatuses,
     // Transactions

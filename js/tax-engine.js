@@ -13,7 +13,21 @@ const TaxEngine = (() => {
   const ROWS_PER_K4_FORM = 7;
 
   // ── Stablecoins (treated as SEK-proxies at 1 USD ≈ current rate) ──
-  const STABLES = new Set(['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'EUROC', 'EURC', 'USDS']);
+  // USD-pegged stablecoins — any of these with missing price data gets 1 USD fallback
+  const STABLES = new Set([
+    // Major USD stables
+    'USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'USDS', 'USDE',
+    'PYUSD', 'FDUSD', 'GUSD', 'HUSD', 'USDM', 'SUSD', 'USDX',
+    // Algorithmic / yield-bearing USD stables
+    'FRAX', 'LUSD', 'MIM', 'FEI', 'RAI', 'USDJ', 'USDD', 'CRVUSD',
+    'ALUSD', 'DOLA', 'BEAN', 'USDN', 'CUSD', 'MUSD',
+    // LP stablecoin representations often used in DeFi
+    '3CRV', 'USDC-LP', 'DAI-LP',
+    // EUR-pegged stablecoins
+    'EUROC', 'EURC', 'EURT', 'EURS', 'AGEUR', 'EURA',
+  ]);
+  // EUR-pegged subset (priced at EUR rate instead of USD rate)
+  const EUR_STABLES = new Set(['EUROC', 'EURC', 'EURT', 'EURS', 'AGEUR', 'EURA']);
   // ── Major assets with deep liquidity (used to prioritise swap-leg derivation) ──
   const MAJOR_ASSETS = new Set(['BTC','ETH','SOL','BNB','MATIC','AVAX','DOT','ADA','WETH','WBTC','WBNB','POL']);
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
@@ -30,11 +44,18 @@ const TaxEngine = (() => {
     'WBNB'    : 'BNB',  'WMATIC': 'MATIC',  'WAVAX' : 'AVAX',
     'WFTM'    : 'FTM',  'WCRO'  : 'CRO',   'WONE'  : 'ONE',
     'WROSE'   : 'ROSE', 'WKAVA' : 'KAVA',
-    // Bridged USDC variants (Polygon, Base, Arbitrum, etc.)
+    // Bridged USDC variants (Polygon, Base, Arbitrum, Optimism, etc.)
     'USDC.E'  : 'USDC', 'USDCE' : 'USDC',  'USDC.B': 'USDC',
     'BRIDGED_USDC': 'USDC', 'USD_COIN': 'USDC',
+    'USDCAV2': 'USDC', 'USDC2' : 'USDC',
     // Bridged USDT
-    'USDT.E'  : 'USDT', 'USDT.B': 'USDT',
+    'USDT.E'  : 'USDT', 'USDT.B': 'USDT', 'USDTAV2': 'USDT',
+    // Bridged DAI variants
+    'DAI.E'   : 'DAI',  'BDAI'  : 'DAI',
+    // Frax variants
+    'FRAXBP'  : 'FRAX',
+    // Curve USD
+    'CRVUSD'  : 'CRVUSD',
     // Staked / liquid-staked ETH (same economic exposure for Swedish tax)
     'STETH'   : 'ETH',  'WSTETH': 'ETH',   'BETH'  : 'ETH',   'RETH': 'ETH',
     // Staked SOL representations
@@ -2257,8 +2278,14 @@ const TaxEngine = (() => {
       bulkActions: ['confirm_spam', 'override_price'] },
     unknown_asset:        { label: 'Unknown token',               icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
     unmatched_transfer:   { label: 'Unmatched transfer',          icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
-    negative_balance:     { label: 'Incomplete buy history',      icon: '⚠️', why: 'More units sold than recorded acquired — some import history appears to be missing. Cost basis has been partially reconstructed.', fix: 'Import full transaction history for this asset from all sources (exchange CSVs, wallets, other chains).' },
-    unknown_acquisition:  { label: 'Unknown acquisition source',  icon: '🔍', why: 'This disposal has no matching acquisition in any imported wallet or exchange. The asset may have been purchased on an unconnected account, received as an OTC trade, or held before this wallet was tracked.', fix: 'Import the account where this was originally acquired, or enter the acquisition manually. Until resolved, cost basis is treated as 0 (full proceeds = gain per Skatteverket).' },
+    negative_balance:     { label: 'Incomplete buy history',      icon: '⚠️', priority: 'high', isK4Blocker: true,
+      why: 'More units were sold than recorded as acquired — some import history is missing. Cost basis has been partially reconstructed from available data.',
+      fix: 'Import the full transaction history for this asset from all sources (exchange CSVs, other wallets, other chains). If the asset moved between your own wallets, make sure both sides are imported.',
+      bulkActions: ['enter_price', 'mark_zero_cost', 'import_account'] },
+    unknown_acquisition:  { label: 'Unknown acquisition source',  icon: '🔍', priority: 'critical', isK4Blocker: true,
+      why: 'This disposal has no matching acquisition in any imported source. The asset may have been purchased on an unconnected exchange, received from an unimported wallet, or held before this wallet was tracked. Cost basis is set to 0 until resolved.',
+      fix: 'Add the exchange or wallet where this was originally acquired — the engine will automatically match the deposit and remove this issue. Alternatively, enter the acquisition price manually.',
+      bulkActions: ['import_account', 'enter_price', 'mark_zero_cost', 'mark_spam'] },
     duplicate:            { label: 'Possible duplicate',          icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one copy.' },
     unclassified:         { label: 'Unclassified',                icon: '🏷️', why: 'Could not determine what type of transaction this is.', fix: 'Select the correct category manually.' },
     ambiguous_swap:       { label: 'Incomplete swap',             icon: '↔️', why: 'Only one side of a swap was found — missing received asset or amount.', fix: 'Enter the received asset and amount on this transaction.' },
@@ -2474,6 +2501,102 @@ const TaxEngine = (() => {
     if (!txns) txns = getTransactions();
     year = parseInt(year);
 
+    // ── Pre-pass: detect assets sold with no acquisition in imported data ──────
+    // When a user's full history isn't imported (e.g. they only imported one wallet
+    // but bought on an exchange), disposals appear without prior acquisitions.
+    //
+    // Reconstruction heuristic:
+    //   1. Find every asset that has at least one disposal but NO acquisition event
+    //      anywhere in the transaction set (not just the tax year — all history).
+    //   2. For each such "orphan" asset, look for any RECEIVE or TRANSFER_IN that
+    //      was marked isInternalTransfer=true (meaning its cost basis was assumed
+    //      to come from the sending side, which wasn't imported). Those transfers
+    //      are the most likely acquisition record we have.
+    //   3. Pre-populate the holdings with the priced RECEIVE so the disposal gets a
+    //      real cost basis instead of 0.
+    //
+    // This handles the most common case: "I bought on Binance, withdrew to my
+    // Phantom wallet, and only imported the Phantom wallet."
+    {
+      const ACQ_CATS = new Set([CAT.BUY, CAT.RECEIVE, CAT.TRANSFER_IN, CAT.BRIDGE_IN,
+                                 CAT.INCOME, CAT.STAKING, CAT.AIRDROP]);
+      const DISP_CATS = new Set([CAT.SELL, CAT.TRADE, CAT.SEND, CAT.TRANSFER_OUT,
+                                  CAT.BRIDGE_OUT, CAT.FEE]);
+
+      // Collect acquisition and disposal sets across ALL time (no year filter)
+      const acqSyms  = new Set();
+      const dispSyms = new Set();
+      for (const t of txns) {
+        if (t.isDuplicate) continue;
+        const sym = t.assetSymbol;
+        if (!sym) continue;
+        if (ACQ_CATS.has(t.category))  acqSyms.add(sym);
+        if (t.inAsset && t.inAmount > 0) acqSyms.add(t.inAsset);
+        if (DISP_CATS.has(t.category)) dispSyms.add(sym);
+      }
+
+      // Assets disposed but NEVER acquired in any imported data
+      const neverAcquired = [...dispSyms].filter(s => !acqSyms.has(s));
+
+      if (neverAcquired.length > 0) {
+        // For each orphan asset, find TRANSFER_IN / isInternalTransfer RECEIVEs
+        // (these are receives that matched a send from another of our accounts —
+        // their cost basis legitimately comes from that account's acquisition cost).
+        // If found AND priced, we can pre-seed the holdings with the earliest one.
+        const orphanSet = new Set(neverAcquired);
+        const syntheticAcq = {};  // sym → { qty, costSEK }
+
+        for (const t of txns) {
+          if (t.isDuplicate) continue;
+          const sym = t.assetSymbol;
+          if (!orphanSet.has(sym)) continue;
+          const isTransferIn = t.category === CAT.TRANSFER_IN ||
+            (t.category === CAT.RECEIVE && t.isInternalTransfer);
+          if (!isTransferIn) continue;
+
+          const amt   = t.amount || 0;
+          const price = t.priceSEKPerUnit || 0;
+          if (amt <= 0) continue;
+
+          if (!syntheticAcq[sym]) syntheticAcq[sym] = { qty: 0, costSEK: 0 };
+          syntheticAcq[sym].qty     += amt;
+          syntheticAcq[sym].costSEK += price > 0 ? price * amt
+            : (STABLES.has(sym)
+                ? (EUR_STABLES.has(sym) ? STABLE_SEK.EUR : STABLE_SEK.USD) * amt
+                : 0);
+        }
+
+        // If no TRANSFER_IN was found, try plain RECEIVE events (even unmatched ones)
+        // — they represent tokens arriving from an external source; their market-rate
+        // price at receipt IS the acquisition cost.
+        for (const t of txns) {
+          if (t.isDuplicate) continue;
+          const sym = t.assetSymbol;
+          if (!orphanSet.has(sym) || syntheticAcq[sym]) continue;
+          if (t.category !== CAT.RECEIVE) continue;
+
+          const amt   = t.amount || 0;
+          const price = t.priceSEKPerUnit || 0;
+          if (amt <= 0) continue;
+
+          if (!syntheticAcq[sym]) syntheticAcq[sym] = { qty: 0, costSEK: 0 };
+          syntheticAcq[sym].qty     += amt;
+          syntheticAcq[sym].costSEK += price > 0 ? price * amt
+            : (STABLES.has(sym)
+                ? (EUR_STABLES.has(sym) ? STABLE_SEK.EUR : STABLE_SEK.USD) * amt
+                : 0);
+        }
+
+        // Pre-seed holdings with reconstructed acquisitions
+        for (const [sym, { qty, costSEK }] of Object.entries(syntheticAcq)) {
+          if (!holdings[sym]) holdings[sym] = { totalQty: 0, totalCostSEK: 0 };
+          holdings[sym].totalQty     += qty;
+          holdings[sym].totalCostSEK += costSEK;
+          console.log(`[TaxEngine] Pre-seeded ${sym}: qty=${qty.toFixed(4)} costSEK=${costSEK.toFixed(2)} (reconstructed from receive/transfer)`);
+        }
+      }
+    }
+
     // Process ALL history (including prior years) to build correct cost basis
     const allSorted = [...txns]
       .filter(t => new Date(t.date).getFullYear() <= year)
@@ -2499,10 +2622,20 @@ const TaxEngine = (() => {
       const h = holdings[sym] || { totalQty: 0, totalCostSEK: 0 };
       const available = h.totalQty;
       const unknownAcq = qty > available + 0.0001;  // sold more than we have
-      // Under Genomsnittsmetoden: when acquisition unknown, cost basis = 0
-      // (Skatteverket assumes full proceeds = gain if no evidence of cost exists)
       const safeQty    = unknownAcq ? qty : Math.min(qty, available);
-      const costBasis  = unknownAcq ? 0 : avg(sym) * safeQty;
+      // Under Genomsnittsmetoden: when acquisition is unknown, cost basis = 0
+      // (Skatteverket assumes full proceeds = gain when no evidence of cost exists).
+      // Exception: stablecoins pegged to a known fiat value. Using their ~1 USD / ~1 EUR
+      // peg as fallback avoids inflating K4 with fictional gains on pass-through stables.
+      let costBasis;
+      if (!unknownAcq) {
+        costBasis = avg(sym) * safeQty;
+      } else if (STABLES.has(sym)) {
+        const stableSEK = EUR_STABLES.has(sym) ? STABLE_SEK.EUR : STABLE_SEK.USD;
+        costBasis = safeQty * stableSEK;
+      } else {
+        costBasis = 0;  // Unknown non-stable: full proceeds = gain (Skatteverket default)
+      }
       const gainLoss   = proceedsSEK - feeSEK - costBasis;
 
       // Reduce holdings (floor at 0)

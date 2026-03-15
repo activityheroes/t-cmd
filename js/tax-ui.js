@@ -2179,6 +2179,20 @@ const TaxUI = (() => {
             </div>
           </div>` : ''}
 
+          ${(() => {
+            const unknownAcqIssues = issues.filter(i => i.reason === 'unknown_acquisition');
+            const distinctAssets = new Set(unknownAcqIssues.map(i => i.asset || i.symbol || '')).size;
+            if (distinctAssets < 2) return '';
+            return `<div style="margin-bottom:16px;padding:14px 16px;border-radius:10px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.25);display:flex;align-items:flex-start;gap:12px">
+              <span style="font-size:20px;line-height:1">🔍</span>
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:600;color:#fbbf24;margin-bottom:3px">Saknade konton upptäckta</div>
+                <div style="font-size:12px;color:#94a3b8;line-height:1.5">${distinctAssets} tillgångar såldes utan registrerat köp. Du kanske saknar ett konto — importera börsen eller plånboken där du köpte dem för att automatiskt lösa dessa poster.</div>
+              </div>
+              <button class="tax-btn tax-btn-sm" style="background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3);flex-shrink:0" onclick="TaxUI.openAddAccountModal()">➕ Lägg till konto</button>
+            </div>`;
+          })()}
+
           <div class="tax-review-groups">
             ${groups.map(({ reason, meta, items, subGroups }) => {
               const isK4Critical = items.some(i => i.isK4Blocker) || ['negative_balance','unknown_acquisition'].includes(reason);
@@ -2198,6 +2212,7 @@ const TaxUI = (() => {
                   case 'mark_income':     return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkReclassify('${reason}','income')">💼 Reclassify as income</button>`;
                   case 'ignore_received': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Ignore all</button>`;
                   case 'confirm_spam':    return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Confirm spam</button>`;
+                  case 'import_account': return `<button class="tax-btn tax-btn-xs" style="background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.2)" onclick="TaxUI.openAddAccountModal()">➕ Lägg till konto</button>`;
                   default: return '';
                 }
               }).join('');

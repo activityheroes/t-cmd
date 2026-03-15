@@ -1165,6 +1165,8 @@ const TaxUI = (() => {
                 Gamla Solana-importer innehåller felaktiga belopp (lamport-skalningsfel, felaktiga priser inlagda från swap-rekonstruktion).
                 Dessa kan inflatera skattevinsten med miljontals kronor.
                 <strong>Kör datarensning</strong> för att rätta till dem — alla berörda transaktioner omprissätts och felaktiga värden tas bort.
+                ${cleanupStats.byType.full_mint_as_inasset  ? `<br>• ${cleanupStats.byType.full_mint_as_inasset} med full mint-adress som inAsset (nollkostnadsbug — roten till okänd kostnadsbas)` : ''}
+                ${cleanupStats.byType.full_mint_as_symbol  ? `<br>• ${cleanupStats.byType.full_mint_as_symbol} med full mint-adress som symbol` : ''}
                 ${cleanupStats.byType.corrupt_sol_inamount ? `<br>• ${cleanupStats.byType.corrupt_sol_inamount} med felaktigt SOL-belopp (lamport-artefakt)` : ''}
                 ${cleanupStats.byType.corrupt_stored_price ? `<br>• ${cleanupStats.byType.corrupt_stored_price} med extremt högt lagrat pris` : ''}
                 ${cleanupStats.byType.previously_flagged   ? `<br>• ${cleanupStats.byType.previously_flagged} redan flaggade som misstänkta` : ''}
@@ -3930,6 +3932,8 @@ const TaxUI = (() => {
 
     const lines = [
       `${stats.affected} transaktioner med korrupta värden hittades:\n`,
+      stats.byType.full_mint_as_inasset  ? `• ${stats.byType.full_mint_as_inasset} med full mint-adress som inAsset (nollkostnadsbug — roten till okänd kostnadsbas)` : '',
+      stats.byType.full_mint_as_symbol   ? `• ${stats.byType.full_mint_as_symbol} med full mint-adress som symbol` : '',
       stats.byType.corrupt_sol_inamount  ? `• ${stats.byType.corrupt_sol_inamount} med felaktigt SOL-belopp (lamport-artefakt)` : '',
       stats.byType.corrupt_stored_price  ? `• ${stats.byType.corrupt_stored_price} med extremt högt lagrat pris (>50 M kr)` : '',
       stats.byType.previously_flagged    ? `• ${stats.byType.previously_flagged} redan flaggade som misstänkta` : '',

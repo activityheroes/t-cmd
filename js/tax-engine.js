@@ -2720,6 +2720,23 @@ const TaxEngine = (() => {
       return t;
     });
 
+    // ── Normalize full Solana mint addresses → 8-char symbol ─────────────────
+    // Root cause of "Okänd kostnadsbas" bug:
+    //   Old imports (via reprocessSolanaSwaps or legacy normalizer) stored
+    //   inAsset as the full 44-char base58 mint (e.g. "HRHMJDMCxxxxx...").
+    //   New sell transactions store assetSymbol as the 8-char truncation
+    //   ("HRHMJDMC") via msym(). Holdings lookup then misses the acquisition
+    //   → unknownAcquisition=true → cost basis = 0 → full proceeds = gain.
+    // Fix: unify both sides to the 8-char prefix BEFORE building holdings.
+    const FULL_SOL_MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,}$/;
+    const normHoldingsKey  = s => (s && FULL_SOL_MINT_RE.test(s)) ? s.slice(0, 8).toUpperCase() : (s || '');
+    txns = txns.map(t => {
+      const newSym = normHoldingsKey(t.assetSymbol);
+      const newIn  = normHoldingsKey(t.inAsset);
+      if (newSym === t.assetSymbol && newIn === t.inAsset) return t;
+      return { ...t, assetSymbol: newSym || t.assetSymbol, inAsset: newIn || t.inAsset };
+    });
+
     // Process ALL history (including prior years) to build correct cost basis
     const allSorted = [...txns]
       .filter(t => new Date(t.date).getFullYear() <= year)
@@ -4087,14 +4104,20 @@ const TaxEngine = (() => {
       // Skip if same asset — this is probably a self-transfer, not a swap
       if (outTx.assetSymbol === inTx.assetSymbol) continue;
 
+      // Normalize both sides: full Solana mints → 8-char prefix (msym-consistent)
+      const MERGE_MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,}$/;
+      const normMint = s => (s && MERGE_MINT_RE.test(s)) ? s.slice(0, 8).toUpperCase() : (s || '');
+      const outSym = normMint(outTx.assetSymbol) || outTx.assetSymbol;
+      const inSym  = normMint(inTx.assetSymbol)  || inTx.assetSymbol;
+
       const tradeTx = normalizeTransaction({
         id: outTx.id,  // keep original id for dedup key
         txHash: outTx.txHash,
         date: outTx.date,
         category: CAT.TRADE,
-        assetSymbol: outTx.assetSymbol,
+        assetSymbol: outSym,
         amount: outTx.amount,
-        inAsset: inTx.assetSymbol,
+        inAsset: inSym,
         inAmount: inTx.amount,
         feeSEK: (outTx.feeSEK || 0) + (inTx.feeSEK || 0),
         priceSEKPerUnit: outTx.priceSEKPerUnit || 0,
@@ -4759,8 +4782,25 @@ const TaxEngine = (() => {
   const CLEANUP_PRICE_MAX_SEK    = 50_000_000; // > 50 M kr for non-major asset → corrupt
   const CLEANUP_SAFE_ASSETS      = new Set(['BTC','WBTC','ETH','WETH','SOL','WSOL']);
 
+  // Full Solana mint → 8-char prefix normalization (same as msym in normalizeSolanaTx)
+  const CLEANUP_MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,}$/;
+  const _normMint = s => (s && CLEANUP_MINT_RE.test(s)) ? s.slice(0, 8).toUpperCase() : (s || '');
+
   // Returns a {type, detail} object if the transaction looks corrupt, or null.
   function _detectCorruption(t) {
+    // 0. Full Solana mint stored as inAsset or assetSymbol (symbol-key mismatch bug)
+    if (t.inAsset && CLEANUP_MINT_RE.test(t.inAsset)) {
+      return {
+        type:   'full_mint_as_inasset',
+        detail: `inAsset "${t.inAsset.slice(0,8)}…" is a full mint address — should be 8-char symbol`,
+      };
+    }
+    if (t.assetSymbol && CLEANUP_MINT_RE.test(t.assetSymbol)) {
+      return {
+        type:   'full_mint_as_symbol',
+        detail: `assetSymbol "${t.assetSymbol.slice(0,8)}…" is a full mint address — should be 8-char symbol`,
+      };
+    }
     // 1. Corrupt SOL inAmount (lamport-scale error in old imports)
     if ((t.inAsset || '').toUpperCase() === 'SOL' && (t.inAmount || 0) > CLEANUP_SOL_INAMOUNT_MAX) {
       return {
@@ -4793,6 +4833,18 @@ const TaxEngine = (() => {
   // Apply in-memory fix to a corrupt transaction (no IDB write yet).
   function _applyCleanupFix(t, issue) {
     const fixed = { ...t };
+    // Fix full mint stored as symbol/inAsset — normalize to 8-char prefix
+    if (issue.type === 'full_mint_as_inasset') {
+      fixed.inAsset = _normMint(t.inAsset);
+      // No need to clear pricing — this was a symbol-key issue, not a value issue
+      fixed.notes = `[Rensad ${new Date().toLocaleDateString('sv-SE')}] ${issue.detail}`;
+      return fixed;
+    }
+    if (issue.type === 'full_mint_as_symbol') {
+      fixed.assetSymbol = _normMint(t.assetSymbol);
+      fixed.notes = `[Rensad ${new Date().toLocaleDateString('sv-SE')}] ${issue.detail}`;
+      return fixed;
+    }
     // Fix corrupt SOL inAmount — zero out so swap reconstruction is not poisoned
     if (issue.type === 'corrupt_sol_inamount') {
       fixed.inAmount = 0;

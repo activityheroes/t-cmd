@@ -2732,6 +2732,71 @@ const TaxUI = (() => {
           </div>` : ''}
         </div>
 
+        <!-- Confidence breakdown panel -->
+        ${(() => {
+          const gainRows = k4.k4Rows.filter(r => r.side === 'gain');
+          const exactGain    = gainRows.filter(r => r.confidence === 'exact')    .reduce((s,r) => s+r.gain, 0);
+          const estimatedGain= gainRows.filter(r => r.confidence === 'estimated').reduce((s,r) => s+r.gain, 0);
+          const unknownGain  = gainRows.filter(r => r.confidence === 'unknown')  .reduce((s,r) => s+r.gain, 0);
+          const zeroCostGain = gainRows.filter(r => r.confidence === 'zero_cost').reduce((s,r) => s+r.gain, 0);
+          const totalGain    = k4.totalGains;
+          if (totalGain <= 0) return '';
+          const pct = v => totalGain > 0 ? Math.round((v/totalGain)*100) : 0;
+          const bar = (v, color) => v > 0 ? `<div style="height:6px;background:${color};border-radius:3px;width:${pct(v)}%;min-width:${v>0?'4px':'0'};transition:width .3s"></div>` : '';
+          // Top uncertain rows (highest gain, non-exact confidence) for drill-down
+          const topUncertain = gainRows.filter(r => r.confidence !== 'exact' && r.gain > 50000)
+            .sort((a,b) => b.gain - a.gain).slice(0, 6);
+          return `
+        <div class="tax-section" style="margin-bottom:16px">
+          <div class="tax-section-header" style="margin-bottom:10px">
+            <h2 style="font-size:14px">📊 Tillförlitlighetsanalys — Realiserade vinster</h2>
+            <span class="tax-badge" style="background:rgba(148,163,184,.1);color:#94a3b8;font-size:10px">Totalt: ${TaxEngine.formatSEK(totalGain)}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:${topUncertain.length>0?'14px':'0'}">
+            ${exactGain > 0 ? `<div style="padding:10px 12px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);border-radius:8px">
+              <div style="font-size:10px;color:#4ade80;font-weight:600;margin-bottom:4px">✓ EXAKT (swap-implied)</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${TaxEngine.formatSEK(exactGain)}</div>
+              <div style="font-size:10px;color:var(--tax-muted);margin-top:2px">${pct(exactGain)}% av total vinst · K4-redo ✓</div>
+              <div style="margin-top:6px;background:rgba(34,197,94,.15);border-radius:2px;height:6px">${bar(exactGain,'#4ade80')}</div>
+            </div>` : ''}
+            ${estimatedGain > 0 ? `<div style="padding:10px 12px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);border-radius:8px">
+              <div style="font-size:10px;color:#fbbf24;font-weight:600;margin-bottom:4px">~ UPPSKATTAD (swap-at-cost)</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${TaxEngine.formatSEK(estimatedGain)}</div>
+              <div style="font-size:10px;color:var(--tax-muted);margin-top:2px">${pct(estimatedGain)}% av total vinst · verifiera i Granska</div>
+              <div style="margin-top:6px;background:rgba(251,191,36,.15);border-radius:2px;height:6px">${bar(estimatedGain,'#fbbf24')}</div>
+            </div>` : ''}
+            ${unknownGain > 0 ? `<div style="padding:10px 12px;background:rgba(239,68,68,.09);border:1px solid rgba(239,68,68,.3);border-radius:8px">
+              <div style="font-size:10px;color:#f87171;font-weight:700;margin-bottom:4px">⚠ OKÄND KOSTNADSBAS</div>
+              <div style="font-size:16px;font-weight:700;color:#f87171">${TaxEngine.formatSEK(unknownGain)}</div>
+              <div style="font-size:10px;color:var(--tax-muted);margin-top:2px">${pct(unknownGain)}% · K4-blockerare — lägg till köphistorik</div>
+              <div style="margin-top:6px;background:rgba(239,68,68,.2);border-radius:2px;height:6px">${bar(unknownGain,'#f87171')}</div>
+            </div>` : ''}
+            ${zeroCostGain > 0 ? `<div style="padding:10px 12px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.2);border-radius:8px">
+              <div style="font-size:10px;color:#fca5a5;font-weight:600;margin-bottom:4px">0 NOLLKOSTNAD</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${TaxEngine.formatSEK(zeroCostGain)}</div>
+              <div style="font-size:10px;color:var(--tax-muted);margin-top:2px">${pct(zeroCostGain)}% · kostnadsbas 0 kr — kontrollera</div>
+              <div style="margin-top:6px;background:rgba(239,68,68,.12);border-radius:2px;height:6px">${bar(zeroCostGain,'#fca5a5')}</div>
+            </div>` : ''}
+          </div>
+          ${topUncertain.length > 0 ? `
+          <div style="font-size:11px;font-weight:600;color:var(--tax-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">Högst vinst med osäker prissättning</div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${topUncertain.map(r => {
+              const confLabel = r.confidence === 'unknown' ? '⚠ Okänd kostnadsbas' : r.confidence === 'zero_cost' ? '0 Nollkostnad' : '~ Uppskattad';
+              const confColor = r.confidence === 'unknown' ? '#f87171' : r.confidence === 'zero_cost' ? '#fca5a5' : '#fbbf24';
+              const confBg    = r.confidence === 'unknown' ? 'rgba(239,68,68,.12)' : r.confidence === 'zero_cost' ? 'rgba(239,68,68,.08)' : 'rgba(251,191,36,.12)';
+              return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(255,255,255,.02);border:1px solid var(--tax-border);border-radius:6px;flex-wrap:wrap">
+                <span class="tax-mono" style="font-size:11px;color:var(--tax-muted);min-width:70px">${r.sym}</span>
+                <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:${confBg};color:${confColor}">${confLabel}</span>
+                <span style="flex:1;font-size:10px;color:var(--tax-muted)">${r.displayName !== r.sym ? r.displayName : ''}</span>
+                <span style="font-size:12px;font-weight:600;color:#f87171">${TaxEngine.formatSEK(r.gain)}</span>
+                <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.filterTxsByAsset('${r.sym}')" style="font-size:10px;padding:2px 6px">📋 Visa txn</button>
+              </div>`;
+            }).join('')}
+          </div>` : ''}
+        </div>`;
+        })()}
+
         <!-- K4 Preview Table -->
         <div class="tax-section">
           <div class="tax-section-header">

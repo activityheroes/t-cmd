@@ -1793,9 +1793,43 @@ const TaxUI = (() => {
                 onclick="event.stopPropagation();TaxUI.setExpandedTab('tax')">
                 SKATTEBERÄKNINGAR
               </button>
+              ${t._reconstruction ? `<button class="tx-expand-tab ${tab === 'reconstruction' ? 'active' : ''}"
+                onclick="event.stopPropagation();TaxUI.setExpandedTab('reconstruction')" style="color:#818cf8">
+                ◎ REKONSTRUKTION
+              </button>` : ''}
             </div>
             <div class="tx-expand-body">
-              ${tab === 'description' ? descTab : taxTab}
+              ${tab === 'description' ? descTab
+              : tab === 'reconstruction' && t._reconstruction ? (() => {
+                  const r = t._reconstruction;
+                  const rows = [
+                    r.dex                          && ['DEX / Protokoll', r.dex],
+                    t.solanaSwapType               && ['Swap-typ', t.solanaSwapType.replace(/_/g,' ')],
+                    ['Gav', `${TaxEngine.formatCrypto(t.amount,6)} ${t.assetSymbol}`],
+                    t.inAsset                      && ['Fick', `${TaxEngine.formatCrypto(t.inAmount,6)} ${t.inAsset}`],
+                    t.feeSEK != null               && ['Nätverksavgift', `${t.feeSEK.toFixed(4)} SEK (SOL)`],
+                    r.routeHopsIgnored > 0         && ['Routningshoppar ignorerade', `${r.routeHopsIgnored} st`],
+                    r.wsolCollapsed                && ['WSOL-normalisering', 'Wrapped SOL kollapsat till SOL ✓'],
+                    r.ownedAccountCount            && ['Konton som analyserats', `${r.ownedAccountCount} st (plånbok + ATA:s)`],
+                    ['Datakälla', r.usedAccountData ? 'accountData (netto-deltas)' : 'nativeTransfers (fallback)'],
+                  ].filter(Boolean);
+                  return `<div class="tx-expand-grid">
+                    ${rows.map(([k,v])=>`<div class="tx-expand-kv"><span class="tx-expand-k">${k}</span><span class="tx-expand-v tax-mono" style="font-size:12px">${v}</span></div>`).join('')}
+                    ${Object.keys(r.tokenNet||{}).length > 0 ? `<div class="tx-expand-kv" style="grid-column:1/-1">
+                      <span class="tx-expand-k">Netto token-deltas</span>
+                      <span class="tx-expand-v tax-mono" style="font-size:11px">${Object.entries(r.tokenNet).map(([s,v])=>`${v>0?'+':''}${v.toFixed(6)} ${s}`).join(' · ')}</span>
+                    </div>` : ''}
+                    <div class="tx-expand-kv" style="grid-column:1/-1">
+                      <span class="tx-expand-k" style="color:#64748b;font-size:10px">Vad detta innebär</span>
+                      <span class="tx-expand-v" style="font-size:11px;color:#94a3b8">
+                        Alla token-rörelser för denna transaktion summerades per tillgång för alla plånbokskonton.
+                        Routing-hoppar och WSOL-wrapps filtrerades bort. Det slutgiltiga netto-resultatet
+                        klassificerades som ett enda ${t.category === 'trade' ? 'byte' : t.category}.
+                      </span>
+                    </div>
+                  </div>`;
+                })()
+              : taxTab}
             </div>
           </div>
         </td>
@@ -2015,6 +2049,30 @@ const TaxUI = (() => {
   }
 
   // ── Render a single review row ────────────────────────────────
+  // ── Render inline "How we reconstructed this trade" panel ─────
+  function renderReconPanel(txn) {
+    const r = txn._reconstruction;
+    if (!r) return '';
+    const panelId = `recon_${txn.id}`;
+    const rows = [];
+    if (r.dex)                rows.push(['DEX', r.dex]);
+    if (txn.solanaSwapType)   rows.push(['Type', txn.solanaSwapType.replace(/_/g, ' ')]);
+    if (txn.assetSymbol)      rows.push(['Gave', `${TaxEngine.formatCrypto(txn.amount, 6)} ${txn.assetSymbol}`]);
+    if (txn.inAsset)          rows.push(['Got',  `${TaxEngine.formatCrypto(txn.inAmount, 6)} ${txn.inAsset}`]);
+    if (txn.feeSEK != null)   rows.push(['Fee',  `${txn.feeSEK.toFixed(4)} SEK (SOL network)`]);
+    if (r.routeHopsIgnored > 0) rows.push(['Ignored', `${r.routeHopsIgnored} routing hop(s)`]);
+    if (r.wsolCollapsed)        rows.push(['WSOL', 'Collapsed to SOL ✓']);
+    rows.push(['Source', r.usedAccountData ? 'accountData (net deltas)' : 'nativeTransfers fallback']);
+    const tableHtml = rows.map(([k, v]) =>
+      `<tr><td style="color:#64748b;padding:1px 8px 1px 0;font-size:11px;white-space:nowrap">${k}</td><td style="color:#cbd5e1;font-size:11px">${v}</td></tr>`
+    ).join('');
+    return `
+      <div id="${panelId}" style="display:none;margin-top:6px;padding:8px 10px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.15);border-radius:6px">
+        <div style="font-size:10px;font-weight:600;color:#818cf8;margin-bottom:4px;letter-spacing:.5px">◎ HOW WE RECONSTRUCTED THIS TRADE</div>
+        <table style="border-collapse:collapse">${tableHtml}</table>
+      </div>`;
+  }
+
   function renderReviewRow(issue) {
     const { txn, isK4Blocker: itemK4 } = issue;
     const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(txn.assetSymbol) : { symbol: txn.assetSymbol, name: '' };
@@ -2023,26 +2081,32 @@ const TaxUI = (() => {
     const acct        = TaxEngine.getAccounts().find(a => a.id === txn.accountId);
     const acctLabel   = acct ? (acct.label || acct.type || acct.id.slice(-6)) : 'Unknown wallet';
     const blockInfo   = issue.priceBlockReason ? BLOCK_REASON_LABELS[issue.priceBlockReason] : null;
+    const hasRecon    = !!(txn._reconstruction);
+    const panelId     = `recon_${txn.id}`;
     return `
-    <div class="tax-review-item">
-      <div class="tax-ri-left" style="flex:1;min-width:0">
-        <span class="tax-asset-sym" title="${txn.assetSymbol}">${displaySym}</span>
-        ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:var(--tax-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${displayName}">${displayName}</span>` : ''}
-        <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
-        <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
-        ${txn.category ? `<span class="tax-badge" style="font-size:10px">${txn.category}</span>` : ''}
-        <span class="tax-badge" style="font-size:10px;opacity:.6">${acctLabel}</span>
-        ${itemK4 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;font-weight:600">K4</span>` : ''}
-        ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
-        ${confidenceBadge(txn)}
-        ${blockInfo ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(148,163,184,.08);color:#64748b;border:1px solid rgba(148,163,184,.15)" title="${blockInfo.tip}">${blockInfo.label}</span>` : ''}
+    <div class="tax-review-item" style="flex-direction:column;align-items:stretch">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <div class="tax-ri-left" style="flex:1;min-width:0">
+          <span class="tax-asset-sym" title="${txn.assetSymbol}">${displaySym}</span>
+          ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:var(--tax-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${displayName}">${displayName}</span>` : ''}
+          <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
+          <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
+          ${txn.category ? `<span class="tax-badge" style="font-size:10px">${txn.category}</span>` : ''}
+          <span class="tax-badge" style="font-size:10px;opacity:.6">${acctLabel}</span>
+          ${itemK4 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;font-weight:600">K4</span>` : ''}
+          ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
+          ${confidenceBadge(txn)}
+          ${blockInfo ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(148,163,184,.08);color:#64748b;border:1px solid rgba(148,163,184,.15)" title="${blockInfo.tip}">${blockInfo.label}</span>` : ''}
+          ${hasRecon ? `<button class="tax-btn tax-btn-xs" style="color:#818cf8;font-size:10px;padding:1px 6px" onclick="(function(){var p=document.getElementById('${panelId}');if(p)p.style.display=p.style.display==='none'?'block':'none'})()">◎ rekonstruktion</button>` : ''}
+        </div>
+        <div class="tax-ri-right">
+          ${suggestedActionBtn(issue)}
+          <button class="tax-btn tax-btn-xs" style="color:#94a3b8" onclick="TaxUI.editTx('${txn.id}')" title="Edit transaction">✏️</button>
+          <button class="tax-btn tax-btn-xs" style="color:#64748b" onclick="TaxUI.markSpam('${txn.id}')" title="Mark as spam (zero value)">🚫</button>
+          <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')" title="Dismiss">OK</button>
+        </div>
       </div>
-      <div class="tax-ri-right">
-        ${suggestedActionBtn(issue)}
-        <button class="tax-btn tax-btn-xs" style="color:#94a3b8" onclick="TaxUI.editTx('${txn.id}')" title="Edit transaction">✏️</button>
-        <button class="tax-btn tax-btn-xs" style="color:#64748b" onclick="TaxUI.markSpam('${txn.id}')" title="Mark as spam (zero value)">🚫</button>
-        <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')" title="Dismiss">OK</button>
-      </div>
+      ${renderReconPanel(txn)}
     </div>`;
   }
 

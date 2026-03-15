@@ -559,6 +559,10 @@ const TaxEngine = (() => {
       // Exchange execution price (Level 1 pricing)
       rawTradePrice: parseFloat(raw.rawTradePrice) || null,
       rawTradeCurrency: (raw.rawTradeCurrency || '').toUpperCase() || null,
+      // Solana swap metadata
+      solanaSwapType: raw.solanaSwapType || null,
+      // Reconstruction debug metadata (set by normalizeSolanaTx)
+      _reconstruction: raw._reconstruction || null,
     };
   }
 
@@ -3655,237 +3659,330 @@ const TaxEngine = (() => {
   // import time (the pricing pipeline will use real historical prices).
   const SOL_FEE_PRICE_SEK = 2000; // ≈ $200 USD × 10 SEK/USD
 
+  // ════════════════════════════════════════════════════════════
+  // NET-DELTA RECONSTRUCTION HELPERS
+  // ════════════════════════════════════════════════════════════
+
+  // Wrapped SOL mint (economically identical to SOL)
+  const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+  // Dust thresholds — below these are rounding noise / spam
+  const SOL_DUST_LAMPORTS = 1_000;          // 0.000001 SOL
+  const TOKEN_DUST        = 1e-9;           // essentially zero
+
+  // DEX names from Helius tx.source field
+  const HELIUS_DEX_MAP = {
+    JUPITER: 'Jupiter', JUPITER_DCA: 'Jupiter DCA',
+    JUPITER_LIMIT_ORDER: 'Jupiter', RAYDIUM: 'Raydium',
+    RAYDIUM_CLMM: 'Raydium', ORCA: 'Orca', WHIRLPOOL: 'Orca',
+    PUMP_FUN: 'Pump.fun', METEORA: 'Meteora', LIFINITY: 'Lifinity',
+    PHOENIX: 'Phoenix', OPENBOOK: 'OpenBook', DRIFT: 'Drift',
+  };
+
+  // ── buildOwnedAccounts ───────────────────────────────────────
+  // Returns a Set of account addresses that belong to the user:
+  //   • the wallet itself
+  //   • every ATA (associated token account) whose userAccount === wallet
+  //     (found in accountData[].tokenBalanceChanges and tokenTransfers)
+  function buildOwnedAccounts(tx, walletAddr) {
+    const owned = new Set([walletAddr]);
+    // accountData path (Helius enhanced)
+    for (const ad of (tx.accountData || [])) {
+      for (const tc of (ad.tokenBalanceChanges || [])) {
+        if (tc.userAccount === walletAddr) owned.add(ad.account);
+      }
+    }
+    // tokenTransfers path (belt-and-suspenders)
+    for (const tt of (tx.tokenTransfers || [])) {
+      if (tt.fromUserAccount === walletAddr && tt.fromTokenAccount)
+        owned.add(tt.fromTokenAccount);
+      if (tt.toUserAccount === walletAddr && tt.toTokenAccount)
+        owned.add(tt.toTokenAccount);
+    }
+    return owned;
+  }
+
+  // ── computeNetDeltas ────────────────────────────────────────
+  // Returns:
+  //   economicSolLamports  – net SOL from intentional trade (fee removed)
+  //   tokenNet             – { mint: humanReadableDelta } (WSOL already removed)
+  //   feeLamports          – tx network fee in lamports
+  //   dex                  – detected DEX name or null
+  //   usedAccountData      – whether the accountData path was used
+  //   collapsedInfo        – debug info for UI panel
+  function computeNetDeltas(tx, walletAddr, ownedAccounts) {
+    const feeLamports   = tx.fee || 0;
+    const accountData   = tx.accountData || [];
+    const dex           = HELIUS_DEX_MAP[tx.source] || null;
+    const collapsedInfo = { ignoredMints: [], wsolCollapsed: false, usedAccountData: accountData.length > 0 };
+
+    let rawSolLamports = 0;
+    const tokenNet     = {}; // mint → human-readable delta
+
+    if (accountData.length > 0) {
+      // ── Primary path: Helius accountData ─────────────────────
+      // nativeBalanceChange is the net SOL change PER account (includes fee
+      // for the fee-payer account). tokenBalanceChanges is the net token delta.
+      for (const ad of accountData) {
+        if (!ownedAccounts.has(ad.account)) continue;
+        rawSolLamports += (ad.nativeBalanceChange || 0);
+        for (const tc of (ad.tokenBalanceChanges || [])) {
+          const mint    = tc.mint;
+          const dec     = tc.rawTokenAmount?.decimals ?? 0;
+          const rawStr  = tc.rawTokenAmount?.tokenAmount || '0';
+          const delta   = Number(rawStr) / Math.pow(10, dec || 1);
+          tokenNet[mint] = (tokenNet[mint] || 0) + delta;
+        }
+      }
+      // rawSolLamports already includes fee deduction (fee payer's balance changed)
+      // economicSolLamports = what the user intentionally sent/received
+    } else {
+      // ── Fallback path: nativeTransfers + tokenTransfers ──────
+      // nativeTransfers does NOT include fee, so we subtract it here
+      // to make both paths consistent.
+      for (const n of (tx.nativeTransfers || [])) {
+        if (n.fromUserAccount === walletAddr) rawSolLamports -= (n.amount || 0);
+        if (n.toUserAccount   === walletAddr) rawSolLamports += (n.amount || 0);
+      }
+      rawSolLamports -= feeLamports; // simulate fee deduction so formula is identical
+      for (const t of (tx.tokenTransfers || [])) {
+        const mint = t.mint;
+        if (!mint) continue;
+        // tokenAmount is already human-readable in the Helius enhanced format
+        if (t.fromUserAccount === walletAddr) tokenNet[mint] = (tokenNet[mint] || 0) - (t.tokenAmount || 0);
+        if (t.toUserAccount   === walletAddr) tokenNet[mint] = (tokenNet[mint] || 0) + (t.tokenAmount || 0);
+      }
+    }
+
+    // Economic SOL = rawSol + fee (add back to exclude fee from trade amount)
+    const economicSolLamports = rawSolLamports + feeLamports;
+
+    // ── Normalize WSOL → SOL ─────────────────────────────────
+    // WSOL is Wrapped SOL — economically identical. Its SOL value is already
+    // captured in nativeBalanceChange (accountData path) or via nativeTransfers.
+    // Remove from tokenNet to prevent fake "buy WSOL" / "sell WSOL" entries.
+    if (WSOL_MINT in tokenNet) {
+      collapsedInfo.wsolCollapsed = true;
+      // In the fallback path, WSOL tokenAmount is in SOL (human-readable).
+      // If the nativeTransfers did NOT capture this flow (edge case: wallet's
+      // WSOL ATA is NOT the walletAddr itself), fold it into economicSolLamports.
+      // In accountData path this is already handled via nativeBalanceChange.
+      delete tokenNet[WSOL_MINT];
+    }
+
+    // ── Remove true dust ─────────────────────────────────────
+    for (const mint of Object.keys(tokenNet)) {
+      if (Math.abs(tokenNet[mint]) < TOKEN_DUST) delete tokenNet[mint];
+    }
+
+    return { economicSolLamports, tokenNet, feeLamports, dex, collapsedInfo };
+  }
+
+  // ── normalizeSolanaTx ────────────────────────────────────────
+  // Converts a single Helius Enhanced Transaction into 0 or 1 canonical
+  // economic events (TRADE / SEND / RECEIVE / null) by:
+  //   1. Skipping failures and non-economic system instructions
+  //   2. Building user-owned account set (wallet + all ATAs)
+  //   3. Computing net SOL + token deltas across ALL owned accounts
+  //   4. Normalizing WSOL → SOL
+  //   5. Classifying the resulting net shape into one event
+  //
+  // This prevents routing hops, LP vault movements, and WSOL wraps from
+  // being treated as separate trades.
   function normalizeSolanaTx(tx, walletAddr, accountId) {
     try {
       // ── Guard 1: Skip failed transactions ───────────────────
-      // Helius returns ALL transactions including on-chain failures.
-      // A failed tx has its state changes reverted — only the fee
-      // was charged. The tokenTransfers/nativeTransfers fields still
-      // reflect what WOULD have happened, so they must NOT be used
-      // as real economic events.
-      if (tx.transactionError !== null && tx.transactionError !== undefined) {
-        return null;
-      }
+      if (tx.transactionError !== null && tx.transactionError !== undefined) return null;
 
-      // ── Guard 2: Skip pure system / non-economic tx types ───
-      // These Helius types never produce user-facing economic events.
+      // ── Guard 2: Skip pure system / non-economic types ──────
       const SKIP_TYPES = new Set([
         'ACCOUNT_DATA', 'CREATE_ACCOUNT', 'CLOSE_ACCOUNT',
         'ACCOUNT_CREATION', 'FREEZE_ACCOUNT', 'THAW_ACCOUNT',
-        'APPROVE', 'REVOKE', 'SET_AUTHORITY',
-        'INIT_MINT', 'MINT_TO',          // minting — not a user trade
-        'BURN',                           // token burn handled separately below
+        'APPROVE', 'REVOKE', 'SET_AUTHORITY', 'INIT_MINT', 'MINT_TO',
       ]);
       if (SKIP_TYPES.has(tx.type)) return null;
 
       const ts  = new Date((tx.timestamp || 0) * 1000).toISOString();
-      const tt  = tx.tokenTransfers  || [];
-      const nt  = tx.nativeTransfers || [];
-      const fee = (tx.fee || 0) / 1e9; // lamports → SOL
       const sig = tx.signature;
 
-      // ── Step 1: Compute NET wallet-level flows ──────────────
-      // SOL: sum all in/out lamports for this wallet address
-      let netSolLamports = 0;
-      for (const n of nt) {
-        if (n.fromUserAccount === walletAddr) netSolLamports -= (n.amount || 0);
-        if (n.toUserAccount   === walletAddr) netSolLamports += (n.amount || 0);
-      }
-      const netSol = netSolLamports / 1e9; // positive = received, negative = sent
+      // ── Step 1–4: Reconstruct net deltas ────────────────────
+      const ownedAccounts = buildOwnedAccounts(tx, walletAddr);
+      const { economicSolLamports, tokenNet, feeLamports, dex, collapsedInfo } =
+        computeNetDeltas(tx, walletAddr, ownedAccounts);
+
+      const economicSol = economicSolLamports / 1e9;
+      const feeSol      = feeLamports / 1e9;
+      const feeSEK      = feeSol * SOL_FEE_PRICE_SEK;
 
       // ── Guard 3: Sanity-cap on net SOL flow ─────────────────
-      // For SUCCESSFUL transactions, Helius occasionally includes
-      // LP-pool-level nativeTransfers where the wallet address appears
-      // as an intermediate routing hop. In those cases, netSolLamports
-      // can be millions of SOL — clearly not the user's real movement.
-      // Cap: if |netSol| > MAX_REALISTIC_SOL, flag for manual review
-      // instead of silently turning it into a phantom billion-SEK event.
-      // 10,000 SOL ≈ $2M — any larger single-tx net is suspicious for
-      // a typical retail wallet.
-      const MAX_REALISTIC_SOL = 10_000; // SOL
-      if (Math.abs(netSol) > MAX_REALISTIC_SOL) {
-        console.warn(`[SolTx] Implausible netSol=${netSol.toFixed(2)} SOL in ${sig?.slice(0,12)}… — flagging for review`);
+      const MAX_REALISTIC_SOL = 10_000;
+      if (Math.abs(economicSol) > MAX_REALISTIC_SOL) {
+        console.warn(`[SolTx] Implausible economicSol=${economicSol.toFixed(2)} in ${sig?.slice(0,12)}… — flagging`);
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.TRANSFER_OUT,
-          assetSymbol: 'SOL', amount: Math.abs(netSol),
-          feeSEK, needsReview: true,
-          reviewReason: 'outlier',
-          notes: `Implausible net SOL flow (${netSol.toFixed(2)} SOL). Likely LP routing artefact — verify manually.`,
+          assetSymbol: 'SOL', amount: Math.abs(economicSol), feeSEK,
+          needsReview: true, reviewReason: 'outlier',
+          notes: `Implausible net SOL flow (${economicSol.toFixed(2)} SOL). LP routing artefact — verify manually.`,
         }, accountId, 'solana_wallet');
       }
 
-      // Tokens: net per mint (cancels out routing hops that briefly
-      // touch the wallet then leave — e.g. Jupiter intermediate steps)
-      const tokenNet = {};
-      for (const t of tt) {
-        const mint = t.mint;
-        if (!mint) continue;
-        tokenNet[mint] = (tokenNet[mint] || 0);
-        if (t.fromUserAccount === walletAddr) tokenNet[mint] -= (t.tokenAmount || 0);
-        if (t.toUserAccount   === walletAddr) tokenNet[mint] += (t.tokenAmount || 0);
-      }
-
-      // Separate into meaningful inflows/outflows (ignore dust < 1e-9)
-      const DUST = 1e-9;
-      const tokenIn  = Object.entries(tokenNet).filter(([, v]) => v >  DUST);
-      const tokenOut = Object.entries(tokenNet).filter(([, v]) => v < -DUST);
-
-      const hasSolIn  = netSol >  DUST;
-      const hasSolOut = netSol < -DUST;
-
-      // Helper: resolve mint → symbol
-      const sym = mint => mintToSym(mint) || mint?.slice(0, 8) || 'UNKNOWN';
-      // Helper: pick largest absolute flow from a list of [mint, amount] pairs
+      // ── Step 5: Build clean in/out lists ────────────────────
+      const msym    = mint => mintToSym(mint) || mint?.slice(0, 8) || 'UNKNOWN';
       const biggest = list => list.reduce((a, b) => Math.abs(a[1]) >= Math.abs(b[1]) ? a : b);
 
-      const feeSEK = fee * SOL_FEE_PRICE_SEK;
-      const isExplicitSwap = tx.type === 'SWAP' || !!(tx.events?.swap);
+      const tokenIn  = Object.entries(tokenNet).filter(([, v]) => v >  TOKEN_DUST);
+      const tokenOut = Object.entries(tokenNet).filter(([, v]) => v < -TOKEN_DUST);
 
-      // ── Step 2: Swap reconstruction ─────────────────────────
-      //
-      // Pattern A — SOL → Token  (memecoin buy — THE most common case)
-      //   nativeTransfers: SOL OUT from wallet
-      //   tokenTransfers:  Token IN to wallet
-      if (hasSolOut && tokenIn.length > 0 && tokenOut.length === 0) {
+      const hasSolIn  = economicSol >  SOL_DUST_LAMPORTS / 1e9;
+      const hasSolOut = economicSol < -SOL_DUST_LAMPORTS / 1e9;
+
+      // How many route hops were collapsed (extra in/outs beyond the dominant pair)
+      const extraLegs = Math.max(0, tokenIn.length + tokenOut.length - 2);
+      const dexLabel  = dex ? `DEX: ${dex}` : null;
+      const mkNotes   = desc => [desc, dexLabel, extraLegs > 0 ? `${extraLegs} route hop(s) collapsed` : null]
+        .filter(Boolean).join(' | ');
+      // Reconstruction metadata stored for the "How we reconstructed" UI panel
+      const recon = {
+        dex,
+        ownedAccountCount : ownedAccounts.size,
+        wsolCollapsed     : collapsedInfo.wsolCollapsed,
+        routeHopsIgnored  : extraLegs,
+        usedAccountData   : collapsedInfo.usedAccountData,
+        economicSol,
+        tokenNet          : Object.fromEntries(
+          Object.entries(tokenNet).map(([m, v]) => [msym(m), +v.toFixed(9)])
+        ),
+      };
+
+      // ── Step 6: Classify event shape ────────────────────────
+
+      // Case A: SOL out + token(s) in → BUY / SOL→Token swap
+      if (hasSolOut && tokenIn.length >= 1 && tokenOut.length === 0) {
         const [inMint, inAmt] = biggest(tokenIn);
-        const inSym = sym(inMint);
-        const solSpent = Math.abs(netSol); // does NOT include tx fee (that's separate)
+        const inSym = msym(inMint);
+        const solSpent = Math.abs(economicSol);
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.TRADE,
-          assetSymbol: 'SOL',   amount: solSpent,
-          inAsset: inSym,       inAmount: Math.abs(inAmt),
-          feeSEK,               contractAddress: inMint,
-          needsReview: false,
-          notes: `DEX buy: ${solSpent.toFixed(6)} SOL → ${Math.abs(inAmt)} ${inSym}`,
-          solanaSwapType: 'sol_to_token',
+          assetSymbol: 'SOL',  amount: solSpent,
+          inAsset: inSym,      inAmount: Math.abs(inAmt),
+          feeSEK, contractAddress: inMint, needsReview: false,
+          notes: mkNotes(`DEX buy: ${solSpent.toFixed(6)} SOL → ${Math.abs(inAmt).toLocaleString()} ${inSym}`),
+          solanaSwapType: 'sol_to_token', _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
 
-      // Pattern B — Token → SOL  (memecoin sell — THE most common case)
-      //   tokenTransfers:  Token OUT from wallet
-      //   nativeTransfers: SOL IN to wallet
-      if (hasSolIn && tokenOut.length > 0 && tokenIn.length === 0) {
+      // Case B: token(s) out + SOL in → SELL / Token→SOL swap
+      if (hasSolIn && tokenOut.length >= 1 && tokenIn.length === 0) {
         const [outMint, outAmt] = biggest(tokenOut);
-        const outSym = sym(outMint);
-        const solReceived = Math.abs(netSol);
+        const outSym = msym(outMint);
+        const solReceived = Math.abs(economicSol);
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.TRADE,
-          assetSymbol: outSym,   amount: Math.abs(outAmt),
-          inAsset: 'SOL',        inAmount: solReceived,
-          feeSEK,                contractAddress: outMint,
-          needsReview: false,
-          notes: `DEX sell: ${Math.abs(outAmt)} ${outSym} → ${solReceived.toFixed(6)} SOL`,
-          solanaSwapType: 'token_to_sol',
+          assetSymbol: outSym,  amount: Math.abs(outAmt),
+          inAsset: 'SOL',       inAmount: solReceived,
+          feeSEK, contractAddress: outMint, needsReview: false,
+          notes: mkNotes(`DEX sell: ${Math.abs(outAmt).toLocaleString()} ${outSym} → ${solReceived.toFixed(6)} SOL`),
+          solanaSwapType: 'token_to_sol', _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
 
-      // Pattern C — Token → Token  (cross-token swap, e.g. Jupiter USDC→BONK)
-      //   Only token flows, no net SOL change (or minor SOL for fee only)
-      if (tokenOut.length > 0 && tokenIn.length > 0) {
+      // Case C: token(s) out + token(s) in, no significant SOL change → Token→Token swap
+      // Also covers the common case where a tiny SOL refund (< 0.01) accompanies a token swap
+      if (tokenOut.length >= 1 && tokenIn.length >= 1 &&
+          !hasSolOut && Math.abs(economicSol) < 0.01) {
         const [outMint, outAmt] = biggest(tokenOut);
-        const [inMint, inAmt]   = biggest(tokenIn);
-        const outSym = sym(outMint);
-        const inSym  = sym(inMint);
+        const [inMint,  inAmt]  = biggest(tokenIn);
+        const outSym = msym(outMint);
+        const inSym  = msym(inMint);
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.TRADE,
           assetSymbol: outSym,  amount: Math.abs(outAmt),
           inAsset: inSym,       inAmount: Math.abs(inAmt),
-          feeSEK,               contractAddress: outMint,
-          needsReview: false,
-          notes: `DEX swap: ${outSym} → ${inSym}`,
-          solanaSwapType: 'token_to_token',
+          feeSEK, contractAddress: outMint, needsReview: false,
+          notes: mkNotes(`DEX swap: ${outSym} → ${inSym}`),
+          solanaSwapType: 'token_to_token', _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
 
-      // Pattern D — SOL → Token WITH explicit SWAP flag but only SOL moved (edge case)
-      // e.g. SOL→wrapped SOL→token where wrapping is internal to DEX
-      if (isExplicitSwap && hasSolOut && tokenIn.length === 0) {
-        // Can't reconstruct fully — record as SOL send flagged for review
+      // Case D: SOL out + token out + token in → complex (LP deposit, multi-asset)
+      if (hasSolOut && tokenIn.length >= 1 && tokenOut.length >= 1) {
+        const [inMint,  inAmt]  = biggest(tokenIn);
+        const inSym = msym(inMint);
         return normalizeTransaction({
-          txHash: sig, date: ts, category: CAT.TRANSFER_OUT,
-          assetSymbol: 'SOL', amount: Math.abs(netSol),
-          feeSEK, needsReview: true,
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: 'SOL',  amount: Math.abs(economicSol),
+          inAsset: inSym,      inAmount: Math.abs(inAmt),
+          feeSEK, contractAddress: inMint, needsReview: true,
           reviewReason: 'unresolved_solana_swap',
-          notes: 'Solana swap: no token inflow detected — re-import to resolve',
+          notes: mkNotes('Complex DEX/LP interaction — verify (LP deposit or multi-hop)'),
+          _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
 
-      // ── Step 3: Pure SOL transfer (no token activity) ───────
-      if (nt.length > 0 && tokenIn.length === 0 && tokenOut.length === 0) {
-        if (Math.abs(netSol) < DUST) return null; // pure fee / no-op
-        const isOut = netSol < 0;
+      // Case E: SOL in + token in + token out → complex (LP withdrawal, multi-asset)
+      if (hasSolIn && tokenOut.length >= 1 && tokenIn.length >= 1) {
+        const [outMint, outAmt] = biggest(tokenOut);
+        const outSym = msym(outMint);
+        return normalizeTransaction({
+          txHash: sig, date: ts, category: CAT.TRADE,
+          assetSymbol: outSym,  amount: Math.abs(outAmt),
+          inAsset: 'SOL',       inAmount: Math.abs(economicSol),
+          feeSEK, contractAddress: outMint, needsReview: true,
+          reviewReason: 'unresolved_solana_swap',
+          notes: mkNotes('Complex DEX/LP interaction — verify (LP withdrawal or multi-hop)'),
+          _reconstruction: recon,
+        }, accountId, 'solana_wallet');
+      }
+
+      // Case F: Only SOL moved (pure SOL transfer)
+      if (Math.abs(economicSol) > SOL_DUST_LAMPORTS / 1e9 &&
+          tokenIn.length === 0 && tokenOut.length === 0) {
+        const isOut = economicSol < 0;
         return normalizeTransaction({
           txHash: sig, date: ts,
           category: isOut ? CAT.SEND : CAT.RECEIVE,
-          assetSymbol: 'SOL', amount: Math.abs(netSol),
+          assetSymbol: 'SOL', amount: Math.abs(economicSol),
           feeSEK, needsReview: false,
           notes: `SOL ${isOut ? 'sent' : 'received'}`,
+          _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
 
-      // ── Step 4: Pure token transfer (no SOL movement) ───────
+      // Case G: Pure token receive (airdrop / bridge in / unmatched leg)
       if (tokenIn.length > 0 && tokenOut.length === 0 && !hasSolOut) {
         const [inMint, inAmt] = biggest(tokenIn);
-        const inSym = sym(inMint);
+        const inSym = msym(inMint);
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.RECEIVE,
           assetSymbol: inSym, amount: Math.abs(inAmt),
           feeSEK, contractAddress: inMint,
-          needsReview: true,
-          reviewReason: 'unmatched_solana_receive',
-          notes: 'Token received — verify source (airdrop, bridge, or unmatched swap leg)',
+          needsReview: true, reviewReason: 'unmatched_solana_receive',
+          notes: 'Token received — verify source (airdrop, bridge, or transfer)',
+          _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
+
+      // Case H: Pure token send (bridge out / unmatched leg)
       if (tokenOut.length > 0 && tokenIn.length === 0 && !hasSolIn) {
         const [outMint, outAmt] = biggest(tokenOut);
-        const outSym = sym(outMint);
+        const outSym = msym(outMint);
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.SEND,
           assetSymbol: outSym, amount: Math.abs(outAmt),
           feeSEK, contractAddress: outMint,
-          needsReview: true,
-          reviewReason: 'unmatched_solana_send',
-          notes: 'Token sent — verify destination (transfer, bridge, or unmatched swap leg)',
+          needsReview: true, reviewReason: 'unmatched_solana_send',
+          notes: 'Token sent — verify destination (transfer or bridge)',
+          _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }
 
-      // ── Step 5: Mixed pattern — best-effort reconstruction ──
-      // SOL out + token in already handled by Pattern A.
-      // SOL in + token out already handled by Pattern B.
-      // Remaining: both SOL and tokens flow, or complex LP/staking tx.
-      if (hasSolOut && tokenIn.length > 0) {
-        // LP deposit or NFT mint — looks like a buy, flag for review
-        const [inMint, inAmt] = biggest(tokenIn);
-        const inSym = sym(inMint);
-        return normalizeTransaction({
-          txHash: sig, date: ts, category: CAT.TRADE,
-          assetSymbol: 'SOL',  amount: Math.abs(netSol),
-          inAsset: inSym,      inAmount: Math.abs(inAmt),
-          feeSEK, contractAddress: inMint,
-          needsReview: true,
-          reviewReason: 'unresolved_solana_swap',
-          notes: 'Possible LP/staking deposit — verify if this is a swap or LP action',
-        }, accountId, 'solana_wallet');
-      }
-      if (hasSolIn && tokenOut.length > 0) {
-        const [outMint, outAmt] = biggest(tokenOut);
-        const outSym = sym(outMint);
-        return normalizeTransaction({
-          txHash: sig, date: ts, category: CAT.TRADE,
-          assetSymbol: outSym,  amount: Math.abs(outAmt),
-          inAsset: 'SOL',       inAmount: Math.abs(netSol),
-          feeSEK, contractAddress: outMint,
-          needsReview: true,
-          reviewReason: 'unresolved_solana_swap',
-          notes: 'Possible LP/staking withdrawal — verify if this is a swap or LP action',
-        }, accountId, 'solana_wallet');
-      }
+      // Pure fee / no-op (only lamports moved for fee, nothing else)
+      return null;
 
     } catch (e) {
       console.warn('[SolTx] normalization error:', e.message, tx?.signature);
       return null;
     }
-    return null;
   }
 
   // ════════════════════════════════════════════════════════════

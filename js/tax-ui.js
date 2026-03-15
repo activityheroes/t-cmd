@@ -2435,6 +2435,7 @@ const TaxUI = (() => {
     const canAutoInfer = issues.filter(i =>
       i.reason === 'missing_sek_price' && ['market_api_failed','swap_inference_failed'].includes(i.priceBlockReason)
     ).length;
+    const unknownAssetCount = issues.filter(i => i.reason === 'unknown_asset').length;
 
     // ── Stale Solana import detection ──
     const allTxns = TaxEngine.getTransactions();
@@ -2457,6 +2458,7 @@ const TaxUI = (() => {
           <span class="tax-page-subtitle">${nBlockers} K4-blockerare · ${nWarnings} varningar · ${nInfo} informations</span>
           ${issues.length > 0 ? `
             <div class="tax-page-actions" style="gap:8px">
+              ${unknownAssetCount > 0 ? `<button class="tax-btn tax-btn-sm" id="btn-resolve-tokens" style="background:rgba(14,165,233,.12);color:#38bdf8;border:1px solid rgba(14,165,233,.25)" onclick="TaxUI.resolveUnknownTokens()">🔍 Slå upp ${unknownAssetCount} okända tokens</button>` : ''}
               ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-inferera ${canAutoInfer}</button>` : ''}
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Kör om pipeline</button>
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Markera alla OK</button>
@@ -3611,6 +3613,43 @@ const TaxUI = (() => {
     render();
   }
 
+  // Resolve human-readable names for all "Unknown token" transactions.
+  // Uses DexScreener batch endpoint (full Solana mints) + Pump.fun fallback.
+  // Updates the token name cache and re-renders — no pipeline re-run needed.
+  async function resolveUnknownTokens() {
+    const btn = document.getElementById('btn-resolve-tokens');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Slår upp…'; }
+    try {
+      const allTxns = TaxEngine.getTransactions();
+      const unknownIssues = TaxEngine.getReviewIssues(null, S.taxResult || null)
+        .filter(i => i.reason === 'unknown_asset');
+      if (!unknownIssues.length) {
+        showTaxToast('ℹ️', 'Inga okända tokens', 'Alla tokens är redan lösta.', 'info');
+        return;
+      }
+      // Collect full mint addresses and 8-char symbols from unknown tokens
+      const mintAddresses = [...new Set(
+        unknownIssues.map(i => i.txn?.contractAddress).filter(s => s && s.length > 20)
+      )];
+      const symbols = [...new Set(
+        unknownIssues.map(i => i.txn?.assetSymbol).filter(Boolean)
+      )];
+      showTaxToast('🔍', 'Slår upp tokens…', `Hämtar metadata för ${mintAddresses.length} mints via DexScreener + Pump.fun…`, 'info');
+      await TaxEngine.resolveUnknownTokenNames(symbols, mintAddresses);
+      // Reload name cache and check how many resolved
+      let nameCache = {};
+      try { nameCache = JSON.parse(localStorage.getItem('tcmd_token_names') || '{}'); } catch {}
+      const resolved = mintAddresses.filter(m => nameCache[m.toUpperCase()]?.name).length;
+      const pumpFun  = mintAddresses.filter(m => nameCache[m.toUpperCase()]?.isPumpFun).length;
+      showTaxToast('✅', `${resolved}/${mintAddresses.length} tokens lösta`, `${pumpFun > 0 ? pumpFun + ' via Pump.fun · ' : ''}Kör pipeline igen för att applicera namnen.`, 'success');
+      render();
+    } catch (e) {
+      showTaxToast('❌', 'Upplösning misslyckades', e.message || String(e), 'error');
+    } finally {
+      if (btn) { btn.disabled = false; }
+    }
+  }
+
   // Auto-infer prices for all still-missing transactions by re-applying the full
   // pricing chain on just the unpriced subset, then merging results back.
   async function bulkAutoInfer() {
@@ -4255,7 +4294,7 @@ const TaxUI = (() => {
     toggleSelectAll, toggleSelectTx, deleteSelected, deleteAllFiltered, clearSelection,
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
-    bulkAutoInfer, toggleReviewGroup,
+    bulkAutoInfer, resolveUnknownTokens, toggleReviewGroup,
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,

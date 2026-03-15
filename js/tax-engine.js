@@ -687,13 +687,24 @@ const TaxEngine = (() => {
     if (!unknownSymbols.length) return txns;
     if (onProgress) onProgress({ step: 'tokens', msg: `Resolving ${unknownSymbols.length} unknown token symbols…` });
 
-    const resolvedCache = await resolveUnknownTokenNames(unknownSymbols);
+    // Collect full mint addresses from contractAddress fields — DexScreener batch
+    // lookup by full mint is far more reliable than searching by 8-char prefix
+    const mintAddresses = [...new Set(
+      txns.map(t => t.contractAddress).filter(s => s && s.length > 20)
+    )];
 
-    // Also resolve inAsset symbols for trades
+    const resolvedCache = await resolveUnknownTokenNames(unknownSymbols, mintAddresses);
+
+    // Also resolve inAsset symbols for trades (pass their contract addresses too)
     const inAssetSymbols = [...new Set(
       txns.map(t => t.inAsset).filter(s => s && looksLikeContractAddress(s))
     )];
-    if (inAssetSymbols.length) await resolveUnknownTokenNames(inAssetSymbols);
+    const inAssetMints = [...new Set(
+      txns.flatMap(t => t.inAsset && t.inAsset.length > 20 ? [t.inAsset] : [])
+    )];
+    if (inAssetSymbols.length || inAssetMints.length) {
+      await resolveUnknownTokenNames(inAssetSymbols, inAssetMints);
+    }
 
     // Reload cache after DexScreener fills it
     let nameCache = {};
@@ -2070,7 +2081,57 @@ const TaxEngine = (() => {
 
     savePriceCache(updatedCache);
 
-    // ── D: Apply full pricing chain (all passes) ───────────
+    // ── D: Birdeye — Solana meme coins not indexed by GeckoTerminal ──────────
+    // For on-chain Solana tokens that GeckoTerminal couldn't price (no OHLCV
+    // found), try Birdeye's free public historical price API.
+    // Birdeye covers virtually all SPL tokens including pump.fun launches.
+    const birdeyeNeeded = new Map(); // "address|year" → { address, year }
+    const MAX_BIRDEYE = 25;
+    const nameCache2 = (() => { try { return JSON.parse(localStorage.getItem('tcmd_token_names') || '{}'); } catch { return {}; } })();
+    for (const t of txns) {
+      if (t.isInternalTransfer) continue;
+      if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
+      if (t.priceSEKPerUnit > 0 || t.coinGeckoId) continue;
+      if (!t.contractAddress) continue;
+      const network = GT_NETWORK_MAP[t.chain] || GT_NETWORK_MAP[chainFromSource(t.source)];
+      if (network !== 'solana') continue; // Birdeye is Solana-only
+      // Only attempt if GT didn't price this token
+      const dateStr = (t.date || '').slice(0, 10);
+      if (updatedCache[gtCacheKey(t.contractAddress, dateStr)]) continue;
+      const year = parseInt(dateStr.slice(0, 4));
+      if (isNaN(year)) continue;
+      const key = `${t.contractAddress}|${year}`;
+      if (!birdeyeNeeded.has(key)) {
+        birdeyeNeeded.set(key, { address: t.contractAddress, year });
+        if (birdeyeNeeded.size >= MAX_BIRDEYE) break;
+      }
+    }
+    for (const [, { address, year }] of birdeyeNeeded) {
+      try {
+        const timeFrom = Math.floor(Date.UTC(year, 0, 1) / 1000);
+        const timeTo   = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
+        const url = `https://public-api.birdeye.so/public/history_price?address=${address}&address_type=token&type=1D&time_from=${timeFrom}&time_to=${timeTo}`;
+        const r = await fetchWithTimeout(url, 10000);
+        if (!r?.ok) continue;
+        const json = await r.json();
+        const items = json?.data?.items || [];
+        if (!items.length) continue;
+        const fxMap = fxByYear.get(year);
+        for (const item of items) {
+          const d = new Date(item.unixTime * 1000).toISOString().slice(0, 10);
+          const usdPrice = parseFloat(item.value);
+          if (!usdPrice || isNaN(usdPrice) || usdPrice <= 0) continue;
+          const fx = fxMap ? nearestMapValue(fxMap, d) : null;
+          if (fx) {
+            updatedCache[gtCacheKey(address, d)] = usdPrice * fx;
+          }
+        }
+        if (onProgress) onProgress({ step: 'price', pct: 90, msg: `Birdeye: pricing ${address.slice(0, 8)}…` });
+      } catch { /* ignore */ }
+    }
+    if (birdeyeNeeded.size > 0) savePriceCache(updatedCache);
+
+    // ── E: Apply full pricing chain (all passes) ───────────
     if (onProgress) onProgress({ step: 'price', pct: 97, msg: 'Applying pricing chain…' });
 
     // For GeckoTerminal-priced tokens: inject SEK price from the gt cache
@@ -4338,42 +4399,108 @@ const TaxEngine = (() => {
     return { symbol: sym, name: null };
   }
 
-  // Async: fetch human-readable names from DexScreener for truly unknown symbols.
+  // Async: fetch human-readable names + pair metadata for unknown tokens.
+  // Two resolution paths:
+  //   1. Full mint address → DexScreener /dex/tokens (batch, up to 30 per req)
+  //                        → Pump.fun /coins/{mint} (fallback for new meme coins)
+  //   2. 8-char symbol → DexScreener /dex/search (fallback, up to 20 per session)
   // Results cached in localStorage under 'tcmd_token_names' (7-day TTL).
-  async function resolveUnknownTokenNames(symbols) {
+  async function resolveUnknownTokenNames(symbols, mintAddresses = []) {
     const CACHE_KEY = 'tcmd_token_names';
     const TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
     let cache = {};
     try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch { }
-    // Evict stale entries
     const now = Date.now();
+    // Evict stale entries
     for (const k of Object.keys(cache)) {
       if (cache[k]._ts && now - cache[k]._ts > TTL_MS) delete cache[k];
     }
-    // Only look up symbols we can't resolve statically
-    const needed = [...new Set(symbols)].filter(s => {
+
+    // ── Path 1: resolve by full Solana mint address ──────────────────────────
+    // DexScreener /dex/tokens supports up to 30 comma-separated addresses.
+    const mintsNeeded = [...new Set(mintAddresses)].filter(m =>
+      m && m.length > 20 && !cache[m.toUpperCase()]
+    );
+    for (let i = 0; i < mintsNeeded.length && i < 120; i += 30) {
+      const batch = mintsNeeded.slice(i, i + 30);
+      try {
+        const url = `https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`;
+        const r = await fetchWithTimeout(url, 10000);
+        if (!r?.ok) continue;
+        const data = await r.json();
+        const pairs = data.pairs || [];
+        for (const mint of batch) {
+          // Match pairs where baseToken.address equals the mint (case-insensitive)
+          const mintLow = mint.toLowerCase();
+          const mintPairs = pairs.filter(p => p.baseToken?.address?.toLowerCase() === mintLow);
+          if (!mintPairs.length) continue;
+          // Prefer Solana pairs; pick highest liquidity
+          const solPairs = mintPairs.filter(p => p.chainId === 'solana');
+          const best = (solPairs.length ? solPairs : mintPairs)
+            .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+          const entry = {
+            symbol:       best.baseToken.symbol || mint.slice(0, 8),
+            name:         best.baseToken.name   || best.baseToken.symbol || mint.slice(0, 8),
+            pairAddress:  best.pairAddress   || null,
+            pairChain:    best.chainId       || 'solana',
+            priceUsd:     best.priceUsd ? parseFloat(best.priceUsd) : null,
+            _ts: now,
+          };
+          cache[mint.toUpperCase()]              = entry;
+          cache[mint.slice(0, 8).toUpperCase()]  = entry; // also index by 8-char prefix
+        }
+      } catch { /* ignore individual batch failures */ }
+    }
+
+    // ── Pump.fun fallback for mints still unresolved after DexScreener ───────
+    const pumpNeeded = mintsNeeded.filter(m => !cache[m.toUpperCase()]).slice(0, 30);
+    for (const mint of pumpNeeded) {
+      try {
+        const url = `https://frontend-api.pump.fun/coins/${mint}`;
+        const r = await fetchWithTimeout(url, 6000);
+        if (!r?.ok) continue;
+        const d = await r.json();
+        if (!d) continue;
+        const sym = (d.symbol || mint.slice(0, 8)).trim();
+        const entry = {
+          symbol:      sym,
+          name:        (d.name || sym).trim(),
+          isPumpFun:   true,
+          priceUsd:    d.usd_market_cap && d.total_supply ? (d.usd_market_cap / d.total_supply) : null,
+          _ts: now,
+        };
+        cache[mint.toUpperCase()]             = entry;
+        cache[mint.slice(0, 8).toUpperCase()] = entry;
+      } catch { /* ignore */ }
+    }
+
+    // ── Path 2: resolve by 8-char symbol (legacy / fallback) ─────────────────
+    const symNeeded = [...new Set(symbols)].filter(s => {
       const upper = s.toUpperCase();
       return !TOKEN_DISPLAY_NAMES[upper] && !MINT_PREFIX_TO_SYM[upper] && !cache[upper];
     });
-    for (const sym of needed.slice(0, 8)) {  // limit to 8 API calls per session
+    for (const sym of symNeeded.slice(0, 20)) {
       try {
         const url = `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(sym)}`;
         const r = await fetchWithTimeout(url, 8000);
-        if (!r || !r.ok) continue;
+        if (!r?.ok) continue;
         const data = await r.json();
-        // Find best match: prefer pair whose baseToken symbol exactly matches
         const pair = (data.pairs || []).find(
           p => p.baseToken?.symbol?.toUpperCase() === sym.toUpperCase()
         );
         if (pair?.baseToken?.name) {
           cache[sym.toUpperCase()] = {
-            symbol: pair.baseToken.symbol,
-            name: pair.baseToken.name,
+            symbol:       pair.baseToken.symbol,
+            name:         pair.baseToken.name,
+            pairAddress:  pair.pairAddress || null,
+            pairChain:    pair.chainId || null,
+            priceUsd:     pair.priceUsd ? parseFloat(pair.priceUsd) : null,
             _ts: now,
           };
         }
-      } catch { /* ignore individual lookup failures */ }
+      } catch { /* ignore */ }
     }
+
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch { }
     return cache;
   }

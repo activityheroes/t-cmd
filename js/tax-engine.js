@@ -2742,6 +2742,22 @@ const TaxEngine = (() => {
       .filter(t => new Date(t.date).getFullYear() <= year)
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
+    // Pre-pass: build acquisition map for per-disposal tracing
+    // Used in recordDisposal to explain WHY cost basis is zero
+    const acquisitionMap = {};
+    for (const t of allSorted) {
+      const s = t.assetSymbol;
+      if (!s) continue;
+      const acqCats = [CAT.BUY, CAT.RECEIVE, CAT.INCOME, CAT.STAKING, CAT.AIRDROP, CAT.TRANSFER_IN, CAT.BRIDGE_IN];
+      if (acqCats.includes(t.category) && !t.isInternalTransfer) {
+        (acquisitionMap[s] = acquisitionMap[s] || []).push({ id: t.id, date: t.date, category: t.category, amount: t.amount });
+      }
+      // TRADE in-side: receiving inAsset counts as acquisition
+      if (t.category === CAT.TRADE && t.inAsset && t.inAmount > 0) {
+        (acquisitionMap[t.inAsset] = acquisitionMap[t.inAsset] || []).push({ id: t.id, date: t.date, category: 'trade_in', amount: t.inAmount });
+      }
+    }
+
     // Per-asset inventory: { totalQty, totalCostSEK }
     // Assets are tracked by canonical symbol (WETH→ETH already normalised at import)
     const holdings  = {};
@@ -2778,6 +2794,36 @@ const TaxEngine = (() => {
       }
       const gainLoss   = proceedsSEK - feeSEK - costBasis;
 
+      // Acquisition debug: classify WHY cost basis is zero for this disposal
+      let zeroCostReason = null;
+      let acquisitionDebug = null;
+      if (unknownAcq) {
+        const allAcqs  = acquisitionMap[sym] || [];
+        const priorAcqs = allAcqs.filter(a => new Date(a.date) <= new Date(t.date));
+        if (priorAcqs.length === 0) {
+          zeroCostReason = 'acquisition_missing';
+          acquisitionDebug = {
+            status: 'not_found', acqsFound: 0,
+            reason: 'Ingen anskaffning hittad — ursprunglig källa ej importerad',
+          };
+        } else {
+          zeroCostReason = 'acquisition_partial';
+          const lat = priorAcqs[priorAcqs.length - 1];
+          acquisitionDebug = {
+            status: 'partial', acqsFound: priorAcqs.length,
+            latestAcqId: lat.id, latestAcqDate: lat.date, latestAcqCategory: lat.category,
+            reason: `${priorAcqs.length} anskaffning(ar) hittad — sålde mer än importerat`,
+          };
+        }
+      } else if (costBasis === 0 && proceedsSEK > 0) {
+        // Holdings exist but avg cost = 0 (received at zero FMV: airdrop/reward)
+        zeroCostReason = 'confirmed_zero';
+        acquisitionDebug = {
+          status: 'confirmed_zero',
+          reason: 'Anskaffat till 0 kr — airdrop/reward utan marknadsvärde vid mottagning',
+        };
+      }
+
       // Reduce holdings (floor at 0)
       h.totalQty     = Math.max(0, h.totalQty - safeQty);
       h.totalCostSEK = Math.max(0, h.totalCostSEK - costBasis);
@@ -2795,6 +2841,8 @@ const TaxEngine = (() => {
         id: t.id,
         needsReview: t.needsReview || unknownAcq,
         unknownAcquisition: unknownAcq,
+        zeroCostReason,
+        acquisitionDebug,
         ...extraFields,
       };
     }
@@ -3154,8 +3202,21 @@ const TaxEngine = (() => {
           : 'exact';
         // contractAddress = Solana mint / EVM contract (for explorer links in UI)
         const contractAddress = gains.find(d => d.contractAddress)?.contractAddress || null;
+        // Acquisition debug counts (per zeroCostReason sub-type)
+        const acquisitionMissingCount = gains.filter(d => d.zeroCostReason === 'acquisition_missing').length;
+        const acquisitionPartialCount = gains.filter(d => d.zeroCostReason === 'acquisition_partial').length;
+        // Top debug disposals for per-row debug panel (only non-exact rows)
+        const debugDisposals = confidence !== 'exact'
+          ? gains.filter(d => d.unknownAcquisition || d.zeroCostReason === 'acquisition_missing')
+              .slice(0, 5).map(d => ({
+                id: d.id, date: d.date, amountSold: d.amountSold,
+                proceedsSEK: d.proceedsSEK, zeroCostReason: d.zeroCostReason,
+                acquisitionDebug: d.acquisitionDebug,
+              }))
+          : [];
         k4Rows.push({ sym, displayName, side: 'gain', qty, proc, cost, gain, loss: 0,
-          confidence, unknownAcqCount, swapAtCostCount, contractAddress });
+          confidence, unknownAcqCount, swapAtCostCount, contractAddress,
+          acquisitionMissingCount, acquisitionPartialCount, debugDisposals });
       }
       if (losses.length > 0) {
         const qty  = losses.reduce((s, d) => s + d.amountSold, 0);
@@ -3169,8 +3230,19 @@ const TaxEngine = (() => {
           : cost === 0 && proc > 0 ? 'zero_cost'
           : 'exact';
         const contractAddress = losses.find(d => d.contractAddress)?.contractAddress || null;
+        const acquisitionMissingCount = losses.filter(d => d.zeroCostReason === 'acquisition_missing').length;
+        const acquisitionPartialCount = losses.filter(d => d.zeroCostReason === 'acquisition_partial').length;
+        const debugDisposals = confidence !== 'exact'
+          ? losses.filter(d => d.unknownAcquisition || d.zeroCostReason === 'acquisition_missing')
+              .slice(0, 5).map(d => ({
+                id: d.id, date: d.date, amountSold: d.amountSold,
+                proceedsSEK: d.proceedsSEK, zeroCostReason: d.zeroCostReason,
+                acquisitionDebug: d.acquisitionDebug,
+              }))
+          : [];
         k4Rows.push({ sym, displayName, side: 'loss', qty, proc, cost, gain: 0, loss,
-          confidence, unknownAcqCount, swapAtCostCount, contractAddress });
+          confidence, unknownAcqCount, swapAtCostCount, contractAddress,
+          acquisitionMissingCount, acquisitionPartialCount, debugDisposals });
       }
     }
 
@@ -3178,10 +3250,31 @@ const TaxEngine = (() => {
     const totalGains = k4Rows.reduce((s, r) => s + r.gain, 0);
     const totalLosses = k4Rows.reduce((s, r) => s + r.loss, 0);
 
+    // Suspicious zero-cost rows: high-value disposals with unknown acquisition
+    const suspiciousZeroCost = querySuspiciousZeroCost(result);
+
     return {
       k4Rows, totalGains, totalLosses, year, userInfo,
-      formsNeeded: Math.max(1, Math.ceil(k4Rows.length / ROWS_PER_K4_FORM))
+      formsNeeded: Math.max(1, Math.ceil(k4Rows.length / ROWS_PER_K4_FORM)),
+      suspiciousZeroCost,
     };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // SUSPICIOUS ZERO-COST QUERY
+  // Returns disposals where proceeds are significant but cost
+  // basis is 0 and acquisition is unresolved — the most likely
+  // phantom gains that need investigation.
+  // ════════════════════════════════════════════════════════════
+  function querySuspiciousZeroCost(taxResult) {
+    if (!taxResult?.disposals) return [];
+    return taxResult.disposals
+      .filter(d =>
+        d.proceedsSEK > 10000 &&
+        d.costBasisSEK === 0 &&
+        d.unknownAcquisition === true
+      )
+      .sort((a, b) => b.proceedsSEK - a.proceedsSEK);
   }
 
   function generateK4CSV(result, userInfo = {}) {
@@ -4999,7 +5092,7 @@ const TaxEngine = (() => {
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine
-    computeTaxYear, computeReportHealth,
+    computeTaxYear, computeReportHealth, querySuspiciousZeroCost,
     // K4 export
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review

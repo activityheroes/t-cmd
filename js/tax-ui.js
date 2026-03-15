@@ -2716,6 +2716,14 @@ const TaxUI = (() => {
   function k4ConfBadge(row) {
     if (!row.confidence || row.confidence === 'exact') return '';
     if (row.confidence === 'unknown') {
+      const missing = row.acquisitionMissingCount || 0;
+      const partial = row.acquisitionPartialCount || 0;
+      if (missing > 0) {
+        return `<span title="Anskaffning saknas helt för ${missing} transaktion${missing !== 1 ? 'er' : ''} — ursprunglig köpkälla ej importerad." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.22);color:#f87171;font-weight:700;cursor:help">⛔ Saknas</span>`;
+      }
+      if (partial > 0) {
+        return `<span title="Ofullständig historik för ${partial} transaktion${partial !== 1 ? 'er' : ''} — sålde mer än vad som importerats." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.18);color:#f87171;font-weight:600;cursor:help">⚠ Ofullständig</span>`;
+      }
       return `<span title="Okänd anskaffning — kostnadsbas 0 kr. Granska i Review-fliken." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.18);color:#f87171;font-weight:600;cursor:help">⚠ Okänd</span>`;
     }
     if (row.confidence === 'estimated') {
@@ -2723,15 +2731,59 @@ const TaxUI = (() => {
       return `<span title="${n} swap${n !== 1 ? 's' : ''} prissatt via swap-at-cost-uppskattning. Oklart exakt pris vid byte." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(251,191,36,.15);color:#fbbf24;cursor:help">~ Uppskattad</span>`;
     }
     if (row.confidence === 'zero_cost') {
-      return `<span title="Kostnadsbas 0 kr — saknar inköpshistorik för denna tillgång." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#f87171;cursor:help">0 Kostnadsbas</span>`;
+      return `<span title="Kostnadsbas 0 kr — token anskaffad utan marknadsvärde (airdrop/reward). Kontrollera om detta stämmer." style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(239,68,68,.12);color:#fca5a5;cursor:help">0 Nollkostnad</span>`;
     }
     return '';
+  }
+
+  // Helper: per-row acquisition debug panel (native <details> — no JS state)
+  function k4RowDebugPanel(row) {
+    if (!row.debugDisposals || row.debugDisposals.length === 0) return '';
+    const missing = row.acquisitionMissingCount || 0;
+    const partial = row.acquisitionPartialCount || 0;
+    const summaryText = missing > 0
+      ? `${missing} transaktion${missing !== 1 ? 'er' : ''} utan anskaffning`
+      : partial > 0
+        ? `${partial} transaktion${partial !== 1 ? 'er' : ''} med ofullständig historik`
+        : 'Anskaffningsinfo';
+    return `<details style="margin-top:4px">
+      <summary style="font-size:9px;color:#94a3b8;cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:3px">
+        <span>▸</span> ${summaryText}
+      </summary>
+      <div style="margin-top:4px;padding:6px 8px;background:rgba(0,0,0,.25);border-radius:4px;border:1px solid rgba(239,68,68,.15)">
+        ${row.debugDisposals.map(d => {
+          const dbg = d.acquisitionDebug || {};
+          const reasonText = {
+            acquisition_missing: '⛔ Saknas',
+            acquisition_partial: '⚠ Ofullständig',
+            confirmed_zero:      '✓ Nollkostnad',
+          }[d.zeroCostReason] || '❓ Okänd';
+          const reasonColor = d.zeroCostReason === 'acquisition_missing' ? '#f87171'
+            : d.zeroCostReason === 'acquisition_partial' ? '#fbbf24' : '#94a3b8';
+          return `<div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:9px;flex-wrap:wrap">
+            <span style="color:var(--tax-muted);min-width:72px">${d.date ? d.date.slice(0,10) : '—'}</span>
+            <span style="color:#94a3b8;min-width:64px">${TaxEngine.formatSEK ? TaxEngine.formatSEK(d.proceedsSEK) : Math.round(d.proceedsSEK) + ' kr'}</span>
+            <span style="color:${reasonColor};font-weight:600">${reasonText}</span>
+            ${dbg.reason ? `<span style="color:#64748b;flex:1">${dbg.reason}</span>` : ''}
+            ${dbg.acqsFound > 0 ? `<span style="color:#475569">${dbg.acqsFound} anskaffning${dbg.acqsFound !== 1 ? 'ar' : ''}</span>` : ''}
+          </div>`;
+        }).join('')}
+        <div style="margin-top:5px;font-size:9px;color:#64748b">
+          💡 ${missing > 0
+            ? 'Importera den wallet/exchange där detta köptes — motorn matchar automatiskt.'
+            : 'Lägg till komplett transaktionshistorik för att täcka alla försäljningar.'}
+        </div>
+      </div>
+    </details>`;
   }
 
   function renderReports() {
     const result = getOrComputeTaxResult();
     const { summary, disposals } = result;
     const k4 = TaxEngine.generateK4Report(result);
+    // Trusted total = only exact + estimated rows (exclude unknown-cost rows)
+    const trustedGains   = k4.k4Rows.filter(r => r.side === 'gain' && (r.confidence === 'exact' || r.confidence === 'estimated')).reduce((s, r) => s + r.gain, 0);
+    const unknownGainsAmt = k4.k4Rows.filter(r => r.side === 'gain' && r.confidence === 'unknown').reduce((s, r) => s + r.gain, 0);
     const issues = TaxEngine.getReviewIssues(null, result).length;
     const deductibleLoss = summary.deductibleLoss || (summary.totalLosses * 0.70);
     const health = TaxEngine.computeReportHealth ? TaxEngine.computeReportHealth(result) : null;
@@ -2797,6 +2849,13 @@ const TaxUI = (() => {
               <div class="tax-rh-label">Summa vinst (K4 Sektion D)</div>
               <div class="tax-rh-label-sub">→ Ruta 7.5 i deklarationen</div>
               <div class="tax-rh-val tax-green">${TaxEngine.formatSEK(k4.totalGains)}</div>
+              ${unknownGainsAmt > 0 ? `
+              <div style="margin-top:4px;font-size:10px;color:#f87171;line-height:1.4">
+                varav <strong>${TaxEngine.formatSEK(unknownGainsAmt)}</strong> är oklara rader (okänd anskaffning)
+              </div>
+              <div style="margin-top:2px;font-size:10px;color:#4ade80">
+                bekräftad vinst: <strong>${TaxEngine.formatSEK(trustedGains)}</strong>
+              </div>` : ''}
             </div>
             <div class="tax-rh-item">
               <div class="tax-rh-label">Summa förlust (K4 Sektion D)</div>
@@ -2892,6 +2951,60 @@ const TaxUI = (() => {
         </div>`;
         })()}
 
+        <!-- Suspicious zero-cost rows panel -->
+        ${(() => {
+          const suspicious = k4.suspiciousZeroCost || [];
+          if (suspicious.length === 0) return '';
+          const totalPhantom = suspicious.reduce((s, d) => s + d.proceedsSEK, 0);
+          // Group by symbol
+          const bySymbol = {};
+          for (const d of suspicious) {
+            const sym = d.assetSymbol;
+            if (!bySymbol[sym]) bySymbol[sym] = { sym, count: 0, totalProc: 0, reason: null, dbg: null };
+            bySymbol[sym].count++;
+            bySymbol[sym].totalProc += d.proceedsSEK;
+            bySymbol[sym].reason = d.zeroCostReason;
+            bySymbol[sym].dbg = d.acquisitionDebug;
+          }
+          const symRows = Object.values(bySymbol).sort((a, b) => b.totalProc - a.totalProc).slice(0, 10);
+          return `
+        <div class="tax-section" style="margin-bottom:16px;border-color:rgba(239,68,68,.35)">
+          <div class="tax-section-header" style="margin-bottom:10px">
+            <h2 style="font-size:14px;color:#f87171">🔍 Oklara nollkostnadsrader — kräver granskning</h2>
+            <span class="tax-badge" style="background:rgba(239,68,68,.12);color:#f87171">${suspicious.length} rad${suspicious.length !== 1 ? 'er' : ''} · ${TaxEngine.formatSEK(totalPhantom)} i oklara intäkter</span>
+          </div>
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:10px;line-height:1.6">
+            Dessa avyttringar har <strong style="color:#f87171">kostnadsbas 0 kr</strong> och <strong style="color:#f87171">okänd anskaffning</strong>.
+            De ska INTE ingå i slutsiffran förrän anskaffningskällan är identifierad och importerad.
+            Möjliga orsaker: köp på oimporterad exchange · erhållen via oimporterad wallet · bridgad från annan kedja.
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${symRows.map(row => {
+              const dbgReason = row.dbg?.reason || '';
+              const reasonLabel = row.reason === 'acquisition_missing' ? '⛔ Ingen anskaffning hittad'
+                : row.reason === 'acquisition_partial' ? '⚠ Ofullständig historik'
+                : '❓ Okänd';
+              const reasonColor = row.reason === 'acquisition_missing' ? '#f87171' : '#fbbf24';
+              return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:rgba(239,68,68,.05);border:1px solid rgba(239,68,68,.18);border-radius:6px;flex-wrap:wrap">
+                <span class="tax-mono" style="font-size:12px;color:#e2e8f0;font-weight:600;min-width:80px">${row.sym}</span>
+                <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(239,68,68,.15);color:${reasonColor}">${reasonLabel}</span>
+                ${dbgReason ? `<span style="font-size:10px;color:#64748b;flex:1">${dbgReason}</span>` : '<span style="flex:1"></span>'}
+                ${row.count > 1 ? `<span style="font-size:10px;color:#64748b">${row.count} transaktioner</span>` : ''}
+                <span style="font-size:12px;font-weight:700;color:#f87171">${TaxEngine.formatSEK(row.totalProc)}</span>
+                <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.filterTxsByAsset('${row.sym}')" style="font-size:10px;padding:2px 6px">📋 Visa</button>
+              </div>`;
+            }).join('')}
+          </div>
+          ${suspicious.length > 10 ? `<div style="font-size:10px;color:#64748b;margin-top:6px;text-align:center">… och ${suspicious.length - 10} fler rader</div>` : ''}
+          <div style="margin-top:10px;padding:8px 12px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.2);border-radius:6px;font-size:11px;color:#94a3b8">
+            <strong style="color:#818cf8">Hur åtgärdar du detta?</strong>
+            Gå till <button class="tax-btn tax-btn-xs" style="font-size:10px;padding:1px 6px;margin:0 2px" onclick="TaxUI.navigate('accounts')">Konton</button>
+            och lägg till den exchange eller wallet där dessa tokens ursprungligen köptes.
+            Motorn matchar transaktionerna automatiskt när historiken importerats.
+          </div>
+        </div>`;
+        })()}
+
         <!-- K4 Preview Table -->
         <div class="tax-section">
           <div class="tax-section-header">
@@ -2950,7 +3063,10 @@ const TaxUI = (() => {
                       <td class="ta-r tax-mono">${TaxEngine.formatSEK(r.cost)}</td>
                       <td class="ta-r tax-mono ${r.gain > 0 ? 'tax-green' : ''}">${r.gain ? TaxEngine.formatSEK(r.gain) : ''}</td>
                       <td class="ta-r tax-mono ${r.loss > 0 ? 'tax-red' : ''}">${r.loss ? TaxEngine.formatSEK(r.loss) : ''}</td>
-                      <td>${k4ConfBadge(r) || '<span style="font-size:10px;color:var(--tax-muted)">✓ Exakt</span>'}</td>
+                      <td>
+                        ${k4ConfBadge(r) || '<span style="font-size:10px;color:var(--tax-muted)">✓ Exakt</span>'}
+                        ${k4RowDebugPanel(r)}
+                      </td>
                     </tr>`).join('')}
                   <tr class="tax-k4-sum-row">
                     <td colspan="5"><strong>Summa</strong></td>

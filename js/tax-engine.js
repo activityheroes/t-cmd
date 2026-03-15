@@ -1419,8 +1419,30 @@ const TaxEngine = (() => {
     const inSym = (t.inAsset || '').toUpperCase();
     const inAmt = t.inAmount || 0;
     if (inSym && inAmt > 0) {
+      // Decimal-unit guard for on-chain stablecoin amounts:
+      // Helius tokenTransfers.tokenAmount should be decimal-adjusted, but for some
+      // DeFi transactions it may arrive as a raw integer (e.g. 9,857,921,285 raw USDC
+      // instead of 9,857.92 adjusted USDC — a factor-of-1e6 error since USDC has 6 dec).
+      // Detect: if implied price-per-unit-sold would be > 100,000 SEK (impossible for any
+      // token priced via a stable swap in a typical portfolio) try dividing by 1e6 / 1e9.
+      let effectiveInAmt = inAmt;
+      if (STABLES.has(inSym) && amt > 0) {
+        const sekPerStable = historicalFX(date, fxByYear) || STABLE_SEK.USD;
+        const impliedPrice = (inAmt * sekPerStable) / amt;
+        if (impliedPrice > 100_000) {
+          const p6 = (inAmt / 1e6) * sekPerStable / amt;
+          if (p6 > 0.0001 && p6 < 100_000) {
+            effectiveInAmt = inAmt / 1e6;   // USDC/USDT/BUSD: 6 decimals
+          } else {
+            const p9 = (inAmt / 1e9) * sekPerStable / amt;
+            if (p9 > 0.0001 && p9 < 100_000) {
+              effectiveInAmt = inAmt / 1e9; // 9-decimal stables
+            }
+          }
+        }
+      }
       // 2a. In-side is stablecoin → its SEK value is the proceeds/cost
-      const inSEK = getSEKValue(inSym, inAmt, date, cache, fxByYear);
+      const inSEK = getSEKValue(inSym, effectiveInAmt, date, cache, fxByYear);
       if (inSEK && inSEK > 0 && amt > 0) {
         return {
           ...t,
@@ -3016,8 +3038,10 @@ const TaxEngine = (() => {
           : swapAtCostCount > 0 ? 'estimated'
           : cost === 0 && proc > 0 ? 'zero_cost'
           : 'exact';
+        // contractAddress = Solana mint / EVM contract (for explorer links in UI)
+        const contractAddress = gains.find(d => d.contractAddress)?.contractAddress || null;
         k4Rows.push({ sym, displayName, side: 'gain', qty, proc, cost, gain, loss: 0,
-          confidence, unknownAcqCount, swapAtCostCount });
+          confidence, unknownAcqCount, swapAtCostCount, contractAddress });
       }
       if (losses.length > 0) {
         const qty  = losses.reduce((s, d) => s + d.amountSold, 0);
@@ -3030,8 +3054,9 @@ const TaxEngine = (() => {
           : swapAtCostCount > 0 ? 'estimated'
           : cost === 0 && proc > 0 ? 'zero_cost'
           : 'exact';
+        const contractAddress = losses.find(d => d.contractAddress)?.contractAddress || null;
         k4Rows.push({ sym, displayName, side: 'loss', qty, proc, cost, gain: 0, loss,
-          confidence, unknownAcqCount, swapAtCostCount });
+          confidence, unknownAcqCount, swapAtCostCount, contractAddress });
       }
     }
 

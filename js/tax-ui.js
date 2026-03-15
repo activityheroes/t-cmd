@@ -2682,9 +2682,21 @@ const TaxUI = (() => {
                   ${k4.k4Rows.map((r, i) => `
                     <tr class="${(i + 1) % ROWS_PER_K4_FORM === 0 && i !== k4.k4Rows.length - 1 ? 'tax-k4-page-break' : ''}${r.confidence && r.confidence !== 'exact' ? ' tax-k4-row--uncertain' : ''}">
                       <td>
-                        <div class="tax-asset-cell">
-                          <span class="tax-asset-name">${r.displayName || r.sym}</span>
-                          <span class="tax-badge" style="margin-left:6px;${r.side === 'gain' ? 'background:rgba(34,197,94,.1);color:#4ade80' : 'background:rgba(239,68,68,.1);color:#f87171'}">${r.side === 'gain' ? 'Vinst' : 'Förlust'}</span>
+                        <div class="tax-asset-cell" style="gap:4px">
+                          <div style="flex:1;min-width:0">
+                            <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+                              <span class="tax-asset-name">${r.displayName || r.sym}</span>
+                              <span class="tax-badge" style="${r.side === 'gain' ? 'background:rgba(34,197,94,.1);color:#4ade80' : 'background:rgba(239,68,68,.1);color:#f87171'}">${r.side === 'gain' ? 'Vinst' : 'Förlust'}</span>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:4px;margin-top:2px;flex-wrap:wrap">
+                              ${r.contractAddress
+                                ? `<a href="https://solscan.io/token/${r.contractAddress}" target="_blank" rel="noopener noreferrer" class="tax-explorer-link" style="font-size:9px;padding:0px 4px" title="View token on Solscan">Solscan ↗</a>
+                                   <a href="https://solana.fm/address/${r.contractAddress}" target="_blank" rel="noopener noreferrer" class="tax-explorer-link tax-explorer-link--secondary" style="font-size:9px;padding:0px 4px" title="View on SolanaFM">SolanaFM ↗</a>`
+                                : (() => { const mint = TaxEngine.SYM_TO_MINT && TaxEngine.SYM_TO_MINT[r.sym]; return mint ? `<a href="https://solscan.io/token/${mint}" target="_blank" rel="noopener noreferrer" class="tax-explorer-link" style="font-size:9px;padding:0px 4px" title="View token on Solscan">Solscan ↗</a>` : ''; })()
+                              }
+                              <button class="tax-explorer-icon" style="background:transparent;border:none;cursor:pointer;font-size:10px;color:#64748b" onclick="TaxUI.filterTxsByAsset('${r.sym}')" title="Visa transaktioner för ${r.sym}">📋</button>
+                            </div>
+                          </div>
                         </div>
                       </td>
                       <td class="ta-r tax-mono">${TaxEngine.formatCrypto(r.qty, 8)}</td>

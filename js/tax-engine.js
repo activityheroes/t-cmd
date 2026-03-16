@@ -706,6 +706,14 @@ const TaxEngine = (() => {
       await resolveUnknownTokenNames(inAssetSymbols, inAssetMints);
     }
 
+    // ── Helius DAS batch metadata (imageUrl, decimals, verified names) ────────
+    // Runs after DexScreener so namesCache is already populated as fallback.
+    const allMints = [...new Set([...mintAddresses, ...inAssetMints])];
+    if (allMints.length) {
+      const keys = (typeof ChainAPIs !== 'undefined' && ChainAPIs.getKeys) ? ChainAPIs.getKeys() : {};
+      await resolveTokenMetaBatch(allMints, keys.helius || '');
+    }
+
     // Reload cache after DexScreener fills it
     let nameCache = {};
     try { nameCache = JSON.parse(localStorage.getItem('tcmd_token_names') || '{}'); } catch {}
@@ -744,6 +752,10 @@ const TaxEngine = (() => {
       const contractAddress = t.contractAddress
         || (looksLikeContractAddress(t.assetSymbol) ? t.assetSymbol : null);
 
+      // Pull imageUrl from Helius DAS metadata store (if available)
+      const metaEntry = contractAddress ? getTokenMeta(contractAddress) : null;
+      const imageUrl = metaEntry?.imageUrl || t.imageUrl || null;
+
       return {
         ...t,
         assetSymbol: sym,
@@ -751,6 +763,7 @@ const TaxEngine = (() => {
         coinGeckoId,
         inAsset: inAsset || t.inAsset,
         contractAddress,
+        imageUrl,
       };
     });
   }
@@ -4404,6 +4417,143 @@ const TaxEngine = (() => {
   //   1. Full mint address → DexScreener /dex/tokens (batch, up to 30 per req)
   //                        → Pump.fun /coins/{mint} (fallback for new meme coins)
   //   2. 8-char symbol → DexScreener /dex/search (fallback, up to 20 per session)
+  // ════════════════════════════════════════════════════════════
+  // TOKEN METADATA STORE — rich per-mint metadata (Helius DAS)
+  // Stored in localStorage as 'tcmd_token_meta'.
+  // Schema per entry: { mintAddress, symbol, name, imageUrl,
+  //   decimals, metadataSource, lastResolvedAt, resolved }
+  // TTL: 7 days for resolved; 24h retry for unresolved.
+  // ════════════════════════════════════════════════════════════
+
+  const TOKEN_META_KEY = 'tcmd_token_meta';
+
+  function _loadTokenMetaStore() {
+    try { return JSON.parse(localStorage.getItem(TOKEN_META_KEY) || '{}'); } catch { return {}; }
+  }
+  function _saveTokenMetaStore(store) {
+    try { localStorage.setItem(TOKEN_META_KEY, JSON.stringify(store)); } catch { }
+  }
+
+  // Synchronous lookup — returns metadata entry or null.
+  // Accepts full mint address OR 8-char prefix (sym).
+  function getTokenMeta(mintOrSym) {
+    if (!mintOrSym) return null;
+    const store = _loadTokenMetaStore();
+    const key = mintOrSym.toUpperCase();
+    const entry = store[key] || store[mintOrSym.slice(0,8).toUpperCase()] || null;
+    if (!entry) return null;
+    // Return unresolved entries too (caller decides how to use them)
+    return entry;
+  }
+
+  // Batch-resolve mints via Helius DAS getAssetBatch, then fallback to
+  // DexScreener / Pump.fun for imageUrl if Helius doesn't have it.
+  // Stores results in tcmd_token_meta; skips already-fresh entries.
+  async function resolveTokenMetaBatch(mints, heliusKey) {
+    if (!mints || !mints.length) return;
+    const store = _loadTokenMetaStore();
+    const now = Date.now();
+    const FRESH_TTL     = 7 * 24 * 60 * 60 * 1000;   // 7 days for resolved
+    const RETRY_TTL     = 24 * 60 * 60 * 1000;         // 24h for unresolved
+    const NAMES_CACHE_KEY = 'tcmd_token_names';
+    let namesCache = {};
+    try { namesCache = JSON.parse(localStorage.getItem(NAMES_CACHE_KEY) || '{}'); } catch { }
+
+    // Only process mints that are stale / not yet resolved
+    const needed = [...new Set(mints)].filter(m => {
+      if (!m || m.length < 10) return false;
+      const key = m.toUpperCase();
+      const e = store[key];
+      if (!e) return true;
+      const ttl = e.resolved ? FRESH_TTL : RETRY_TTL;
+      return (now - (e.lastResolvedAt || 0)) > ttl;
+    });
+    if (!needed.length) return;
+
+    // ── Step 1: Helius DAS getAssetBatch ─────────────────────────────────────
+    if (heliusKey) {
+      for (let i = 0; i < needed.length; i += 100) {
+        const batch = needed.slice(i, i + 100);
+        try {
+          const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
+          const body = {
+            jsonrpc: '2.0', id: 'tcmd-meta-' + i,
+            method: 'getAssetBatch',
+            params: { ids: batch, displayOptions: { showFungible: true } },
+          };
+          const r = await fetchWithTimeout(rpcUrl, 15000, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!r?.ok) continue;
+          const data = await r.json();
+          const results = data.result || [];
+          for (const asset of results) {
+            if (!asset?.id) continue;
+            const mint = asset.id;
+            const key  = mint.toUpperCase();
+            const fi   = asset.token_info || {};
+            const mc   = asset.content?.metadata || {};
+            const links = asset.content?.links || {};
+            const sym  = fi.symbol || mc.symbol || mint.slice(0, 8);
+            const name = mc.name || fi.symbol || sym;
+            const imageUrl = links.image || asset.content?.files?.[0]?.uri || null;
+            const decimals = fi.decimals != null ? fi.decimals : null;
+            const entry = {
+              mintAddress: mint,
+              symbol:  sym,
+              name:    name,
+              imageUrl: imageUrl || null,
+              decimals: decimals,
+              metadataSource: 'helius_das',
+              lastResolvedAt: now,
+              resolved: !!(sym && name),
+            };
+            store[key]                           = entry;
+            store[mint.slice(0,8).toUpperCase()] = entry; // also index by prefix
+          }
+        } catch { /* ignore batch failures */ }
+      }
+      _saveTokenMetaStore(store);
+    }
+
+    // ── Step 2: for mints still unresolved, pull imageUrl from namesCache ────
+    // (DexScreener / Pump.fun already populated namesCache earlier in the pipeline)
+    for (const mint of needed) {
+      const key = mint.toUpperCase();
+      if (store[key]?.resolved) continue;
+      const nc = namesCache[key] || namesCache[mint.slice(0,8).toUpperCase()];
+      if (nc) {
+        const existing = store[key] || {};
+        store[key] = {
+          mintAddress: mint,
+          symbol:  nc.symbol  || existing.symbol  || mint.slice(0,8),
+          name:    nc.name    || existing.name    || nc.symbol || mint.slice(0,8),
+          imageUrl: existing.imageUrl || nc.imageUrl || null,
+          decimals: existing.decimals != null ? existing.decimals : null,
+          metadataSource: existing.metadataSource || (nc.isPumpFun ? 'pumpfun' : 'dexscreener'),
+          lastResolvedAt: now,
+          resolved: !!(nc.symbol),
+        };
+        store[mint.slice(0,8).toUpperCase()] = store[key];
+      } else {
+        // Mark as attempted but unresolved (will retry after 24h)
+        if (!store[key]) {
+          store[key] = {
+            mintAddress: mint,
+            symbol: mint.slice(0,8),
+            name: null, imageUrl: null, decimals: null,
+            metadataSource: 'none',
+            lastResolvedAt: now,
+            resolved: false,
+          };
+        }
+      }
+    }
+    _saveTokenMetaStore(store);
+  }
+
   // Results cached in localStorage under 'tcmd_token_names' (7-day TTL).
   async function resolveUnknownTokenNames(symbols, mintAddresses = []) {
     const CACHE_KEY = 'tcmd_token_names';
@@ -5233,8 +5383,9 @@ const TaxEngine = (() => {
     reprocessSolanaSwaps,
     // Portfolio live data
     fetchLiveSEKRate, fetchLivePrices, buildPortfolioSnapshot, buildPortfolioHistory, buildCostBasisHistory,
-    // Token name resolution
+    // Token name resolution + metadata
     resolveTokenDisplay, resolveUnknownTokenNames,
+    getTokenMeta, resolveTokenMetaBatch,
     // Explorer configs (used by tax-ui.js)
     CHAIN_EXPLORERS, SOL_SECONDARY_EXPLORERS, SYM_TO_MINT,
     // Utils

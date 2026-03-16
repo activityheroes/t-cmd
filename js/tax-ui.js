@@ -1882,23 +1882,26 @@ const TaxUI = (() => {
     const acc      = accounts.find(a => a.id === t.accountId);
     const accLabel = acc?.label || acc?.type || '—';
 
-    // Resolve display symbol
+    // Resolve display symbol + metadata (icon, full name)
     const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(t.assetSymbol) : { symbol: t.assetSymbol, name: '' };
     const displaySym = td.symbol || t.assetSymbol || '—';
+    const metaEntry  = TaxEngine.getTokenMeta ? TaxEngine.getTokenMeta(t.contractAddress || t.assetSymbol) : null;
+    const tokenImageUrl = t.imageUrl || metaEntry?.imageUrl || null;
 
     // Sent / Received columns — derived from category + amounts
     const isOutgoing = ['sell','send','transfer_out','fee'].includes(t.category);
     const isSwap     = t.category === 'trade';
     let sentCell = '—', recvCell = '—';
-    const fmtAmt = (sym, amt) =>
-      `<span class="tx-asset-amt">${TaxEngine.formatCrypto(amt, 6)}</span> <span class="tx-asset-sym-sm">${sym}</span>`;
+    const fmtAmt = (sym, amt, imgUrl, mint) =>
+      `<span class="tx-asset-amt">${TaxEngine.formatCrypto(amt, 6)}</span> ${renderTokenBadge(sym, null, imgUrl, mint, 'sm')}`;
     if (isSwap) {
-      sentCell = fmtAmt(displaySym, t.amount);
-      recvCell = t.inAsset ? fmtAmt(t.inAsset, t.inAmount || 0) : '—';
+      sentCell = fmtAmt(displaySym, t.amount, tokenImageUrl, t.contractAddress);
+      const inMeta = TaxEngine.getTokenMeta ? TaxEngine.getTokenMeta(t.inAsset) : null;
+      recvCell = t.inAsset ? fmtAmt(t.inAsset, t.inAmount || 0, inMeta?.imageUrl || null, t.inAsset?.length > 20 ? t.inAsset : null) : '—';
     } else if (isOutgoing) {
-      sentCell = fmtAmt(displaySym, t.amount);
+      sentCell = fmtAmt(displaySym, t.amount, tokenImageUrl, t.contractAddress);
     } else {
-      recvCell = fmtAmt(displaySym, t.amount);
+      recvCell = fmtAmt(displaySym, t.amount, tokenImageUrl, t.contractAddress);
     }
 
     // Gain/loss cell (for disposals only)
@@ -1987,6 +1990,48 @@ const TaxUI = (() => {
   }
 
   // Returns a single small ↗ icon link (for compact spaces like review rows).
+  // Render a token identity badge: icon (if available) + symbol + optional full name.
+  // For unresolved mints, shows shortened mint + Solscan link.
+  // size: 'sm' (16px, inline) | 'md' (20px, with name)
+  function renderTokenBadge(sym, name, imageUrl, mint, size = 'sm') {
+    const iconSize = size === 'md' ? 20 : 16;
+    const showName = size === 'md' && name && name !== sym;
+    const solscanUrl = mint && mint.length > 20
+      ? `https://solscan.io/token/${mint}` : null;
+    const isUnresolved = sym && sym.length === 8 && mint && mint.startsWith(sym);
+
+    // Icon: prefer DAS imageUrl, fallback CoinCap for well-known symbols
+    let iconHtml = '';
+    if (imageUrl) {
+      iconHtml = `<img src="${imageUrl}" width="${iconSize}" height="${iconSize}"
+        style="border-radius:50%;flex-shrink:0;object-fit:cover"
+        onerror="this.style.display='none'">`;
+    } else {
+      const coincapSrc = `https://assets.coincap.io/assets/icons/${(sym||'').toLowerCase()}@2x.png`;
+      iconHtml = `<img src="${coincapSrc}" width="${iconSize}" height="${iconSize}"
+        style="border-radius:50%;flex-shrink:0;object-fit:cover"
+        onerror="this.style.display='none'">`;
+    }
+
+    if (isUnresolved) {
+      // Unknown token: show 8-char prefix + Solscan link
+      return `<span style="display:inline-flex;align-items:center;gap:3px">
+        ${iconHtml}
+        <span style="font-family:monospace;font-size:11px;color:#64748b" title="${mint||sym}">${sym}</span>
+        ${solscanUrl ? `<a href="${solscanUrl}" target="_blank" rel="noopener"
+          style="font-size:10px;color:#6366f1;text-decoration:none" title="View on Solscan">↗</a>` : ''}
+      </span>`;
+    }
+
+    return `<span style="display:inline-flex;align-items:center;gap:3px">
+      ${iconHtml}
+      <span style="font-weight:600;font-size:${size === 'md' ? 13 : 11}px">${sym}</span>
+      ${showName ? `<span style="font-size:11px;color:#64748b;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name}</span>` : ''}
+      ${solscanUrl ? `<a href="${solscanUrl}" target="_blank" rel="noopener"
+        style="font-size:10px;color:#6366f1;text-decoration:none" title="View on Solscan">↗</a>` : ''}
+    </span>`;
+  }
+
   function explorerIconLink(source, txHash) {
     if (!txHash || txHash.startsWith('manual_')) return '';
     const cfg = TaxEngine.CHAIN_EXPLORERS && TaxEngine.CHAIN_EXPLORERS[source];
@@ -2346,24 +2391,35 @@ const TaxUI = (() => {
     const hasRecon    = !!(txn._reconstruction);
     const panelId     = `recon_${txn.id}`;
 
-    // ── Token identity block (shown for missing_price / outlier) ──────────
-    // Helps user identify WHICH coin needs a price and where to look it up.
-    const needsTokenInfo = issue.reason === 'missing_sek_price' || issue.reason === 'outlier';
+    // ── Token identity block ────────────────────────────────────────────────
+    // Shown for missing_price, outlier, AND unknown_asset (meme coin swaps).
+    const needsTokenInfo = issue.reason === 'missing_sek_price'
+      || issue.reason === 'outlier'
+      || issue.reason === 'unknown_asset';
     const mintAddr   = txn.contractAddress || null;
-    // Coin icon via CoinCap (works for known symbols like SOL, JUP, etc.)
-    const iconSrc    = `https://assets.coincap.io/assets/icons/${displaySym.toLowerCase()}@2x.png`;
-    // Explorer link for the TOKEN (not the tx) — lets user identify the coin
+    // Pull rich metadata (imageUrl, full name) from Helius DAS store
+    const metaEntry  = TaxEngine.getTokenMeta ? TaxEngine.getTokenMeta(mintAddr || txn.assetSymbol) : null;
+    const tokenImage = txn.imageUrl || metaEntry?.imageUrl || null;
+    const richName   = metaEntry?.name || displayName;
     const cfgE       = TaxEngine.CHAIN_EXPLORERS && TaxEngine.CHAIN_EXPLORERS[txn.source];
     const tokenPageUrl = cfgE && mintAddr ? cfgE.token(mintAddr) : null;
     const geckoUrl   = `https://www.coingecko.com/en/coins/${displaySym.toLowerCase()}`;
+    const metaSrc    = metaEntry?.metadataSource || null;
+    const metaSrcLabel = metaSrc === 'helius_das' ? '· Helius DAS ✓'
+      : metaSrc === 'pumpfun' ? '· pump.fun'
+      : metaSrc === 'dexscreener' ? '· DexScreener'
+      : '';
+
     const tokenInfoHtml = needsTokenInfo ? `
       <div style="display:flex;align-items:center;gap:6px;margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)">
-        <img src="${iconSrc}" style="width:18px;height:18px;border-radius:50%;flex-shrink:0"
-          onerror="this.style.display='none'">
+        ${tokenImage
+          ? `<img src="${tokenImage}" style="width:20px;height:20px;border-radius:50%;flex-shrink:0;object-fit:cover" onerror="this.style.display='none'">`
+          : `<img src="https://assets.coincap.io/assets/icons/${displaySym.toLowerCase()}@2x.png" style="width:20px;height:20px;border-radius:50%;flex-shrink:0" onerror="this.style.display='none'">`}
         <div style="flex:1;min-width:0">
           <span style="font-size:12px;font-weight:600;color:#e2e8f0">${displaySym}</span>
-          ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:#64748b;margin-left:4px">${displayName}</span>` : ''}
+          ${richName && richName !== displaySym ? `<span style="font-size:11px;color:#94a3b8;margin-left:4px">${richName}</span>` : ''}
           ${mintAddr ? `<span class="tax-mono" style="font-size:10px;color:#475569;margin-left:6px" title="${mintAddr}">${mintAddr.slice(0,8)}…${mintAddr.slice(-5)}</span>` : ''}
+          ${metaSrcLabel ? `<span style="font-size:10px;color:#475569;margin-left:4px">${metaSrcLabel}</span>` : ''}
         </div>
         ${tokenPageUrl ? `<a href="${tokenPageUrl}" target="_blank" rel="noopener" class="tax-explorer-link" style="font-size:10px;white-space:nowrap">Solscan ↗</a>` : ''}
         <a href="${geckoUrl}" target="_blank" rel="noopener" class="tax-explorer-link tax-explorer-link--secondary" style="font-size:10px;white-space:nowrap">CoinGecko ↗</a>
@@ -2373,8 +2429,7 @@ const TaxUI = (() => {
     <div class="tax-review-item" style="flex-direction:column;align-items:stretch">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <div class="tax-ri-left" style="flex:1;min-width:0">
-          <span class="tax-asset-sym" title="${txn.assetSymbol}">${displaySym}</span>
-          ${displayName && displayName !== displaySym ? `<span style="font-size:11px;color:var(--tax-muted);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${displayName}">${displayName}</span>` : ''}
+          <span class="tax-asset-sym" title="${txn.assetSymbol || ''}">${renderTokenBadge(displaySym, richName !== displaySym ? richName : null, tokenImage, mintAddr, 'sm')}</span>
           <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
           <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
           ${explorerIconLink(txn.source, txn.txHash)}

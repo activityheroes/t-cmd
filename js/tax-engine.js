@@ -2060,6 +2060,87 @@ const TaxEngine = (() => {
     return false;
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // AIRDROP CLASSIFICATION
+  // Every airdrop / unsolicited-receive event gets classified into:
+  //   subtype:    'spam'        — no economic value, auto-excluded
+  //               'unsolicited' — arrived without any user action
+  //               'claimed'     — user actively claimed (tx has outbound)
+  //   confidence: 'high'        — trusted market price confirms value
+  //               'medium'      — market price available but not from trade
+  //               'low'         — no reliable price or strong spam signal
+  //
+  // taxPool gate (applied in CAT.AIRDROP + unsolicited CAT.RECEIVE handlers):
+  //   ONLY subtype ≠ 'spam' AND confidence ≠ 'low' AND priceSource trusted
+  //   is allowed into the K4 cost-basis pool.
+  // ════════════════════════════════════════════════════════════════════════
+  function classifyAirdropEvent(t, txHashMap) {
+    // 1. Spam — worthless, auto-zeroed, never trusted
+    if (isLikelySpamToken(t) || t.category === CAT.SPAM
+        || t.priceConfidence === 'spam_zero' || t.reviewReason === 'spam_token') {
+      return { subtype: 'spam', confidence: 'low',
+               reasons: ['auto_spam: isLikelySpamToken or spam_zero priceConfidence'] };
+    }
+
+    const sym       = (t.assetSymbol || '').toUpperCase();
+    const hashGroup = t.txHash && !t.txHash.startsWith('manual_')
+                      ? (txHashMap[t.txHash] || []) : [];
+
+    // 2. Claimed — user sent something or paid significant fee in same tx
+    const hasUserAction = hashGroup.some(tx =>
+      tx.id !== t.id &&
+      (tx.category === CAT.SEND || tx.category === CAT.TRADE ||
+       tx.category === CAT.BUY  || tx.category === CAT.SELL  ||
+       tx.category === CAT.TRANSFER_OUT)
+    );
+    const hasSignificantFee = hashGroup.some(tx =>
+      tx.id !== t.id && tx.category === CAT.FEE && (tx.feeSEK || 0) > 10
+    );
+
+    if (hasUserAction || hasSignificantFee) {
+      const conf = TRUSTED_K4_PRICE_SOURCES.has(t.priceSource) ? 'high' : 'medium';
+      return { subtype: 'claimed', confidence: conf, reasons: ['user_action_in_same_tx'] };
+    }
+
+    // 3. Unsolicited — no user action in the same tx
+    const reasons = [];
+
+    // Price signal: how reliable is the FMV at receipt?
+    const isTrustedPrice = TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)
+                           && t.priceSource !== PS.MISSING;
+    const isWeakOrMissingPrice = !t.priceSource || t.priceSource === PS.MISSING
+                                 || t.priceSource === PS.STABLE_APPROX;
+
+    // Spam-adjacent signals (not caught by isLikelySpamToken but still suspicious)
+    const isLargeRound = t.amount >= 10_000 && Number.isInteger(t.amount)
+                         && !MAJOR_ASSETS.has(sym) && !STABLES.has(sym);
+    if (isLargeRound) reasons.push('large_round_amount_airdrop_pattern');
+
+    const isUnknownToken = !CC_IDS[sym] && !STABLES.has(sym)
+                           && !MAJOR_ASSETS.has(sym) && !t.coinGeckoId;
+    if (isUnknownToken) reasons.push('no_coingecko_id');
+
+    if (isWeakOrMissingPrice) reasons.push('weak_or_missing_price');
+
+    // Immediately burned/incinerated → junk spam airdrop
+    if (t.burnDisposal) {
+      reasons.push('burned_after_receipt');
+      return { subtype: 'spam', confidence: 'low', reasons };
+    }
+
+    // Confidence scoring
+    let confidence;
+    if (isTrustedPrice && !isLargeRound && !isUnknownToken) {
+      confidence = 'high';
+    } else if (isTrustedPrice && !isWeakOrMissingPrice) {
+      confidence = 'medium';
+    } else {
+      confidence = 'low';
+    }
+
+    return { subtype: 'unsolicited', confidence, reasons };
+  }
+
   // Full pricing chain application
   // Pass 1:   independent per-transaction pricing (CoinGecko + stablecoin + inline swap derivation)
   // Pass 2:   cross-transaction derivation (same txHash + sibling prices) — up to 4 rounds
@@ -2964,6 +3045,15 @@ const TaxEngine = (() => {
       .filter(t => new Date(t.date).getFullYear() <= year)
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
+    // Pre-pass: build txHash → all-txns map (used for airdrop classification)
+    // Must be built before the main loop so classifyAirdropEvent can look up siblings.
+    const txHashMap = {};
+    for (const t of allSorted) {
+      if (t.txHash && !t.txHash.startsWith('manual_')) {
+        (txHashMap[t.txHash] = txHashMap[t.txHash] || []).push(t);
+      }
+    }
+
     // Pre-pass: build acquisition map for per-disposal tracing
     // Used in recordDisposal to explain WHY cost basis is zero
     const acquisitionMap = {};
@@ -2972,12 +3062,25 @@ const TaxEngine = (() => {
       if (!s) continue;
       const acqCats = [CAT.BUY, CAT.RECEIVE, CAT.INCOME, CAT.STAKING, CAT.AIRDROP, CAT.TRANSFER_IN, CAT.BRIDGE_IN];
       if (acqCats.includes(t.category) && !t.isInternalTransfer) {
+        // For AIRDROP events, pre-classify so the audit trail is rich
+        const isAirdropCat = t.category === CAT.AIRDROP;
+        let airdropSubtype = null;
+        let airdropConfidence = null;
+        if (isAirdropCat) {
+          const adc = classifyAirdropEvent(t, txHashMap);
+          airdropSubtype    = adc.subtype;
+          airdropConfidence = adc.confidence;
+        }
         (acquisitionMap[s] = acquisitionMap[s] || []).push({
           id: t.id, date: t.date, category: t.category, amount: t.amount,
           costSEK: t.costSEK || t.valueSEK || null,
           priceSource: t.priceSource || null,
           wallet: t.wallet || null,
           isTrusted: TRUSTED_K4_PRICE_SOURCES.has(t.priceSource),
+          // Airdrop-specific fields (null for non-airdrop events)
+          isAirdrop: isAirdropCat,
+          airdropSubtype,
+          airdropConfidence,
         });
       }
       // TRADE in-side: receiving inAsset counts as acquisition
@@ -2988,6 +3091,7 @@ const TaxEngine = (() => {
           priceSource: t.priceSource || null,
           wallet: t.wallet || null,
           isTrusted: TRUSTED_K4_PRICE_SOURCES.has(t.priceSource),
+          isAirdrop: false, airdropSubtype: null, airdropConfidence: null,
         });
       }
     }
@@ -3293,20 +3397,58 @@ const TaxEngine = (() => {
         // ── Acquisition events: add to inventory ───────────
         case CAT.BUY:
         case CAT.RECEIVE: {
+          // ── Detect unsolicited receives that look like airdrops ──────────────
+          // If there is no outbound action in the same tx AND the token is non-major
+          // AND non-stable, this is likely an unsolicited inbound (airdrop-like).
+          // Such tokens must NOT automatically build trusted K4 cost basis.
+          const rcvHashGroup = t.txHash && !t.txHash.startsWith('manual_')
+                               ? (txHashMap[t.txHash] || []) : [];
+          const rcvHasOutbound = rcvHashGroup.some(tx =>
+            tx.id !== t.id &&
+            (tx.category === CAT.SEND || tx.category === CAT.TRADE ||
+             tx.category === CAT.BUY  || tx.category === CAT.SELL  ||
+             tx.category === CAT.TRANSFER_OUT)
+          );
+          const rcvIsSpam = isLikelySpamToken(t)
+                            || t.reviewReason === 'spam_token'
+                            || t.priceConfidence === 'spam_zero';
+          // Unsolicited = no outbound + non-major + non-stable
+          const rcvIsUnsolicited = !rcvHasOutbound
+                                   && !MAJOR_ASSETS.has(sym)
+                                   && !STABLES.has(sym);
+          // Price trustworthiness for tax pool gate
+          const rcvHasTrustedPrice = TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)
+                                     && t.priceSource !== PS.MISSING;
+
           // RECEIVE carries cost basis at FMV (treated as acquisition)
-          // Internal transfers were filtered above, so this is genuine incoming
           const cost = proceedsSEK + feeSEK;
           h.totalQty     += t.amount;
-          h.totalCostSEK += cost;
-          // taxPool: only trusted sources build the K4 cost-basis pool
-          if (TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+          h.totalCostSEK += rcvIsSpam ? 0 : cost;  // spam: 0 FMV in holdings
+
+          // taxPool: trusted-source gate PLUS airdrop-safety gate
+          // Spam → never in taxPool
+          // Unsolicited + no trusted price → never in taxPool (would invent cost basis)
+          // Unsolicited + trusted price → allowed (e.g. known airdrop with market data)
+          // Normal receive (has outbound in tx) → original behaviour
+          const rcvCanEnterTaxPool = !rcvIsSpam
+                                     && rcvHasTrustedPrice
+                                     && (!rcvIsUnsolicited || rcvHasTrustedPrice);
+          if (rcvCanEnterTaxPool) {
             taxPool[sym].totalQty     += t.amount;
             taxPool[sym].totalCostSEK += cost;
           }
-          // Unclassified receives count as income per Skatteverket default
-          if (inYear && t.category === CAT.RECEIVE) {
-            income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
-                          valueSEK: proceedsSEK, id: t.id, category: t.category });
+
+          // Income: per Skatteverket, inbound tokens count as income at FMV
+          // Spam → suppress (no economic value, no reliable FMV)
+          if (inYear && !rcvIsSpam) {
+            income.push({
+              date: t.date, assetSymbol: sym, amount: t.amount,
+              valueSEK: proceedsSEK, id: t.id, category: t.category,
+              ...(rcvIsUnsolicited
+                ? { airdropSubtype: 'unsolicited',
+                    airdropConfidence: rcvHasTrustedPrice ? 'medium' : 'low' }
+                : {}),
+            });
           }
           break;
         }
@@ -3328,16 +3470,45 @@ const TaxEngine = (() => {
         }
 
         case CAT.AIRDROP: {
-          // Airdrops = income at FMV (Skatteverket ruling)
+          // ── Classify: spam / unsolicited / claimed × high / medium / low ──
+          const airdropClass = classifyAirdropEvent(t, txHashMap);
+          const adIsSpam     = airdropClass.subtype === 'spam';
+          const adLowConf    = airdropClass.confidence === 'low';
+
+          // Store classification on the transaction so disposal drilldowns can
+          // reference how this asset was originally received.
+          t._airdropSubtype    = airdropClass.subtype;
+          t._airdropConfidence = airdropClass.confidence;
+
+          // Holdings: always update (tokens exist in wallet regardless of spam)
           h.totalQty     += t.amount;
-          h.totalCostSEK += proceedsSEK;
-          if (TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+          h.totalCostSEK += adIsSpam ? 0 : proceedsSEK;  // spam: 0 FMV
+
+          // taxPool — K4 cost basis pool:
+          //   spam         → NEVER (worthless junk must not build fake cost basis)
+          //   low confidence → NEVER (unverifiable value)
+          //   claimed + trusted price → YES (user actively acquired these)
+          //   unsolicited + trusted price + medium/high conf → YES (known airdrop, FMV confirmed)
+          const adCanEnterTaxPool = !adIsSpam
+                                    && !adLowConf
+                                    && TRUSTED_K4_PRICE_SOURCES.has(t.priceSource);
+          if (adCanEnterTaxPool) {
             taxPool[sym].totalQty     += t.amount;
             taxPool[sym].totalCostSEK += proceedsSEK;
           }
-          if (inYear) {
-            income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
-                          valueSEK: proceedsSEK, id: t.id, category: CAT.AIRDROP });
+
+          // Income: Skatteverket classifies airdrop FMV as taxable income at receipt
+          //   spam → suppress (no economic value, no reliable FMV to report)
+          //   all others → report with subtype metadata for UI display
+          if (inYear && !adIsSpam) {
+            income.push({
+              date: t.date, assetSymbol: sym, amount: t.amount,
+              valueSEK: proceedsSEK, id: t.id, category: CAT.AIRDROP,
+              airdropSubtype:    airdropClass.subtype,
+              airdropConfidence: airdropClass.confidence,
+              airdropReasons:    airdropClass.reasons,
+              inTaxPool:         adCanEnterTaxPool,
+            });
           }
           break;
         }
@@ -3693,6 +3864,20 @@ const TaxEngine = (() => {
     const estimatedTax = taxableGain * TAX_RATE;
     const totalIncome = income.reduce((s, i) => s + i.valueSEK, 0);
 
+    // Airdrop breakdown for the income/audit panels
+    const airdropIncome      = income.filter(i => i.category === CAT.AIRDROP);
+    const airdropClaimed     = airdropIncome.filter(i => i.airdropSubtype === 'claimed');
+    const airdropUnsolicited = airdropIncome.filter(i => i.airdropSubtype === 'unsolicited');
+    const airdropSummary = {
+      totalCount:          airdropIncome.length,
+      claimedCount:        airdropClaimed.length,
+      unsolicitedCount:    airdropUnsolicited.length,
+      claimedValueSEK:     airdropClaimed.reduce((s, i) => s + (i.valueSEK || 0), 0),
+      unsolicitedValueSEK: airdropUnsolicited.reduce((s, i) => s + (i.valueSEK || 0), 0),
+      totalValueSEK:       airdropIncome.reduce((s, i) => s + (i.valueSEK || 0), 0),
+      inTaxPoolCount:      airdropIncome.filter(i => i.inTaxPool).length,
+    };
+
     // K4-verified figures — only isK4Eligible disposals (final status, non-null amounts)
     const k4EligibleDisposals = disposals.filter(d => isK4Eligible(d));
     const k4TotalGains   = k4EligibleDisposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
@@ -3729,6 +3914,7 @@ const TaxEngine = (() => {
     return {
       year, disposals, income, currentHoldings,
       assetAcquisitions: acquisitionMap,  // per-asset acquisition history for audit view
+      airdropSummary,                     // airdrop breakdown for income/audit panels
       summary: {
         totalTransactions: yearTxns.length,
         totalDisposals: disposals.length,
@@ -3740,6 +3926,9 @@ const TaxEngine = (() => {
         k4TotalGains, k4TotalLosses, k4NetGainLoss,
         k4TaxableGain, k4DeductibleLoss: k4DeductLoss,
         k4EstimatedTax, excludedCount,
+        // Airdrop income at FMV (Skatteverket: taxable in year of receipt)
+        airdropIncomeSEK: airdropSummary.totalValueSEK,
+        airdropCount:     airdropSummary.totalCount,
       },
     };
   }

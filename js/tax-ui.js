@@ -1106,6 +1106,11 @@ const TaxUI = (() => {
     const totalGainLoss = symDisposals.reduce((s, d) => s + (d.gainLossSEK || 0), 0);
     const trustedAcqs  = engineAcqs.filter(a => a.isTrusted).length;
     const untrustedAcqs = engineAcqs.filter(a => !a.isTrusted).length;
+    // Airdrop-specific stats for this asset
+    const airdropAcqs      = engineAcqs.filter(a => a.isAirdrop);
+    const spamAirdropAcqs  = airdropAcqs.filter(a => a.airdropSubtype === 'spam');
+    const realAirdropAcqs  = airdropAcqs.filter(a => a.airdropSubtype !== 'spam');
+    const hasAirdropHistory = airdropAcqs.length > 0;
 
     // ── Category label ─────────────────────────────────────────
     const catLabel = { buy:'Köp', receive:'Mottagning', income:'Inkomst', staking:'Staking',
@@ -1146,6 +1151,21 @@ const TaxUI = (() => {
           </div>`).join('')}
         </div>
 
+        <!-- Airdrop notice banner — shown only when asset has airdrop history -->
+        ${hasAirdropHistory ? `
+        <div style="padding:10px 20px;background:rgba(167,139,250,.06);border-bottom:1px solid rgba(167,139,250,.15)">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-size:13px">📬</span>
+            <span style="font-size:11px;font-weight:600;color:#a78bfa">Airdrop-historik</span>
+            <span style="font-size:11px;color:#94a3b8">
+              ${realAirdropAcqs.length > 0 ? `${realAirdropAcqs.length} verklig(a) airdrop(s)` : ''}
+              ${spamAirdropAcqs.length > 0 ? `· ${spamAirdropAcqs.length} spam (exkluderad)` : ''}
+              — kostnadsbasen nedan är marknadsvärdet vid mottagning, ej ett köp.
+            </span>
+            ${spamAirdropAcqs.length > 0 ? `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(239,68,68,.12);color:#f87171">Spam exkluderas automatiskt från K4</span>` : ''}
+          </div>
+        </div>` : ''}
+
         <!-- Acquisitions -->
         <div style="padding:14px 20px">
           <div style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">
@@ -1166,16 +1186,35 @@ const TaxUI = (() => {
               </thead>
               <tbody>
                 ${engineAcqs.map(a => {
-                  const isSwapAcq = a.category === 'trade_in';
+                  const isSwapAcq    = a.category === 'trade_in';
+                  const isAirdropAcq = a.isAirdrop || a.category === 'airdrop';
+                  const adSubtype    = a.airdropSubtype;   // 'claimed'|'unsolicited'|'spam'|null
+                  const adConf       = a.airdropConfidence; // 'high'|'medium'|'low'|null
+                  // Badge shown after category label
+                  const adBadge = isAirdropAcq
+                    ? (adSubtype === 'spam'
+                        ? `<span title="Spam-airdrop — ej inkluderad i skatteberäkning" style="margin-left:4px;font-size:7px;padding:1px 4px;border-radius:3px;background:rgba(239,68,68,.15);color:#f87171">SPAM</span>`
+                        : adSubtype === 'unsolicited'
+                          ? `<span title="Mottagen utan användaråtgärd (oönskad airdrop)" style="margin-left:4px;font-size:7px;padding:1px 4px;border-radius:3px;background:rgba(251,191,36,.12);color:#fbbf24">OÖNSKAD</span>`
+                          : `<span title="Aktivt claimad airdrop" style="margin-left:4px;font-size:7px;padding:1px 4px;border-radius:3px;background:rgba(74,222,128,.12);color:#4ade80">CLAIMAD</span>`)
+                    : '';
+                  // Confidence dot for airdrops
+                  const confDot = isAirdropAcq && adConf
+                    ? ` <span title="Konfidens: ${adConf}" style="color:${adConf==='high'?'#4ade80':adConf==='medium'?'#fbbf24':'#f87171'};font-size:8px">●</span>`
+                    : '';
+                  // Cost label — distinguish airdrop FMV from real purchase cost
                   const costLabel = a.costSEK != null
-                    ? TaxEngine.formatSEK(a.costSEK) + (isSwapAcq
-                        ? ' <span title="Kostnadsbas tilldelad från byte, ej direkt SEK-investering" style="color:#f59e0b;font-size:8px">via swap ⓘ</span>'
-                        : '')
+                    ? TaxEngine.formatSEK(a.costSEK)
+                      + (isSwapAcq
+                          ? ' <span title="Kostnadsbas tilldelad från byte, ej direkt SEK-investering" style="color:#f59e0b;font-size:8px">via swap ⓘ</span>'
+                          : isAirdropAcq
+                            ? ' <span title="Marknadsvärde vid mottagning (ej köpkostnad)" style="color:#a78bfa;font-size:8px">FMV vid mottagning ⓘ</span>'
+                            : '')
                     : '—';
                   return `
-                <tr style="border-bottom:1px solid rgba(148,163,184,.04)">
+                <tr style="border-bottom:1px solid rgba(148,163,184,.04);${adSubtype==='spam'?'opacity:.5':''}">
                   <td style="padding:4px 8px;color:#64748b;font-family:monospace;white-space:nowrap">${fmtDate(a.date)}</td>
-                  <td style="padding:4px 8px;color:#94a3b8">${catLabel[a.category] || a.category}</td>
+                  <td style="padding:4px 8px;color:#94a3b8;white-space:nowrap">${catLabel[a.category] || a.category}${adBadge}${confDot}</td>
                   <td style="padding:4px 8px;text-align:right;color:#e2e8f0;font-family:monospace">${fmtAmt(a.amount)}</td>
                   <td style="padding:4px 8px;text-align:right;color:#94a3b8;font-family:monospace">${costLabel}</td>
                   <td style="padding:4px 8px;color:#64748b;font-family:monospace;font-size:9px">${a.priceSource || '—'}</td>
@@ -1342,6 +1381,20 @@ const TaxUI = (() => {
     const acqSrc = d.proceedsSource || d.priceSource || '';
     if (acqSrc.includes('swap') || acqSrc.includes('SWAP') || d.isTrade) {
       lines.push('ℹ Kostnadsbas härledd från tidigare swaps — ej direkt SEK-insättning');
+    }
+
+    // ── Airdrop origin note — shown when the disposed asset was originally received
+    //    as an airdrop (so the user understands why their cost basis looks unusual)
+    if (d._airdropSubtype || d.airdropOriginSubtype) {
+      const sub = d._airdropSubtype || d.airdropOriginSubtype;
+      const conf = d._airdropConfidence || d.airdropOriginConfidence || '';
+      if (sub === 'spam') {
+        lines.push('⚠ Ursprungligen mottaget som SPAM-airdrop — kostnadsbas 0 kr');
+      } else if (sub === 'unsolicited') {
+        lines.push(`📬 Ursprungligen mottaget som oönskad airdrop (${conf} konfidens) — kostnadsbas = FMV vid mottagning`);
+      } else if (sub === 'claimed') {
+        lines.push('✅ Ursprungligen claimad airdrop — kostnadsbas = FMV vid mottagning');
+      }
     }
 
     // ── Transaction-level over-allocation warning
@@ -3197,6 +3250,12 @@ const TaxUI = (() => {
     const result = getOrComputeTaxResult();
     const { summary, disposals } = result;
     const k4 = TaxEngine.generateK4Report(result);
+    // Airdrop summary from engine (may be undefined for older cached results)
+    const adSum = result.airdropSummary || {};
+    const adTotal    = adSum.totalCount || 0;
+    const adValueSEK = adSum.totalValueSEK || 0;
+    const adClaimed  = adSum.claimedCount || 0;
+    const adUnsol    = adSum.unsolicitedCount || 0;
     // Pre-compute estimated high-proceeds debug rows (exposed in panel below K4 table)
     const estimatedHighProceeds = TaxEngine.queryEstimatedHighProceedsDisposals
       ? TaxEngine.queryEstimatedHighProceedsDisposals(result) : [];
@@ -3356,6 +3415,40 @@ const TaxUI = (() => {
             </div>
           </details>
         </div>
+
+        <!-- Airdrop income panel — shown when there are real airdrops in scope -->
+        ${adTotal > 0 ? `
+        <div class="tax-section" style="margin-bottom:16px;border:1px solid rgba(167,139,250,.2);background:rgba(167,139,250,.04)">
+          <div class="tax-section-header" style="margin-bottom:10px">
+            <h2 style="font-size:14px">📬 Airdrop-inkomster — Inkomstdeklaration</h2>
+            <span class="tax-badge" style="background:rgba(167,139,250,.15);color:#a78bfa;font-size:10px">Skatteverket: inkomst vid mottagning</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:12px">
+            <div style="padding:10px 12px;background:rgba(167,139,250,.07);border:1px solid rgba(167,139,250,.15);border-radius:8px">
+              <div style="font-size:10px;color:#a78bfa;font-weight:600;margin-bottom:4px">📬 TOTALT FMV VID MOTTAGNING</div>
+              <div style="font-size:18px;font-weight:700;color:#e2e8f0">${TaxEngine.formatSEK(adValueSEK)}</div>
+              <div style="font-size:10px;color:#64748b;margin-top:2px">${adTotal} airdrop${adTotal !== 1 ? 's' : ''} (exkl. spam)</div>
+            </div>
+            ${adClaimed > 0 ? `
+            <div style="padding:10px 12px;background:rgba(74,222,128,.06);border:1px solid rgba(74,222,128,.15);border-radius:8px">
+              <div style="font-size:10px;color:#4ade80;font-weight:600;margin-bottom:4px">✅ CLAIMADE AIRDROPS</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${adClaimed} st</div>
+              <div style="font-size:10px;color:#64748b;margin-top:2px">Aktivt claimade — hög konfidens</div>
+            </div>` : ''}
+            ${adUnsol > 0 ? `
+            <div style="padding:10px 12px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.15);border-radius:8px">
+              <div style="font-size:10px;color:#fbbf24;font-weight:600;margin-bottom:4px">📩 OÖNSKADE AIRDROPS</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${adUnsol} st</div>
+              <div style="font-size:10px;color:#64748b;margin-top:2px">Mottagna utan åtgärd — verifiera</div>
+            </div>` : ''}
+          </div>
+          <div style="font-size:11px;color:#64748b;line-height:1.6;padding:8px 10px;background:rgba(0,0,0,.2);border-radius:6px">
+            <strong style="color:#94a3b8">Skatteverket:</strong> Airdrops beskattas som inkomst av kapital i år då de mottas.
+            FMV vid mottagning = kostnadsbas vid framtida avyttring.
+            Spam-airdrops (utan marknadsvärde) exkluderas automatiskt.
+            <span style="color:#a78bfa">Kontrollera airdrop-historiken i per-tillgång-granskningsloggen (klicka på tillgångssymbol i portföljvyn).</span>
+          </div>
+        </div>` : ''}
 
         <!-- Confidence breakdown panel -->
         ${(() => {

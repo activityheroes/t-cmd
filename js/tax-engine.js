@@ -33,6 +33,29 @@ const TaxEngine = (() => {
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
+  // ── Swap-trust validation thresholds ─────────────────────────────────────────
+  // Tune these constants; do NOT hard-code the numbers inline.
+  //
+  // SECONDARY_REF_DEVIATION_MAX: if tx-implied value / cached reference > this ratio
+  //   for a non-major asset, the row is downgraded to estimated_reviewable.
+  //   (20x = an order of magnitude leeway; catches G8K6YVKA-style 1000x errors)
+  //
+  // HIGH_VALUE_NO_REF_THRESHOLD: if no secondary reference exists and tx-implied
+  //   value exceeds this (kr), the row is downgraded (can't confirm a large value).
+  //
+  // ANOMALY_* thresholds: extreme proceeds/cost asymmetry check.
+  //   Fires when proceeds > HIGH_PROCEEDS AND cost < LOW_COST (gain side)
+  //   OR cost > HIGH_COST AND proceeds < LOW_PROCEEDS (loss side)
+  //   AND the ratio exceeds RATIO_MIN — for non-major assets only.
+  //   Rows that pass the secondary reference check are exempted.
+  const SECONDARY_REF_DEVIATION_MAX = 20;   // ratio; implied/ref > 20× → not final
+  const HIGH_VALUE_NO_REF_THRESHOLD  = 50_000; // kr; SWAP_IMPLIED non-major, no ref → estimated
+  const ANOMALY_HIGH_PROCEEDS        = 100_000; // kr
+  const ANOMALY_LOW_COST             = 1_000;   // kr
+  const ANOMALY_HIGH_COST            = 100_000; // kr
+  const ANOMALY_LOW_PROCEEDS         = 1_000;   // kr
+  const ANOMALY_RATIO_MIN            = 100;     // ×; minimum ratio to trigger anomaly gate
+
   // ── Global asset canonical identities ─────────────────────
   // Maps alternate/wrapped/bridged names → canonical symbol.
   // Used so the same economic asset is tracked as one across chains/sources.
@@ -1365,6 +1388,20 @@ const TaxEngine = (() => {
             ? 'Swap proceeds estimated from avg cost of received asset — not a market price'
             : 'Swap proceeds estimated from cached market price (fallback path) — not from real-time Level-2 pricing',
         ],
+      };
+    }
+    if (swapProceedsSource === 'swap_reference_mismatch') {
+      return {
+        valuationStatus: 'estimated_reviewable',
+        excludeFromK4:   true,
+        reviewReasons:   [`Swap-implied värde avviker >${SECONDARY_REF_DEVIATION_MAX}× från sekundärreferens — kan ej bekräftas`],
+      };
+    }
+    if (swapProceedsSource === 'swap_no_reference') {
+      return {
+        valuationStatus: 'estimated_reviewable',
+        excludeFromK4:   true,
+        reviewReasons:   [`Hög swap-värde (>${HIGH_VALUE_NO_REF_THRESHOLD.toLocaleString()} kr) utan sekundärreferens för icke-major tillgång`],
       };
     }
 
@@ -2935,7 +2972,23 @@ const TaxEngine = (() => {
     const _priceCache = getPriceCache();
 
     function ensure(sym) {
-      if (!holdings[sym]) holdings[sym] = { totalQty: 0, totalCostSEK: 0 };
+      if (!holdings[sym]) holdings[sym] = {
+        totalQty: 0, totalCostSEK: 0,
+        // Pool integrity: 'clean' means every contributing acquisition used a
+        // trusted price source. 'tainted' means at least one acquisition entered
+        // with an untrusted/estimated cost, so the average-cost pool is unreliable
+        // and later disposals cannot be K4-final.
+        integrity: 'clean', taintReasons: [],
+      };
+    }
+    // Mark an asset's cost-basis pool as tainted.
+    // Called when an untrusted value is added (estimated acquisition or estimated
+    // TRADE in-side proceeds).  Taint is permanent for the rest of computeTaxYear.
+    function taintPool(sym, reason) {
+      ensure(sym);
+      const h = holdings[sym];
+      if (h.integrity === 'clean') h.integrity = 'tainted';
+      h.taintReasons.push(reason);
     }
     function avg(sym) {
       const h = holdings[sym];
@@ -3065,6 +3118,59 @@ const TaxEngine = (() => {
       const proceedsSEK = t.costBasisSEK    || (priceSEK * (t.amount || 0));
       const feeSEK      = t.feeSEK || 0;
 
+      // ── Anomaly blocker (post-disposal helper) ───────────────────────────────
+      // Called after recordDisposal() to catch extreme proceeds/cost asymmetry
+      // that slipped through the primary guards (wrong leg, pool poisoning, etc.).
+      // Only fires for non-major, non-stable assets where the disposal was about
+      // to be marked 'final'.  Rows with secondary-reference support are exempted.
+      //
+      // Catches: DOGGO 3.76M cost/339 proceeds, BPPMFZOR 4.97M proceeds/33 cost,
+      //          G8K6YVKA 2.49M proceeds/2.5k cost — all classic corruption signs.
+      function applyAnomalyCheck(d, t, sym) {
+        if (d.valuationStatus !== 'final') return;
+        if (MAJOR_ASSETS.has(sym) || STABLES.has(sym)) return;
+        const proc = d.proceedsSEK  || 0;
+        const cost = d.costBasisSEK || 0;
+
+        // Extreme gain: high proceeds with negligible cost basis
+        const isExtremeGain = proc > ANOMALY_HIGH_PROCEEDS
+          && cost < ANOMALY_LOW_COST
+          && (cost === 0 || proc / cost > ANOMALY_RATIO_MIN);
+
+        // Extreme loss: huge cost basis with negligible proceeds
+        //   (classic pool poisoning: earlier corrupt acquisition inflated the pool)
+        const isExtremeLoss = cost > ANOMALY_HIGH_COST
+          && proc < ANOMALY_LOW_PROCEEDS
+          && (proc === 0 || cost / proc > ANOMALY_RATIO_MIN);
+
+        if (!isExtremeGain && !isExtremeLoss) return;
+
+        // Exempt if a secondary reference confirms the value is plausible
+        const _dateStr  = (t.date || '').slice(0, 10);
+        const _refPrice = lookupCachedSEK(sym, _dateStr, _priceCache, t.contractAddress);
+        if (_refPrice && _refPrice > 0 && t.amount > 0) {
+          const _refTotal = _refPrice * t.amount;
+          if (_refTotal > 0) {
+            const _anchor = proc > 0 ? proc : cost;
+            const _ratio  = Math.max(_anchor / _refTotal, _refTotal / _anchor);
+            if (_ratio <= SECONDARY_REF_DEVIATION_MAX) return; // reference supports — allow
+          }
+        }
+
+        // Block: extreme asymmetry without reference support → blocked_outlier
+        // Null all financial fields so they cannot leak into K4 totals or CSV.
+        d.valuationStatus = 'blocked_outlier';
+        d.excludeFromK4   = true;
+        d.proceedsSEK     = null;
+        d.costBasisSEK    = null;
+        d.gainLossSEK     = null;
+        (d.reviewReasons  = d.reviewReasons || []).push(
+          isExtremeGain
+            ? `anomaly_extreme_gain: ${Math.round(proc).toLocaleString()} kr intäkt / ${Math.round(cost).toLocaleString()} kr KB`
+            : `anomaly_extreme_loss: ${Math.round(cost).toLocaleString()} kr KB / ${Math.round(proc).toLocaleString()} kr intäkt`
+        );
+      }
+
       switch (t.category) {
 
         // ── Acquisition events: add to inventory ───────────
@@ -3075,6 +3181,10 @@ const TaxEngine = (() => {
           const cost = proceedsSEK + feeSEK;
           h.totalQty     += t.amount;
           h.totalCostSEK += cost;
+          // Pool integrity: taint if acquisition price is not from a trusted source
+          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          }
           // Unclassified receives count as income per Skatteverket default
           if (inYear && t.category === CAT.RECEIVE) {
             income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
@@ -3088,6 +3198,9 @@ const TaxEngine = (() => {
           // Staking rewards & income: add at FMV, report as income
           h.totalQty     += t.amount;
           h.totalCostSEK += proceedsSEK;
+          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          }
           if (inYear) {
             income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
                           valueSEK: proceedsSEK, id: t.id, category: t.category });
@@ -3099,6 +3212,9 @@ const TaxEngine = (() => {
           // Airdrops = income at FMV (Skatteverket ruling)
           h.totalQty     += t.amount;
           h.totalCostSEK += proceedsSEK;
+          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          }
           if (inYear) {
             income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
                           valueSEK: proceedsSEK, id: t.id, category: CAT.AIRDROP });
@@ -3114,16 +3230,26 @@ const TaxEngine = (() => {
           const costAtArrival = proceedsSEK + feeSEK;
           h.totalQty     += t.amount;
           h.totalCostSEK += costAtArrival || (avg(sym) * t.amount);
+          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          }
           break;
         }
 
         // ── Disposal events ─────────────────────────────────
         case CAT.SELL: {
-          const sellValuation = deriveProceedsValuation(t, null);
+          const sellValuationRaw = deriveProceedsValuation(t, null);
+          // Pool integrity gate: if the avg-cost pool is tainted, a 'final'
+          // valuation is not supportable — cost basis is unreliable.
+          const poolTaintedSell = (holdings[sym]?.integrity || 'clean') === 'tainted';
+          const sellValuation   = (poolTaintedSell && sellValuationRaw.valuationStatus === 'final')
+            ? { valuationStatus: 'estimated_reviewable', excludeFromK4: true,
+                reviewReasons: [...sellValuationRaw.reviewReasons, `cost_basis_pool_tainted: ${(holdings[sym].taintReasons||[]).slice(0,2).join(', ')}`] }
+            : sellValuationRaw;
           const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
-            contractAddress: t.contractAddress || null,
-            ...sellValuation,
+            contractAddress: t.contractAddress || null, ...sellValuation,
           });
+          applyAnomalyCheck(d, t, sym);
           if (inYear) disposals.push(d);
           break;
         }
@@ -3131,11 +3257,16 @@ const TaxEngine = (() => {
         case CAT.SEND: {
           // Unmatched SEND that wasn't caught as internal transfer
           // — treat as disposal (possible gift/donation, taxable in Sweden)
-          const sendValuation = deriveProceedsValuation(t, null);
+          const sendValuationRaw = deriveProceedsValuation(t, null);
+          const poolTaintedSend  = (holdings[sym]?.integrity || 'clean') === 'tainted';
+          const sendValuation    = (poolTaintedSend && sendValuationRaw.valuationStatus === 'final')
+            ? { valuationStatus: 'estimated_reviewable', excludeFromK4: true,
+                reviewReasons: [...sendValuationRaw.reviewReasons, `cost_basis_pool_tainted: ${(holdings[sym].taintReasons||[]).slice(0,2).join(', ')}`] }
+            : sendValuationRaw;
           const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
-            contractAddress: t.contractAddress || null,
-            ...sendValuation,
+            contractAddress: t.contractAddress || null, ...sendValuation,
           });
+          applyAnomalyCheck(d, t, sym);
           if (inYear) disposals.push(d);
           break;
         }
@@ -3231,17 +3362,64 @@ const TaxEngine = (() => {
             }
           }
 
+          // ── Secondary reference check ──────────────────────────────────────
+          // When proceedsSEK came directly from the pricing chain (SWAP_IMPLIED /
+          // TRADE_EXACT) and the asset is a non-major/non-stable, cross-check
+          // against the independently cached market price of the *disposed* asset.
+          // A >20× deviation signals something is wrong (wrong leg, bad decimals,
+          // route confusion) even though the source label looks "trusted".
+          // Reference mismatches → estimated_reviewable (keeps value visible in
+          // review panel, but excluded from K4 totals).
+          let swapReferenceMismatch = false;
+          if (!swapAtCost && !swapOutlier && effectiveProceedsSEK > 0
+              && !MAJOR_ASSETS.has(sym) && !STABLES.has(sym)
+              && (t.priceSource === PS.SWAP_IMPLIED || t.priceSource === PS.TRADE_EXACT)) {
+            const _dateStr  = (t.date || '').slice(0, 10);
+            const _refPrice = lookupCachedSEK(sym, _dateStr, _priceCache, t.contractAddress);
+            if (_refPrice && _refPrice > 0 && t.amount > 0) {
+              const _refTotal = _refPrice * t.amount;
+              const _ratio    = Math.max(effectiveProceedsSEK / _refTotal,
+                                         _refTotal / effectiveProceedsSEK);
+              if (_ratio > SECONDARY_REF_DEVIATION_MAX) swapReferenceMismatch = true;
+            } else if (!_refPrice && effectiveProceedsSEK > HIGH_VALUE_NO_REF_THRESHOLD) {
+              // High-value non-major with NO independent reference → cannot confirm
+              swapReferenceMismatch = true;
+            }
+          }
+
+          // ── Pool integrity check ────────────────────────────────────────────
+          // If the avg-cost pool for the disposed asset is tainted (one or more
+          // acquisitions used an untrusted/estimated cost), the cost basis is
+          // unreliable and the disposal cannot be K4-final.
+          const poolTainted = (holdings[sym]?.integrity || 'clean') === 'tainted';
+
           // Out side: disposal of `sym`
           // ── Determine valuation status for this trade row ─────────────────
-          // Swap-at-cost / outlier fallback always excludes from K4.
-          // Pricing-chain sourced (proceedsSEK came from applyPricingChain) uses
-          // deriveProceedsValuation which checks t.priceSource.
-          const tradeSwapSource = swapOutlier ? 'swap_outlier_blocked'
-            : swapAtCost ? swapProceedsSource
+          // Priority order: outlier_blocked > reference_mismatch > swap_at_cost > pricing chain
+          const tradeSwapSource = swapOutlier          ? 'swap_outlier_blocked'
+            : swapReferenceMismatch                    ? 'swap_reference_mismatch'
+            : swapAtCost                               ? swapProceedsSource
             : null;  // null = use priceSource from pricing chain
-          const tradeValuation = deriveProceedsValuation(t, tradeSwapSource);
 
-          // Also null out proceedsSEK for blocked outliers so nothing enters K4
+          // Merge pool-integrity check with source-based valuation.
+          // Pool taint overrides 'final' → 'estimated_reviewable' but never
+          // upgrades a row that is already excluded for another reason.
+          const tradeValuationRaw = deriveProceedsValuation(t, tradeSwapSource);
+          const effectiveValuationStatus =
+            (poolTainted && tradeValuationRaw.valuationStatus === 'final')
+              ? 'estimated_reviewable'
+              : tradeValuationRaw.valuationStatus;
+          const tradeValuation = {
+            valuationStatus: effectiveValuationStatus,
+            excludeFromK4:   effectiveValuationStatus !== 'final',
+            reviewReasons:   [
+              ...tradeValuationRaw.reviewReasons,
+              ...(poolTainted ? [`cost_basis_pool_tainted: ${(holdings[sym].taintReasons || []).slice(0,2).join(', ')}`] : []),
+            ],
+          };
+
+          // Blocked outliers: null the proceeds so they cannot enter K4 or totals.
+          // Reference mismatches: keep the value visible in the review panel.
           const finalTradeProceedsSEK = swapOutlier ? null : effectiveProceedsSEK;
 
           const tradeExtra = {
@@ -3258,14 +3436,24 @@ const TaxEngine = (() => {
             tradeExtra.notes = (t.notes ? t.notes + ' | ' : '')
               + `Beräknade intäkter blockerade: implicerat enhetspris extremt högt för icke-major tillgång (trolig datakorruption i inAmount)`;
           }
+          if (swapReferenceMismatch) {
+            tradeExtra.proceedsSource = 'swap_reference_mismatch';
+          }
           const d = recordDisposal(t, sym, t.amount, finalTradeProceedsSEK, feeSEK, tradeExtra);
+          applyAnomalyCheck(d, t, sym);
           if (inYear) disposals.push(d);
-          // In side: acquisition of `inSym` at cost = FMV of what was given up
-          // Use effectiveProceedsSEK (not finalTrade) so inventory is consistent
+
+          // In side: acquisition of `inSym` at cost = FMV of what was given up.
+          // Use effectiveProceedsSEK (not finalTrade) so inventory is consistent.
+          // Taint inSym pool when this trade's proceeds are not trusted — the cost
+          // we're recording for the received asset is then also untrustworthy.
           if (inSym && inAmt > 0) {
             ensure(inSym);
             holdings[inSym].totalQty     += inAmt;
             holdings[inSym].totalCostSEK += (effectiveProceedsSEK || 0);
+            if (effectiveValuationStatus !== 'final') {
+              taintPool(inSym, 'trade_in_untrusted');
+            }
           }
           break;
         }

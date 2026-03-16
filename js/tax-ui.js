@@ -3114,7 +3114,7 @@ const TaxUI = (() => {
                   ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Intäkt: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Intäkt: okänd</span>'}
                   ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: okänd</span>'}
                   <span style="padding:1px 4px;border-radius:3px;background:rgba(148,163,184,.08);color:#475569">${d.proceedsSource || '—'}</span>
-                  ${(d.reviewReasons||[]).length ? `<span style="color:#64748b;font-style:italic">${d.reviewReasons[0]}</span>` : ''}
+                  ${(d.reviewReasons||[]).length ? (d.reviewReasons||[]).slice(0,2).map(r => `<span style="color:#64748b;font-style:italic;font-size:9px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r}">${r}</span>`).join('') : ''}
                   <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
                 </div>`).join('')}
                 ${rows.length > 8 ? `<div style="font-size:10px;color:#475569;text-align:center;padding:4px">… och ${rows.length - 8} fler rader</div>` : ''}

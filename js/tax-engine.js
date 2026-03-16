@@ -3144,6 +3144,7 @@ const TaxEngine = (() => {
         gainLossSEK:       reportedGainLoss,
         avgCostAtSale:     avg(sym),
         id: t.id,
+        txHash: t.txHash || null,
         needsReview:       t.needsReview || unknownAcq || finalExclude,
         unknownAcquisition: unknownAcq,
         zeroCostReason,
@@ -3607,6 +3608,80 @@ const TaxEngine = (() => {
         }
       }
     }
+
+    // ── Transaction-level proceeds conservation check ─────────────────────────
+    // A single on-chain transaction produces exactly one stream of received assets.
+    // If the same txHash appears on multiple final disposal rows whose proceeds
+    // values are near-identical, the swap reconstruction has assigned the same
+    // received-value to two different out-legs — double-counting the proceeds.
+    // We also catch the case where the running total far exceeds the largest
+    // single-row proceeds (indicating multiple legs attributed the same output).
+    {
+      const disposalsByTx = new Map();
+      for (const d of disposals) {
+        const key = d.txHash;
+        if (!key || key.startsWith('manual_')) continue;
+        if (!disposalsByTx.has(key)) disposalsByTx.set(key, []);
+        disposalsByTx.get(key).push(d);
+      }
+
+      for (const [txHash, rows] of disposalsByTx) {
+        if (rows.length < 2) continue;
+        // Only examine rows that are currently 'final' with non-null proceeds
+        const finalRows = rows.filter(
+          d => d.valuationStatus === 'final' && d.proceedsSEK != null && d.proceedsSEK > 0
+        );
+        if (finalRows.length < 2) continue;
+
+        const procValues    = finalRows.map(d => d.proceedsSEK || 0);
+        const totalAssigned = procValues.reduce((s, v) => s + v, 0);
+        const maxSingle     = Math.max(...procValues);
+
+        // Signal 1: near-duplicate proceeds values (most reliable signal for the
+        // specific bug where the same received-amount is echoed to multiple rows)
+        let hasDuplicateProceeds = false;
+        for (let i = 0; i < procValues.length && !hasDuplicateProceeds; i++) {
+          for (let j = i + 1; j < procValues.length; j++) {
+            const lo = Math.min(procValues[i], procValues[j]);
+            const hi = Math.max(procValues[i], procValues[j]);
+            if (hi > 1_000 && lo / hi > 0.92) {   // within 8% and >= 1 000 kr
+              hasDuplicateProceeds = true;
+              break;
+            }
+          }
+        }
+
+        // Signal 2: total far exceeds the largest individual row
+        // (any legitimate 2-asset sale produces two DIFFERENT amounts;
+        //  if total > 1.5 × max, we have at least two near-equal large rows)
+        const hasExcessTotal = maxSingle > 1_000 && totalAssigned > maxSingle * 1.5;
+
+        if (hasDuplicateProceeds || hasExcessTotal) {
+          const txShort = txHash.slice(0, 16) + '…';
+          const reason  = `tx_proceeds_overallocated: ${txShort} `
+            + `total_assigned=${Math.round(totalAssigned)}kr `
+            + `max_single=${Math.round(maxSingle)}kr `
+            + `(${finalRows.length} rader från samma tx — sannolikt dubbeltilldelning)`;
+
+          for (const d of finalRows) {
+            d.valuationStatus          = 'estimated_reviewable';
+            d.excludeFromK4            = true;
+            d.txProceedsOverallocated  = true;
+            d.txRowCount               = finalRows.length;
+            d.sanityFlags              = (d.sanityFlags || []).concat(['duplicate_proceeds_assignment']);
+            d.reviewReasons            = (d.reviewReasons || []).concat([reason]);
+          }
+        } else if (finalRows.length >= 2) {
+          // Multiple final rows from one tx but amounts differ enough not to flag —
+          // add informational marker only (no downgrade)
+          for (const d of finalRows) {
+            d.multipleDisposalsFromSingleSwap = true;
+            d.txRowCount = finalRows.length;
+          }
+        }
+      }
+    }
+    // ── End proceeds conservation check ──────────────────────────────────────
 
     // Summary — all disposals (portfolio P&L, may include estimated/blocked rows)
     const totalGains = disposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);

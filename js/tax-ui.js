@@ -1344,9 +1344,21 @@ const TaxUI = (() => {
       lines.push('ℹ Kostnadsbas härledd från tidigare swaps — ej direkt SEK-insättning');
     }
 
+    // ── Transaction-level over-allocation warning
+    if (d.txProceedsOverallocated) {
+      lines.push(`🔴 INTÄKTS-DUBLETT: Samma tx-utdata tilldelad ${d.txRowCount || 2} rader — exkluderad från K4`);
+      if (d.txHash) lines.push(`Tx: ${d.txHash.slice(0, 20)}…`);
+    } else if (d.multipleDisposalsFromSingleSwap && d.txHash) {
+      lines.push(`ℹ Flera avyttringar från samma tx (${d.txRowCount || 2} rader) — beloppen är olika, ej dubbletter`);
+      lines.push(`Tx: ${d.txHash.slice(0, 20)}…`);
+    } else if (d.txHash && !d.txHash.startsWith('manual_')) {
+      lines.push(`Tx: ${d.txHash.slice(0, 20)}…`);
+    }
+
     // ── Review reasons
     if (d.reviewReasons?.length) {
-      lines.push(`⚠ ${d.reviewReasons.slice(0, 2).join('; ')}`);
+      const filtered = d.reviewReasons.filter(r => !r.startsWith('tx_proceeds_overallocated'));
+      if (filtered.length) lines.push(`⚠ ${filtered.slice(0, 2).join('; ')}`);
     }
 
     return lines;

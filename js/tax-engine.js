@@ -630,8 +630,26 @@ const TaxEngine = (() => {
   // AUTO-CLASSIFICATION ENGINE
   // ════════════════════════════════════════════════════════════
 
-  const SPAM_PATTERNS = [/airdrop.*claim/i, /free.*token/i, /visit.*to.*claim/i, /reward.*claim/i,
-    /\$\d+.*airdrop/i, /claim.*reward/i, /visit.*site/i, /connect.*wallet/i, /whitelist/i];
+  const SPAM_PATTERNS = [
+    /airdrop.*claim/i, /free.*token/i, /visit.*to.*claim/i, /reward.*claim/i,
+    /\$\d+.*airdrop/i, /claim.*reward/i, /visit.*site/i, /connect.*wallet/i, /whitelist/i,
+    // Extended Solana airdrop / phishing patterns
+    /free.*airdrop/i, /airdrop.*free/i, /bonus.*claim/i, /claim.*bonus/i,
+    /token.*giveaway/i, /giveaway.*token/i, /\bwon\b.*token/i,
+    /\bvisit\b.*\bclaim\b/i, /\bcheck\b.*\bclaim\b/i,
+  ];
+
+  // Symbol-level spam heuristic — tokens whose SYMBOL ITSELF signals spam
+  // (not notes/description — this is the resolved ticker, e.g. "AIRDROP2024")
+  const SPAM_SYMBOL_RE = /^(AIRDROP|FREECOIN|FREETOKEN|SCAM|RUGPULL|HONEYPOT|PHISHING|FAKE)/i;
+  function isSpamSymbol(sym) {
+    if (!sym || sym.length < 3) return false;
+    const s = sym.toUpperCase();
+    if (SPAM_SYMBOL_RE.test(s)) return true;
+    // Symbol contains AIRDROP, SCAM, RUG as a whole word
+    if (/\bAIRDROP\b|\bSCAMTOKEN\b|\bRUGPULL\b/.test(s)) return true;
+    return false;
+  }
 
   // ── Spam / scam token symbol heuristics ─────────────────
   // A symbol is "contract-like" if it looks like an unresolved address.
@@ -702,6 +720,49 @@ const TaxEngine = (() => {
             needsReview: sends[0].needsReview && receives[0].needsReview,
             notes: `Decoded swap from ${group.length} sub-events`,
           }, sends[0].accountId, sends[0].source));
+        }
+      }
+
+      // ── Jupiter multi-hop route-token collapse ──────────────────────────────
+      // Detects cases where the same txHash contains multiple TRADE/SELL rows
+      // representing intermediate route tokens (A→B, B→C, C→D = route B,C).
+      // Collapses to one economic swap: A → D.
+      // This fixes fake disposals + phantom P&L from Jupiter multi-hop swaps.
+      const tradeRows = group.filter(t =>
+        [CAT.TRADE, CAT.SELL].includes(t.category) && !toRemove.has(t.id)
+      );
+      if (tradeRows.length >= 2) {
+        // Build maps: assetSymbol (sold) and inAsset (received) per row
+        const soldSyms   = new Map(tradeRows.filter(t => t.assetSymbol).map(t => [t.assetSymbol, t]));
+        const boughtSyms = new Map(tradeRows.filter(t => t.inAsset).map(t => [t.inAsset, t]));
+        // Route tokens appear in BOTH sold and bought within the same tx
+        const routeSyms  = new Set([...soldSyms.keys()].filter(s => boughtSyms.has(s)));
+        if (routeSyms.size > 0) {
+          // Economic sell: first leg whose assetSymbol is NOT a route token
+          const economicSell = tradeRows.find(t => t.assetSymbol && !routeSyms.has(t.assetSymbol));
+          // Economic buy:  last leg whose inAsset is NOT a route token
+          const economicBuy  = [...tradeRows].reverse()
+            .find(t => t.inAsset && !routeSyms.has(t.inAsset));
+          if (economicSell && economicBuy && economicSell.assetSymbol !== economicBuy.inAsset) {
+            for (const t of tradeRows) toRemove.add(t.id);
+            toAdd.push(normalizeTransaction({
+              id: `mh_${hash.slice(0, 12)}_${Math.random().toString(36).slice(2, 6)}`,
+              txHash: hash,
+              date: economicSell.date,
+              type: 'swap',
+              assetSymbol: economicSell.assetSymbol,
+              assetName:   economicSell.assetName || economicSell.assetSymbol,
+              amount:      economicSell.amount,
+              inAsset:     economicBuy.inAsset,
+              inAmount:    economicBuy.inAmount,
+              feeSEK:      tradeRows.reduce((s, t) => s + (t.feeSEK || 0), 0),
+              needsReview: false,
+              jupiterMultiHop: true,
+              routeHops:   tradeRows.length,
+              notes: `Jupiter multi-hop (${tradeRows.length} hops collapsed): `
+                + `${economicSell.assetSymbol} → ${[...routeSyms].join(' → ')} → ${economicBuy.inAsset}`,
+            }, economicSell.accountId, economicSell.source));
+          }
         }
       }
     }
@@ -2056,6 +2117,15 @@ const TaxEngine = (() => {
     if (amt >= 1_000_000 && amt % 1000 === 0
         && [CAT.RECEIVE, CAT.AIRDROP].includes(t.category)
         && !CC_IDS[sym] && !STABLES.has(sym)) return true;
+
+    // Symbol-level spam (e.g. "AIRDROP2024", "FREECOIN")
+    if (isSpamSymbol(sym)) return true;
+
+    // No known price + unknown token + tiny proceeds value = likely dust/spam
+    const noPrice  = !t.priceSource || t.priceSource === PS.MISSING;
+    const notMajor = !CC_IDS[sym] && !STABLES.has(sym) && !MAJOR_ASSETS.has(sym);
+    const tinyVal  = (t.proceedsSEK || t.valueSEK || t.costSEK || 0) < 5;
+    if (noPrice && notMajor && tinyVal && !t.userReviewed && sym.length >= 2) return true;
 
     return false;
   }
@@ -3544,6 +3614,37 @@ const TaxEngine = (() => {
         }
 
         case CAT.SEND: {
+          if (t.isTokenAccountClose) {
+            // ── Token account close (Solana rent refund) ──────────
+            // Closing a Solana token account returns ~0.002 SOL rent to the
+            // owner.  The token balance going to zero is NOT a taxable disposal:
+            // the user didn't sell anything — they just closed an account.
+            // Reduce holdings like a normal outbound but record with excluded_noise
+            // so it never blocks K4 or creates phantom proceeds.
+            const tac_qty = Math.min(t.amount, h.totalQty);
+            const tac_cb  = avg(sym) * tac_qty;
+            h.totalQty     = Math.max(0, h.totalQty - tac_qty);
+            h.totalCostSEK = Math.max(0, h.totalCostSEK - tac_cb);
+            const tpTAC = taxPool[sym];
+            if (tpTAC && tpTAC.totalQty > 0) {
+              const tpQ = Math.min(tac_qty, tpTAC.totalQty);
+              tpTAC.totalQty     = Math.max(0, tpTAC.totalQty - tpQ);
+              tpTAC.totalCostSEK = Math.max(0, tpTAC.totalCostSEK - taxAvg(sym) * tpQ);
+            }
+            if (inYear) {
+              // Still record a disposal-like row for the audit trail,
+              // but hard-exclude from K4.
+              const d = recordDisposal(t, sym, t.amount, 0, 0, {
+                contractAddress:  t.contractAddress || null,
+                valuationStatus:  'excluded_noise',
+                excludeFromK4:    true,
+                eventSubtype:     'token_account_close',
+                reviewReasons:    [`token_account_close: rent refund ${(t.rentRefundSOL||0).toFixed(6)} SOL — not a taxable disposal`],
+              });
+              disposals.push(d);
+            }
+            break;
+          }
           if (t.burnDisposal) {
             // ── Burn / incinerator: proceeds forced to 0 ──────────
             // Tokens sent to a known burn program are permanently destroyed.
@@ -3714,6 +3815,7 @@ const TaxEngine = (() => {
           const tradeExtra = {
             isTrade: true, inAsset: inSym, inAmount: inAmt,
             contractAddress: t.contractAddress || null,
+            ...(t.jupiterMultiHop ? { jupiterMultiHop: true, routeHops: t.routeHops } : {}),
             ...tradeValuation,
           };
           if (swapAtCost) {
@@ -4007,6 +4109,27 @@ const TaxEngine = (() => {
       const sym    = d.assetSymbol;
       const qty    = d.amountSold || 0;
       const dispMs = new Date(d.date).getTime();
+
+      // ── Pre-pass: Micro-proceeds dust filter ─────────────────────────
+      // Disposals with very small proceeds (< 20 SEK) for tokens that are
+      // unknown to any major price source are almost always:
+      //   • Rent refunds from closed token accounts (already handled at parse
+      //     time by isTokenAccountClose, but catches legacy data too)
+      //   • Dust token disposals from spam tokens with a tiny SOL refund
+      //   • Spam airdrop tokens that were auto-sold by some protocol
+      // Auto-classify as spam so they never reach manual review.
+      const procSEK_d = d.proceedsSEK || 0;
+      if (procSEK_d > 0 && procSEK_d < 20) {
+        const notMajor_d = !CC_IDS[sym] && !STABLES.has(sym) && !MAJOR_ASSETS.has(sym);
+        if (notMajor_d) {
+          d.resolutionType       = RT.SPAM;
+          d.resolutionConfidence = 'high';
+          d.resolutionNote = `Mikro-intäkt (${Math.round(procSEK_d)} kr) för okänd token ${sym}. `
+            + `Troligen stängd token-account (Solana rent-refund) eller dust. `
+            + `Exkluderas automatiskt med 0 kr kostnadsbas — ingen skatteeffekt.`;
+          continue;
+        }
+      }
 
       // ── Pass 1: Internal transfer candidate ──────────────────────────
       // Look for any movement of the same asset ± 5% qty within 72 h that
@@ -5178,6 +5301,32 @@ const TaxEngine = (() => {
         const [outMint, outAmt] = biggest(tokenOut);
         const outSym      = msym(outMint);
         const solReceived = Math.abs(netSol);
+
+        // ── Token account close / rent refund heuristic ──────────────────────
+        // When a Solana token account is closed, the lamport rent reserve
+        // (~0.00203928 SOL) is returned to the owner.  This is NOT a sale of
+        // the token — it's the rent deposit being released.  Incorrectly
+        // classifying it as a TRADE creates phantom proceeds (4–12 SEK).
+        //
+        // Signal: tiny SOL received (≤ 0.0025 SOL ≈ 12 SEK at 5 000 kr/SOL)
+        //   AND   the token going out is either spam / dust / has no market price.
+        const SOL_RENT_MAX = 0.0025;
+        if (solReceived <= SOL_RENT_MAX) {
+          // Classify as a non-taxable token account cleanup:
+          //   • Token side: SEND with isTokenAccountClose=true (proceeds → 0 in main loop)
+          //   • SOL side:   tiny receive — below noise threshold, effectively ignored
+          return normalizeTransaction({
+            txHash: sig, date: ts, category: CAT.SEND,
+            assetSymbol: outSym, amount: Math.abs(outAmt),
+            feeSEK, contractAddress: outMint,
+            needsReview: false,
+            isTokenAccountClose: true,
+            rentRefundSOL: solReceived,
+            notes: mkNotes(`Token account closed: ${outSym} (rent refund ${solReceived.toFixed(6)} SOL — not a sale)`),
+            _reconstruction: recon,
+          }, accountId, 'solana_wallet');
+        }
+
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.TRADE,
           assetSymbol: outSym,  amount: Math.abs(outAmt),

@@ -1331,8 +1331,13 @@ const TaxUI = (() => {
     const evtMap = { trade:'Byte/swap', sell:'Försäljning', send:'Skickad',
       transfer_out:'Transfer ut', bridge_out:'Bridge ut' };
     const evtType = (d.eventType && evtMap[d.eventType]) || 'Avyttring';
-    if (d.eventSubtype === 'burn') {
+    if (d.eventSubtype === 'token_account_close') {
+      lines.push('🔒 Token-account stängd — Solana rent-refund, inte en avyttring');
+      lines.push('ℹ Intäkter satta till 0 kr. Liten SOL-återbetalning (~0.002 SOL) exkluderas som brus.');
+    } else if (d.eventSubtype === 'burn') {
       lines.push('🔥 Bränd/incinererad — intäkter satta till 0');
+    } else if (d.jupiterMultiHop) {
+      lines.push(`🔀 Jupiter multi-hop swap (${d.routeHops || '?'} hopp kollapsade → en ekonomisk avyttring)`);
     } else {
       lines.push(`Händelse: ${evtType}`);
     }

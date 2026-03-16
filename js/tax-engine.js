@@ -3854,6 +3854,18 @@ const TaxEngine = (() => {
     }
     // ── End proceeds conservation check ──────────────────────────────────────
 
+    // ── Auto-recovery pass for missing_history disposals ─────────────────────
+    // Classifies each blocked disposal into one of four resolution buckets:
+    //   internal_transfer_candidate → import source account to resolve
+    //   opening_balance_candidate   → pre-import holding, add synthetic entry
+    //   airdrop_candidate           → receipt-value cost basis
+    //   spam_candidate              → 0 kr, auto-excludable
+    //   manual_review_required      → hard blocker, needs user action
+    // This does NOT change K4 eligibility — it only adds resolutionType metadata
+    // so the UI can split the single "missing_history" bucket into sub-queues.
+    resolveUnknownAcquisitions(disposals, allSorted, acquisitionMap, txHashMap);
+    // ── End auto-recovery ─────────────────────────────────────────────────────
+
     // Summary — all disposals (portfolio P&L, may include estimated/blocked rows)
     const totalGains = disposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
     const totalLosses = disposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
@@ -3931,6 +3943,164 @@ const TaxEngine = (() => {
         airdropCount:     airdropSummary.totalCount,
       },
     };
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // UNKNOWN ACQUISITION AUTO-RECOVERY PIPELINE
+  //
+  // Runs after the main computeTaxYear loop on all disposals that
+  // have valuationStatus === 'missing_history'.  Four passes in
+  // priority order:
+  //
+  //  Pass 1 — Internal transfer candidate
+  //    Find a SEND/TRANSFER_OUT of same asset ± same qty within 72 h
+  //    across any account.  Suggests importing the source wallet.
+  //
+  //  Pass 2 — Opening balance candidate
+  //    Disposal happens within 90 days of the earliest imported tx.
+  //    Suggests a pre-import holding that needs a synthetic entry.
+  //
+  //  Pass 3 — Airdrop / spam classification
+  //    No acquisition exists AND inbound pattern matches airdrop /
+  //    spam heuristics (uses classifyAirdropEvent).
+  //    Spam → auto-resolve with 0 cost basis (no value, no impact).
+  //    Airdrop → mark for review with receipt-value cost basis.
+  //
+  //  Pass 4 — Manual review required (hard blocker)
+  //    None of the above matched.  Stays in the missing_history
+  //    bucket and shows the strongest available import hint.
+  //
+  // Each disposal gets:
+  //   resolutionType       — one of the constants below
+  //   resolutionConfidence — 'high' | 'medium' | 'low'
+  //   resolutionNote       — Swedish plain-language explanation
+  //   resolutionCandidateTxId — tx.id of the best matching candidate (if any)
+  // ════════════════════════════════════════════════════════════
+  const RT = {
+    INTERNAL_TRANSFER:    'internal_transfer_candidate',
+    OPENING_BALANCE:      'opening_balance_candidate',
+    AIRDROP:              'airdrop_candidate',
+    SPAM:                 'spam_candidate',
+    MANUAL:               'manual_review_required',
+  };
+
+  function resolveUnknownAcquisitions(disposals, allTxns, acquisitionMap, txHashMap) {
+    if (!disposals || !allTxns) return;
+
+    // Build asset → all inbound/outbound transactions map for transfer matching
+    const txsByAsset = {};
+    for (const t of allTxns) {
+      const sym = t.assetSymbol;
+      if (!sym || t.isInternalTransfer) continue;
+      const cat = t.category;
+      if (![CAT.SEND, CAT.TRANSFER_OUT, CAT.BRIDGE_OUT,
+            CAT.RECEIVE, CAT.TRANSFER_IN, CAT.BRIDGE_IN].includes(cat)) continue;
+      (txsByAsset[sym] = txsByAsset[sym] || []).push(t);
+    }
+
+    // Earliest imported transaction timestamp — proxy for "import start"
+    const allDatesMs = allTxns.map(t => new Date(t.date).getTime()).filter(n => !isNaN(n));
+    const earliestMs = allDatesMs.length ? Math.min(...allDatesMs) : 0;
+
+    for (const d of disposals) {
+      if (d.valuationStatus !== 'missing_history') continue;
+      const sym    = d.assetSymbol;
+      const qty    = d.amountSold || 0;
+      const dispMs = new Date(d.date).getTime();
+
+      // ── Pass 1: Internal transfer candidate ──────────────────────────
+      // Look for any movement of the same asset ± 5% qty within 72 h that
+      // hasn't been marked as an internal transfer yet (and isn't this disposal).
+      const candidates = (txsByAsset[sym] || []).filter(t => {
+        if (matched.has ? matched.has(t.id) : false) return false; // skip if already matched
+        const tMs      = new Date(t.date).getTime();
+        const timeDiff = Math.abs(tMs - dispMs);
+        if (timeDiff > 72 * 3600_000) return false;
+        if (qty <= 0) return false;
+        const amtRatio = Math.abs(t.amount - qty) / qty;
+        if (amtRatio > 0.08) return false;          // 8% tolerance (fee loss etc.)
+        return true;
+      }).sort((a, b) => {
+        const da = Math.abs(new Date(a.date).getTime() - dispMs);
+        const db = Math.abs(new Date(b.date).getTime() - dispMs);
+        return da - db;
+      });
+
+      if (candidates.length > 0) {
+        const best     = candidates[0];
+        const diffH    = Math.abs(new Date(best.date).getTime() - dispMs) / 3600_000;
+        const confidence = diffH < 1 ? 'high' : diffH < 24 ? 'medium' : 'low';
+        d.resolutionType          = RT.INTERNAL_TRANSFER;
+        d.resolutionConfidence    = confidence;
+        d.resolutionCandidateTxId = best.id;
+        d.resolutionNote = `Hittade möjlig intern transfer: ${best.category} av ${best.amount.toFixed(4)} ${sym} `
+          + `(${diffH < 1 ? 'inom 1h' : Math.round(diffH) + 'h senare/tidigare'}, konto ${best.accountId || '?'}). `
+          + `Importera det kontot — motorn matchar automatiskt och löser kostnadsbas.`;
+        continue;
+      }
+
+      // ── Pass 2: Opening balance candidate ────────────────────────────
+      // Disposal within 90 days of the earliest imported date strongly
+      // suggests the user held the token before their import window started.
+      if (earliestMs > 0 && dispMs <= earliestMs + 90 * 24 * 3600_000) {
+        const daysAfter = Math.round((dispMs - earliestMs) / (24 * 3600_000));
+        const confidence = daysAfter < 0 ? 'high' : daysAfter < 14 ? 'high' : 'medium';
+        d.resolutionType       = RT.OPENING_BALANCE;
+        d.resolutionConfidence = confidence;
+        d.resolutionNote = daysAfter < 0
+          ? `Avyttring sker FÖRE det tidigaste importerade datumet — token ägdes definitivt före importen.`
+          : `Avyttring sker ${daysAfter} dagar efter importstarten. `
+            + `${sym} hölls troligen som öppningssaldo. Skapa en manuell köptransaktion med rätt datum och kostnadsbas.`;
+        continue;
+      }
+
+      // ── Pass 3: Airdrop / spam classification ────────────────────────
+      // No acquisition in imported data — check if the only inbound pattern
+      // for this asset matches an airdrop or spam heuristic.
+      const inboundTxn = allTxns.find(t =>
+        t.assetSymbol === sym
+        && [CAT.RECEIVE, CAT.AIRDROP].includes(t.category)
+        && !t.isInternalTransfer
+      );
+
+      // Spam check (fast path — token-level signals)
+      const fakeT = { assetSymbol: sym, category: CAT.RECEIVE, amount: qty,
+                      notes: '', priceSource: null, coinGeckoId: null };
+      if (isLikelySpamToken(fakeT) || isLikelySpamToken(inboundTx || {})) {
+        d.resolutionType       = RT.SPAM;
+        d.resolutionConfidence = 'high';
+        d.resolutionNote = `Spam-airdrop detekterad: ${sym} matchar spam-mönster (inga köp, okänd token). `
+          + `Kan klassificeras som 0 kr kostnadsbas utan skatteeffekt.`;
+        continue;
+      }
+
+      if (inboundTxn) {
+        const ac = classifyAirdropEvent(inboundTxn, txHashMap);
+        if (ac.subtype === 'spam') {
+          d.resolutionType       = RT.SPAM;
+          d.resolutionConfidence = ac.confidence;
+          d.resolutionNote = `Mottogs som spam-airdrop (${ac.reasons.join(', ')}). `
+            + `Klassificeras med 0 kr kostnadsbas.`;
+          continue;
+        }
+        if (ac.subtype === 'unsolicited' || ac.subtype === 'claimed') {
+          d.resolutionType       = RT.AIRDROP;
+          d.resolutionConfidence = ac.confidence;
+          d.resolutionNote = `Mottogs som ${ac.subtype === 'claimed' ? 'claimad' : 'oönskad'} airdrop `
+            + `(konfidens: ${ac.confidence}). Kostnadsbas = FMV vid mottagning. `
+            + (ac.confidence !== 'high' ? 'Verifiera marknadspriset vid mottagningsdatumet.' : '');
+          continue;
+        }
+      }
+
+      // ── Pass 4: Manual review required ───────────────────────────────
+      const acqCount = (acquisitionMap[sym] || []).length;
+      d.resolutionType       = RT.MANUAL;
+      d.resolutionConfidence = 'none';
+      d.resolutionNote = acqCount === 0
+        ? `Inga anskaffningar importerade för ${sym}. Importera köphistorik från börsen eller plånboken där tokenen ursprungligen anskaffades.`
+        : `Anskaffningshistorik finns (${acqCount} transaktioner) men täcker inte denna avyttring. Kontrollera om fler transaktioner saknas.`;
+    }
   }
 
   // ════════════════════════════════════════════════════════════
@@ -4116,25 +4286,49 @@ const TaxEngine = (() => {
     const suspiciousZeroCost = querySuspiciousZeroCost(result);
 
     // Group excluded disposals by status for the UI review panel.
-    // Rows with sanityFlags go into a dedicated 'sanity_flagged' bucket
-    // (separate from estimated_reviewable so they surface in their own section).
+    // missing_history rows are further sub-classified by resolutionType so the
+    // UI can split them into actionable sub-queues instead of one big bucket.
     const excludedByStatus = {};
     for (const d of excludedDisposals) {
       let s = d.valuationStatus || 'estimated_reviewable';
-      if (d.sanityFlags && d.sanityFlags.length > 0) s = 'sanity_flagged';
+      if (d.sanityFlags && d.sanityFlags.length > 0) {
+        s = 'sanity_flagged';
+      } else if (s === 'missing_history' && d.resolutionType) {
+        // Sub-classify: auto-recovery gave us a better bucket than generic missing_history
+        s = d.resolutionType;  // e.g. 'internal_transfer_candidate', 'spam_candidate', etc.
+        // 'manual_review_required' rows stay in their own bucket (hard blockers)
+      }
       (excludedByStatus[s] = excludedByStatus[s] || []).push(d);
     }
     const sanityFlaggedCount = (excludedByStatus['sanity_flagged'] || []).length;
+    // Recovery summary counts for UI
+    const internalTransferCount  = (excludedByStatus[RT.INTERNAL_TRANSFER] || []).length;
+    const openingBalanceCount    = (excludedByStatus[RT.OPENING_BALANCE]   || []).length;
+    const airdropCandidateCount  = (excludedByStatus[RT.AIRDROP]           || []).length;
+    const spamCandidateCount     = (excludedByStatus[RT.SPAM]              || []).length;
+    const manualReviewCount      = (excludedByStatus[RT.MANUAL]            || []).length
+                                 + (excludedByStatus['missing_history']    || []).length;
 
     return {
       k4Rows, totalGains, totalLosses, year, userInfo,
       formsNeeded:      Math.max(1, Math.ceil(k4Rows.length / ROWS_PER_K4_FORM)),
       suspiciousZeroCost,
       excludedDisposals,   // full list for debug query
-      excludedByStatus,    // grouped for UI panels
+      excludedByStatus,    // grouped for UI panels (includes RT sub-buckets)
       excludedCount:       excludedDisposals.length,
       sanityFlaggedCount,  // rows downgraded by mid-tier sanity checks
       k4DisposalCount:     k4Disposals.length,
+      // Auto-recovery summary counts for UI (subset of excludedCount)
+      recoveryStats: {
+        internalTransferCount,
+        openingBalanceCount,
+        airdropCandidateCount,
+        spamCandidateCount,
+        manualReviewCount,
+        autoResolvable: spamCandidateCount, // spam can be resolved with no new data
+        needsImport:    internalTransferCount,
+        needsConfirm:   openingBalanceCount + airdropCandidateCount,
+      },
     };
   }
 
@@ -6255,6 +6449,7 @@ const TaxEngine = (() => {
     // Tax engine
     computeTaxYear, computeReportHealth,
     querySuspiciousZeroCost, queryEstimatedHighProceedsDisposals,
+    resolveUnknownAcquisitions, RT,  // recovery pipeline + resolution type constants
     // K4 export
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review

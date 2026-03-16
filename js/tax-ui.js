@@ -3268,15 +3268,23 @@ const TaxUI = (() => {
     const unknownGainsAmt = 0; // All uncertain rows are now excluded, not in K4
     // Excluded disposals summary
     const excByStatus     = k4.excludedByStatus || {};
-    const excSanity       = (excByStatus['sanity_flagged']          || []);
-    const excEstimated    = (excByStatus['estimated_reviewable']   || []);
-    const excMissing      = (excByStatus['missing_history']         || []);
-    const excBlocked      = (excByStatus['blocked_outlier']         || []);
-    const excUnknownId    = (excByStatus['unknown_asset_identity']  || []);
-    const excNoise        = (excByStatus['excluded_noise']          || []);
+    const excSanity       = (excByStatus['sanity_flagged']               || []);
+    const excEstimated    = (excByStatus['estimated_reviewable']         || []);
+    const excMissing      = (excByStatus['missing_history']              || []);  // unclassified fallback
+    const excBlocked      = (excByStatus['blocked_outlier']              || []);
+    const excUnknownId    = (excByStatus['unknown_asset_identity']       || []);
+    const excNoise        = (excByStatus['excluded_noise']               || []);
+    // Auto-recovery sub-buckets (sub-classified from missing_history by engine)
+    const excTransfer     = (excByStatus['internal_transfer_candidate']  || []);
+    const excOpenBal      = (excByStatus['opening_balance_candidate']    || []);
+    const excAirdropCand  = (excByStatus['airdrop_candidate']            || []);
+    const excSpamCand     = (excByStatus['spam_candidate']               || []);
+    const excManual       = (excByStatus['manual_review_required']       || []);
+    const recoveryStats   = k4.recoveryStats || {};
     const excSanityGain   = excSanity.reduce((s, d) => s + (d.gainLossSEK || 0), 0);
     const excEstGain      = excEstimated.reduce((s, d) => s + (d.proceedsSEK || 0) - (d.costBasisSEK || 0), 0);
-    const excMissingProc  = excMissing.reduce((s, d) => s + (d.proceedsSEK || 0), 0);
+    const excMissingProc  = [...excMissing, ...excTransfer, ...excOpenBal, ...excAirdropCand,
+                             ...excSpamCand, ...excManual].reduce((s, d) => s + (d.proceedsSEK || 0), 0);
     const issues = TaxEngine.getReviewIssues(null, result).length;
     // ── K4-only summary figures ── ALL summary cards must use these, never the
     // portfolio-level totalGains/taxableGain/estimatedTax which include excluded rows.
@@ -3576,11 +3584,17 @@ const TaxUI = (() => {
 
           const statusMeta = {
             sanity_flagged:        { icon: '🔎', color: '#f97316', bg: 'rgba(249,115,22,.07)', border: 'rgba(249,115,22,.3)',  label: 'Misstänkta rader — Sanitetskontroll' },
-            estimated_reviewable:  { icon: '⚠', color: '#fbbf24', bg: 'rgba(251,191,36,.05)', border: 'rgba(251,191,36,.25)', label: 'Uppskattad prissättning' },
-            missing_history:       { icon: '⛔', color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Saknad anskaffningshistorik' },
-            blocked_outlier:       { icon: '🚫', color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Blockerad (orimlig/korrupt data)' },
-            unknown_asset_identity:{ icon: '❓', color: '#94a3b8', bg: 'rgba(148,163,184,.05)',border: 'rgba(148,163,184,.2)', label: 'Okänd tillgångsidentitet' },
-            excluded_noise:        { icon: '🔇', color: '#475569', bg: 'rgba(71,85,105,.05)',  border: 'rgba(71,85,105,.2)',  label: 'Brus / spam / intern' },
+            estimated_reviewable:  { icon: '⚠',  color: '#fbbf24', bg: 'rgba(251,191,36,.05)', border: 'rgba(251,191,36,.25)', label: 'Uppskattad prissättning' },
+            missing_history:       { icon: '⛔',  color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Okänd anskaffning — oklassificerad' },
+            blocked_outlier:       { icon: '🚫',  color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Blockerad (orimlig/korrupt data)' },
+            unknown_asset_identity:{ icon: '❓',  color: '#94a3b8', bg: 'rgba(148,163,184,.05)',border: 'rgba(148,163,184,.2)', label: 'Okänd tillgångsidentitet' },
+            excluded_noise:        { icon: '🔇',  color: '#475569', bg: 'rgba(71,85,105,.05)',  border: 'rgba(71,85,105,.2)',  label: 'Brus / spam / intern' },
+            // Auto-recovery sub-buckets
+            internal_transfer_candidate: { icon: '🔄', color: '#38bdf8', bg: 'rgba(56,189,248,.06)',  border: 'rgba(56,189,248,.25)',  label: 'Möjlig intern transfer — importera källkontot',  bulkAction: 'resolve_transfer'  },
+            opening_balance_candidate:   { icon: '📅', color: '#a78bfa', bg: 'rgba(167,139,250,.06)', border: 'rgba(167,139,250,.25)', label: 'Möjligt öppningssaldo — token ägdes före import',  bulkAction: 'resolve_openbal'   },
+            airdrop_candidate:           { icon: '📬', color: '#fbbf24', bg: 'rgba(251,191,36,.06)',  border: 'rgba(251,191,36,.25)',  label: 'Möjlig airdrop — mottagning utan köp',           bulkAction: 'resolve_airdrop'   },
+            spam_candidate:              { icon: '🗑️', color: '#94a3b8', bg: 'rgba(148,163,184,.05)', border: 'rgba(148,163,184,.2)',  label: 'Möjlig spam — automatiskt lösbara',              bulkAction: 'resolve_spam'      },
+            manual_review_required:      { icon: '⛔',  color: '#f87171', bg: 'rgba(239,68,68,.07)',  border: 'rgba(239,68,68,.3)',   label: 'Manuell granskning krävs — K4-blockerare'                                 },
           };
 
           const renderExcGroup = (rows, status) => {
@@ -3588,32 +3602,52 @@ const TaxUI = (() => {
             const m = statusMeta[status] || statusMeta.estimated_reviewable;
             const totalProc = rows.reduce((s, d) => s + (d.proceedsSEK || 0), 0);
             const show = rows.slice(0, 8);
+            // Bulk action button for auto-recovery buckets
+            const bulkBtn = m.bulkAction ? (() => {
+              switch (m.bulkAction) {
+                case 'resolve_spam':
+                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(148,163,184,.12);color:#94a3b8;border:1px solid rgba(148,163,184,.2)" onclick="TaxUI.bulkResolveSpamCandidates()">🗑️ Lös alla spam (${rows.length})</button>`;
+                case 'resolve_airdrop':
+                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.bulkResolveAirdropCandidates()">📬 Klassificera som airdrops (${rows.length})</button>`;
+                case 'resolve_transfer':
+                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(56,189,248,.1);color:#38bdf8;border:1px solid rgba(56,189,248,.2)" onclick="TaxUI.navigate('accounts')" title="Importera källkontot för att lösa anskaffningshistorik">➕ Importera källkontot</button>`;
+                case 'resolve_openbal':
+                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)" onclick="TaxUI.bulkCreateOpeningBalances()">📅 Skapa öppningssaldon (${rows.length})</button>`;
+                default: return '';
+              }
+            })() : '';
             return `
             <details style="margin-bottom:6px">
-              <summary style="cursor:pointer;padding:7px 10px;border-radius:6px;background:${m.bg};border:1px solid ${m.border};display:flex;align-items:center;gap:8px;list-style:none;user-select:none">
+              <summary style="cursor:pointer;padding:7px 10px;border-radius:6px;background:${m.bg};border:1px solid ${m.border};display:flex;align-items:center;gap:8px;list-style:none;user-select:none;flex-wrap:wrap">
                 <span style="font-size:13px">${m.icon}</span>
                 <span style="flex:1;font-size:11px;font-weight:600;color:${m.color}">${m.label}</span>
                 <span style="font-size:10px;color:${m.color};opacity:.8">${rows.length} rad${rows.length !== 1 ? 'er' : ''}</span>
                 ${totalProc > 0 ? `<span style="font-size:10px;color:${m.color};font-weight:700">${TaxEngine.formatSEK(totalProc)} intäkter</span>` : ''}
+                ${bulkBtn}
                 <span style="font-size:10px;color:#475569">▾</span>
               </summary>
               <div style="display:flex;flex-direction:column;gap:3px;margin-top:4px;padding-left:4px">
                 ${show.map(d => {
                   const gl = d.gainLossSEK;
                   const sanFlags = (d.sanityFlags || []);
+                  const resNote = d.resolutionNote || '';
+                  const resConf = d.resolutionConfidence || '';
+                  const confColor = resConf === 'high' ? '#4ade80' : resConf === 'medium' ? '#fbbf24' : '#f87171';
                   return `
-                <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px;flex-wrap:wrap">
-                  <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
-                  <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
-                  <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} avyttrat</span>
-                  ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Intäkt: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Intäkt: okänd</span>'}
-                  ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: okänd</span>'}
-                  ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
-                  ${sanFlags.map(f => `<span style="padding:1px 5px;border-radius:3px;background:rgba(249,115,22,.12);color:#f97316;font-size:9px;font-family:monospace" title="${f}">${f.split(':')[0]}</span>`).join('')}
-                  ${sanFlags.length === 0 ? `<span style="padding:1px 4px;border-radius:3px;background:rgba(148,163,184,.08);color:#475569">${d.proceedsSource || '—'}</span>` : ''}
-                  ${(d.reviewReasons||[]).filter(r => !r.startsWith('sanity_check')).slice(0,1).map(r => `<span style="color:#64748b;font-style:italic;font-size:9px" title="${r}">${r.slice(0,60)}</span>`).join('')}
-                  <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.openAssetAudit('${d.assetSymbol}')" style="padding:1px 5px" title="Granska ${d.assetSymbol}">🔍</button>
-                  <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
+                <div style="display:flex;flex-direction:column;gap:3px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px">
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
+                    <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
+                    <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} avyttrat</span>
+                    ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Intäkt: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Intäkt: okänd</span>'}
+                    ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: saknas</span>'}
+                    ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
+                    ${resConf ? `<span style="font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(15,23,42,.5);color:${confColor}" title="Återställningskonfidens">${resConf}</span>` : ''}
+                    ${sanFlags.map(f => `<span style="padding:1px 5px;border-radius:3px;background:rgba(249,115,22,.12);color:#f97316;font-size:9px;font-family:monospace" title="${f}">${f.split(':')[0]}</span>`).join('')}
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.openAssetAudit('${d.assetSymbol}')" style="padding:1px 5px" title="Granska ${d.assetSymbol}">🔍</button>
+                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
+                  </div>
+                  ${resNote ? `<div style="font-size:9px;color:#64748b;line-height:1.4;padding-left:2px">💡 ${resNote}</div>` : ''}
                 </div>`;}).join('')}
                 ${rows.length > 8 ? `<div style="font-size:10px;color:#475569;text-align:center;padding:4px">… och ${rows.length - 8} fler rader</div>` : ''}
               </div>
@@ -3639,12 +3673,37 @@ const TaxUI = (() => {
             Total vinst/förlust på dessa rader: <strong>${TaxEngine.formatSEK(excSanityGain)}</strong>.
             Kontrollera ursprungliga transaktioner och bekräfta i <button class="tax-btn tax-btn-xs" onclick="TaxUI.navigate('review')" style="font-size:10px;padding:1px 6px;margin:0 2px;color:#f97316;border-color:#f97316">Granskning</button>.
           </div>` : ''}
-          ${renderExcGroup(excSanity,    'sanity_flagged')}
-          ${renderExcGroup(excMissing,   'missing_history')}
-          ${renderExcGroup(excEstimated, 'estimated_reviewable')}
-          ${renderExcGroup(excBlocked,   'blocked_outlier')}
-          ${renderExcGroup(excUnknownId, 'unknown_asset_identity')}
-          ${renderExcGroup(excNoise,     'excluded_noise')}
+
+          ${/* Recovery summary banner — shows when the engine found auto-triageable rows */
+          (excTransfer.length + excOpenBal.length + excAirdropCand.length + excSpamCand.length) > 0 ? `
+          <div style="padding:10px 14px;margin-bottom:10px;border-radius:8px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2)">
+            <div style="font-size:11px;font-weight:700;color:#4ade80;margin-bottom:6px">🤖 Automatisk triagering — motorn hittade möjliga lösningar</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+              ${excSpamCand.length   > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(148,163,184,.1);color:#94a3b8">🗑️ ${excSpamCand.length} spam</span>` : ''}
+              ${excAirdropCand.length > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(251,191,36,.1);color:#fbbf24">📬 ${excAirdropCand.length} airdrop</span>` : ''}
+              ${excTransfer.length   > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(56,189,248,.1);color:#38bdf8">🔄 ${excTransfer.length} intern transfer</span>` : ''}
+              ${excOpenBal.length    > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(167,139,250,.1);color:#a78bfa">📅 ${excOpenBal.length} öppningssaldo</span>` : ''}
+              ${excManual.length     > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(239,68,68,.1);color:#f87171">⛔ ${excManual.length} manuell</span>` : ''}
+            </div>
+            <div style="font-size:10px;color:#64748b">
+              Rader med möjlig lösning visas nedan i separata grupper med förslag och snabbåtgärder.
+              ${excSpamCand.length > 0 ? `<strong style="color:#94a3b8">${excSpamCand.length} spam-rader kan lösas direkt (inga nya data krävs).</strong>` : ''}
+            </div>
+          </div>` : ''}
+
+          ${renderExcGroup(excSanity,      'sanity_flagged')}
+          ${/* Auto-recovery buckets — shown before hard blockers */
+            renderExcGroup(excSpamCand,    'spam_candidate')}
+          ${renderExcGroup(excAirdropCand, 'airdrop_candidate')}
+          ${renderExcGroup(excTransfer,    'internal_transfer_candidate')}
+          ${renderExcGroup(excOpenBal,     'opening_balance_candidate')}
+          ${renderExcGroup(excManual,      'manual_review_required')}
+          ${renderExcGroup(excMissing,     'missing_history')}
+          ${/* Non-missing-history buckets */
+            renderExcGroup(excEstimated,   'estimated_reviewable')}
+          ${renderExcGroup(excBlocked,     'blocked_outlier')}
+          ${renderExcGroup(excUnknownId,   'unknown_asset_identity')}
+          ${renderExcGroup(excNoise,       'excluded_noise')}
         </div>`;
         })()}
 
@@ -4274,6 +4333,148 @@ const TaxUI = (() => {
     TaxEngine.saveTransactions(updated);
     S.taxResult = null;
     showTaxToast('🔄', 'Reclassified', `${affected.length} transactions set to "${newCategory}".`, 'success');
+    render();
+  }
+
+  // ── Auto-recovery bulk action handlers ──────────────────────────────────────
+  // Operate on the 5 RT sub-buckets produced by resolveUnknownAcquisitions().
+  // Each handler retrieves the relevant disposal rows, maps back to source
+  // transaction IDs, and patches the transaction store accordingly.
+
+  /** Helper — re-generate k4 report and return excluded disposals for one bucket. */
+  function getRecoveryBucketDisposals(bucketKey) {
+    const result = S.taxResult || getOrComputeTaxResult();
+    const k4 = TaxEngine.generateK4Report(result);
+    return ((k4.excludedByStatus || {})[bucketKey] || []);
+  }
+
+  /**
+   * Mark all spam_candidate disposals' source transactions as spam (zero value).
+   * The disposal's `id` field matches the originating transaction id.
+   */
+  function bulkResolveSpamCandidates() {
+    const disposals = getRecoveryBucketDisposals('spam_candidate');
+    if (!disposals.length) {
+      showTaxToast('ℹ️', 'Inga spam-kandidater', 'Inga transaktioner att lösa.', 'info');
+      return;
+    }
+    if (!confirm(`Markera ${disposals.length} transaktioner som spam (nollvärde)?\nDe behålls för revision men exkluderas permanent från K4.`)) return;
+    const ids = new Set(disposals.map(d => d.id).filter(Boolean));
+    const updated = TaxEngine.getTransactions().map(t =>
+      ids.has(t.id) ? { ...t,
+        category: 'spam',
+        priceSEKPerUnit: 0, costBasisSEK: 0,
+        priceSource: 'missing', priceConfidence: 'spam_zero',
+        needsReview: false, reviewReason: 'spam_token', userReviewed: true,
+      } : t
+    );
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    showTaxToast('🗑️', 'Spam löst', `${disposals.length} transaktioner markerade som spam och exkluderade.`, 'success');
+    render();
+  }
+
+  /**
+   * Reclassify inbound acquisition transactions for airdrop_candidate assets as AIRDROP.
+   * Patches RECEIVE / TRANSFER_IN events on the same asset symbol to category='airdrop'.
+   */
+  function bulkResolveAirdropCandidates() {
+    const disposals = getRecoveryBucketDisposals('airdrop_candidate');
+    if (!disposals.length) {
+      showTaxToast('ℹ️', 'Inga airdrop-kandidater', 'Inga transaktioner att omklassificera.', 'info');
+      return;
+    }
+    if (!confirm(`Omklassificera ${disposals.length} tokens ursprungliga inkomster som AIRDROP?\nKostnadsbas = FMV vid mottagning (om känd). Pipeline måste köras om efteråt.`)) return;
+    const allTxns = TaxEngine.getTransactions();
+    const affectedSymbols = new Set(disposals.map(d => d.assetSymbol).filter(Boolean));
+    let patchCount = 0;
+    const updated = allTxns.map(t => {
+      if (!affectedSymbols.has(t.assetSymbol)) return t;
+      // Only reclassify inbound events
+      const cat = (t.category || '').toLowerCase();
+      if (!['receive', 'transfer_in', 'airdrop'].includes(cat)) return t;
+      patchCount++;
+      return { ...t, category: 'airdrop', needsReview: false, userReviewed: true };
+    });
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    showTaxToast('📬', 'Airdrops klassificerade', `${patchCount} inkomna transaktioner omklassificerade som AIRDROP. Kör pipeline igen för att uppdatera K4.`, 'success');
+    render();
+  }
+
+  /**
+   * Create synthetic BUY transactions (opening balances) for opening_balance_candidate rows.
+   * Each synthetic BUY is dated 1 day before the earliest imported transaction.
+   * Quantity = disposal quantity; cost basis = disposal cost basis (or 0 if unknown).
+   * Rows with 0 cost are flagged needsReview so the user can fill in the actual price.
+   */
+  function bulkCreateOpeningBalances() {
+    const disposals = getRecoveryBucketDisposals('opening_balance_candidate');
+    if (!disposals.length) {
+      showTaxToast('ℹ️', 'Inga öppningssaldon', 'Inga öppningssaldokandidater hittades.', 'info');
+      return;
+    }
+    if (!confirm(
+      `Skapa ${disposals.length} syntetiska köptransaktioner (öppningssaldon)?\n\n` +
+      `Dessa representerar innehav som troligen ägdes innan importen startade.\n` +
+      `Kostnadsbas = känd anskaffningskostnad eller 0 kr (flaggas för granskning).`
+    )) return;
+
+    const allTxns = TaxEngine.getTransactions();
+    // Earliest imported date → synthetic purchase is 1 day prior
+    const dates = allTxns.map(t => t.date).filter(Boolean).sort();
+    const earliest = dates[0] || `${S.taxYear || new Date().getFullYear()}-01-01T00:00:00Z`;
+    const openingDate = new Date(new Date(earliest).getTime() - 86_400_000).toISOString();
+
+    // Deduplicate: one opening-balance BUY per asset symbol
+    const seen = new Set();
+    const newTxns = [];
+    for (const d of disposals) {
+      if (!d.assetSymbol || !d.amountSold) continue;
+      if (seen.has(d.assetSymbol)) continue;
+      seen.add(d.assetSymbol);
+      const qty      = d.amountSold;
+      const costSEK  = d.costBasisSEK != null ? d.costBasisSEK : 0;
+      const unitPx   = qty > 0 && costSEK > 0 ? costSEK / qty : 0;
+      // Look up a wallet/account from any existing transaction for that asset
+      const ref = allTxns.find(t => t.assetSymbol === d.assetSymbol);
+      newTxns.push({
+        id:              `ob_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        date:            openingDate,
+        category:        'buy',
+        assetSymbol:     d.assetSymbol,
+        amount:          qty,
+        priceSEKPerUnit: unitPx,
+        costBasisSEK:    costSEK,
+        priceSource:     unitPx > 0 ? 'manual' : 'missing',
+        priceConfidence: unitPx > 0 ? 'manual_entry' : 'unknown',
+        description:     'Öppningssaldo (auto-skapat) — innehav ägt innan import',
+        isOpeningBalance: true,
+        needsReview:     unitPx === 0,
+        reviewReason:    unitPx === 0 ? 'opening_balance_price_unknown' : null,
+        userReviewed:    false,
+        wallet:          ref?.wallet     || 'unknown',
+        accountId:       ref?.accountId  || null,
+      });
+    }
+
+    if (!newTxns.length) {
+      showTaxToast('⚠️', 'Inga rader skapade', 'Kandidaterna saknar symbol eller belopp.', 'warning');
+      return;
+    }
+
+    TaxEngine.saveTransactions([...allTxns, ...newTxns]);
+    S.taxResult = null;
+    const withPrice    = newTxns.filter(t => t.priceSEKPerUnit > 0).length;
+    const withoutPrice = newTxns.length - withPrice;
+    showTaxToast(
+      '📅',
+      `${newTxns.length} öppningssaldon skapade`,
+      withoutPrice > 0
+        ? `${withoutPrice} saknar pris — granska och fyll i kostnadsbas manuellt`
+        : 'Alla har uppskattad kostnadsbas. Kör pipeline igen.',
+      withoutPrice > 0 ? 'warning' : 'success'
+    );
     render();
   }
 
@@ -4967,6 +5168,7 @@ const TaxUI = (() => {
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
     bulkAutoInfer, resolveUnknownTokens, toggleReviewGroup,
+    bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances,
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,

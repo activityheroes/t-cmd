@@ -4066,7 +4066,7 @@ const TaxEngine = (() => {
       // Spam check (fast path — token-level signals)
       const fakeT = { assetSymbol: sym, category: CAT.RECEIVE, amount: qty,
                       notes: '', priceSource: null, coinGeckoId: null };
-      if (isLikelySpamToken(fakeT) || isLikelySpamToken(inboundTx || {})) {
+      if (isLikelySpamToken(fakeT) || isLikelySpamToken(inboundTxn || {})) {
         d.resolutionType       = RT.SPAM;
         d.resolutionConfidence = 'high';
         d.resolutionNote = `Spam-airdrop detekterad: ${sym} matchar spam-mönster (inga köp, okänd token). `

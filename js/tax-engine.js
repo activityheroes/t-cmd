@@ -1321,6 +1321,97 @@ const TaxEngine = (() => {
     OUTLIER_SUSPECT:  'outlier_suspect',      // Value detected as anomalous / corrupt import artifact
   };
 
+  // ── Trusted price sources for final K4 rows ─────────────────────────────
+  // Only these sources may produce a 'final' valuation row that enters K4.
+  // All others produce 'estimated_reviewable' (excluded from K4 totals/PDF).
+  const TRUSTED_K4_PRICE_SOURCES = new Set([
+    PS.TRADE_EXACT,       // most reliable — direct from exchange
+    PS.SWAP_IMPLIED,      // Level-2 pricing chain: market price of received leg
+    PS.MARKET_API,        // CoinGecko historical daily
+    PS.DEX_MARKET,        // GeckoTerminal DEX OHLCV
+    PS.STABLE_HIST_FX,    // stablecoin × verified historical FX
+    PS.STABLE_APPROX,     // stablecoin × hardcoded FX (very high confidence)
+    PS.MANUAL,            // explicitly user-confirmed
+  ]);
+
+  // Maps a transaction's priceSource (set by the pricing chain) and the optional
+  // swap-at-cost proceedsSource (set by computeTaxYear fallback) to the row's
+  // ValuationStatus and whether it is excluded from K4.
+  //
+  // ValuationStatus hierarchy (fail-closed):
+  //   'final'                 → eligible for K4; trusted price from market data
+  //   'estimated_reviewable'  → excluded from K4; price was inferred or fallback
+  //   'missing_history'       → excluded from K4; sold more than acquired
+  //   'blocked_outlier'       → excluded from K4; outlier/corruption guard fired
+  //   'unknown_asset_identity'→ excluded from K4; mint / decimals unresolved
+  //   'excluded_noise'        → excluded from K4; spam / dust / ATA rent
+  function deriveProceedsValuation(t, swapProceedsSource) {
+    // ── Swap-at-cost fallback path ────────────────────────────────────────
+    // These sources are set by computeTaxYear after the pricing chain failed.
+    // They are NEVER trusted enough for a final K4 declaration.
+    if (swapProceedsSource === 'swap_outlier_blocked') {
+      return {
+        valuationStatus: 'blocked_outlier',
+        excludeFromK4:   true,
+        reviewReasons:   ['Swap proceeds blocked: implied unit price outlier (likely data corruption in stored amount)'],
+      };
+    }
+    if (swapProceedsSource === 'swap_at_cost' || swapProceedsSource === 'swap_received_market') {
+      return {
+        valuationStatus: 'estimated_reviewable',
+        excludeFromK4:   true,
+        reviewReasons:   [
+          swapProceedsSource === 'swap_at_cost'
+            ? 'Swap proceeds estimated from avg cost of received asset — not a market price'
+            : 'Swap proceeds estimated from cached market price (fallback path) — not from real-time Level-2 pricing',
+        ],
+      };
+    }
+
+    // ── Pricing chain path ────────────────────────────────────────────────
+    const ps = t.priceSource;
+    if (!ps || ps === PS.MISSING) {
+      return {
+        valuationStatus: 'estimated_reviewable',
+        excludeFromK4:   true,
+        reviewReasons:   ['No trusted price source — all pricing chain passes failed'],
+      };
+    }
+    if (ps === PS.OUTLIER_SUSPECT) {
+      return {
+        valuationStatus: 'blocked_outlier',
+        excludeFromK4:   true,
+        reviewReasons:   ['Price source flagged as outlier / corrupt import artefact'],
+      };
+    }
+    if (ps === PS.PAIR_DERIVED || ps === PS.BACK_DERIVED) {
+      return {
+        valuationStatus: 'estimated_reviewable',
+        excludeFromK4:   true,
+        reviewReasons:   [`Proceeds derived indirectly (${ps}) — not a direct market price`],
+      };
+    }
+    if (TRUSTED_K4_PRICE_SOURCES.has(ps)) {
+      return { valuationStatus: 'final', excludeFromK4: false, reviewReasons: [] };
+    }
+    return {
+      valuationStatus: 'estimated_reviewable',
+      excludeFromK4:   true,
+      reviewReasons:   [`Unrecognised price source '${ps}' — treated as unverified`],
+    };
+  }
+
+  // K4 eligibility gate — the single source of truth for what enters K4.
+  // Any disposal that fails this check is routed to Review, never to K4.
+  function isK4Eligible(d) {
+    return (
+      d.valuationStatus === 'final'
+      && d.excludeFromK4 !== true
+      && d.proceedsSEK  != null
+      && d.costBasisSEK != null
+    );
+  }
+
   // Price Confidence tiers — drive smart triage in getReviewIssues.
   // Replaces the old binary priced/missing with five distinct tiers:
   //   SPAM_ZERO       → auto-detected spam; zero value; not shown in K4 review
@@ -2903,9 +2994,39 @@ const TaxEngine = (() => {
         };
       }
 
-      // Reduce holdings (floor at 0)
+      // Reduce holdings (floor at 0) — always use internal costBasis for inventory math
       h.totalQty     = Math.max(0, h.totalQty - safeQty);
       h.totalCostSEK = Math.max(0, h.totalCostSEK - costBasis);
+
+      // ── Fail-closed reporting ──────────────────────────────────────────────
+      // For missing-history disposals we NULL the declared cost/gain rather than
+      // showing 0 kr. A zero cost basis would declare the full proceeds as a gain,
+      // which is the Skatteverket default ONLY when the user explicitly acknowledges
+      // the missing history and files anyway. Here we instead route to Review.
+      const hasMissingHistory = unknownAcq && !STABLES.has(sym);
+      const reportedCostBasis = hasMissingHistory ? null : costBasis;
+      const reportedGainLoss  = hasMissingHistory ? null : gainLoss;
+
+      // Base valuation status (may be overridden by extraFields from TRADE/SELL)
+      const baseValuationStatus = hasMissingHistory ? 'missing_history' : 'final';
+      const baseExcludeFromK4   = hasMissingHistory;
+      const baseReviewReasons   = hasMissingHistory
+        ? [`Missing acquisition history for ${sym}: sold ${safeQty.toFixed(6)} but only ${available.toFixed(6)} imported`]
+        : [];
+
+      // Merge with caller-supplied valuation (extraFields wins for status/excludeFromK4
+      // but missing_history always forces exclude — never let unknown acquisitions into K4)
+      const callerStatus    = extraFields.valuationStatus;
+      const callerExclude   = extraFields.excludeFromK4;
+      const callerReasons   = extraFields.reviewReasons || [];
+      const finalStatus     = hasMissingHistory
+        ? 'missing_history'
+        : (callerStatus     || baseValuationStatus);
+      const finalExclude    = hasMissingHistory || (callerExclude === true);
+      const finalReasons    = [...baseReviewReasons, ...callerReasons];
+
+      // Strip valuation fields from extraFields so they don't double-override
+      const { valuationStatus: _vs, excludeFromK4: _ex, reviewReasons: _rr, ...restExtra } = extraFields;
 
       return {
         date: t.date,
@@ -2914,15 +3035,18 @@ const TaxEngine = (() => {
         amountSold: safeQty,
         proceedsSEK,
         feeSEK,
-        costBasisSEK: costBasis,
-        gainLossSEK: gainLoss,
-        avgCostAtSale: avg(sym),
+        costBasisSEK:      reportedCostBasis,
+        gainLossSEK:       reportedGainLoss,
+        avgCostAtSale:     avg(sym),
         id: t.id,
-        needsReview: t.needsReview || unknownAcq,
+        needsReview:       t.needsReview || unknownAcq || finalExclude,
         unknownAcquisition: unknownAcq,
         zeroCostReason,
         acquisitionDebug,
-        ...extraFields,
+        valuationStatus:   finalStatus,
+        excludeFromK4:     finalExclude,
+        reviewReasons:     finalReasons,
+        ...restExtra,
       };
     }
 
@@ -2995,7 +3119,11 @@ const TaxEngine = (() => {
 
         // ── Disposal events ─────────────────────────────────
         case CAT.SELL: {
-          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK);
+          const sellValuation = deriveProceedsValuation(t, null);
+          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
+            contractAddress: t.contractAddress || null,
+            ...sellValuation,
+          });
           if (inYear) disposals.push(d);
           break;
         }
@@ -3003,7 +3131,11 @@ const TaxEngine = (() => {
         case CAT.SEND: {
           // Unmatched SEND that wasn't caught as internal transfer
           // — treat as disposal (possible gift/donation, taxable in Sweden)
-          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK);
+          const sendValuation = deriveProceedsValuation(t, null);
+          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
+            contractAddress: t.contractAddress || null,
+            ...sendValuation,
+          });
           if (inYear) disposals.push(d);
           break;
         }
@@ -3100,30 +3232,40 @@ const TaxEngine = (() => {
           }
 
           // Out side: disposal of `sym`
+          // ── Determine valuation status for this trade row ─────────────────
+          // Swap-at-cost / outlier fallback always excludes from K4.
+          // Pricing-chain sourced (proceedsSEK came from applyPricingChain) uses
+          // deriveProceedsValuation which checks t.priceSource.
+          const tradeSwapSource = swapOutlier ? 'swap_outlier_blocked'
+            : swapAtCost ? swapProceedsSource
+            : null;  // null = use priceSource from pricing chain
+          const tradeValuation = deriveProceedsValuation(t, tradeSwapSource);
+
+          // Also null out proceedsSEK for blocked outliers so nothing enters K4
+          const finalTradeProceedsSEK = swapOutlier ? null : effectiveProceedsSEK;
+
           const tradeExtra = {
             isTrade: true, inAsset: inSym, inAmount: inAmt,
             contractAddress: t.contractAddress || null,
+            ...tradeValuation,
           };
           if (swapAtCost) {
             tradeExtra.proceedsSource      = swapProceedsSource;
             tradeExtra.swapAtCostEstimate  = effectiveProceedsSEK;
-            // Keep needsReview = true so these show in the review queue
-            tradeExtra.needsReview = true;
           }
           if (swapOutlier) {
-            tradeExtra.needsReview    = true;
-            tradeExtra.reviewReason   = 'outlier';
             tradeExtra.proceedsSource = 'swap_outlier_blocked';
             tradeExtra.notes = (t.notes ? t.notes + ' | ' : '')
               + `Beräknade intäkter blockerade: implicerat enhetspris extremt högt för icke-major tillgång (trolig datakorruption i inAmount)`;
           }
-          const d = recordDisposal(t, sym, t.amount, effectiveProceedsSEK, feeSEK, tradeExtra);
+          const d = recordDisposal(t, sym, t.amount, finalTradeProceedsSEK, feeSEK, tradeExtra);
           if (inYear) disposals.push(d);
           // In side: acquisition of `inSym` at cost = FMV of what was given up
+          // Use effectiveProceedsSEK (not finalTrade) so inventory is consistent
           if (inSym && inAmt > 0) {
             ensure(inSym);
             holdings[inSym].totalQty     += inAmt;
-            holdings[inSym].totalCostSEK += effectiveProceedsSEK; // FMV of out-side = cost of in-side
+            holdings[inSym].totalCostSEK += (effectiveProceedsSEK || 0);
           }
           break;
         }
@@ -3300,9 +3442,16 @@ const TaxEngine = (() => {
   function generateK4Report(result, userInfo = {}) {
     const { disposals, year } = result;
 
-    // Group by asset, then by gain/loss side
+    // ── K4 eligibility gate ────────────────────────────────────────────────
+    // Only 'final' rows with verified proceeds AND cost basis enter K4.
+    // All other rows (estimated, missing history, blocked outlier) are
+    // separated so they never inflate declared totals.
+    const k4Disposals      = disposals.filter(d => isK4Eligible(d));
+    const excludedDisposals = disposals.filter(d => !isK4Eligible(d));
+
+    // Group by asset, then by gain/loss side — K4 rows only
     const assetMap = {};
-    for (const d of disposals) {
+    for (const d of k4Disposals) {
       if (!assetMap[d.assetSymbol]) assetMap[d.assetSymbol] = { gains: [], losses: [] };
       if (d.gainLossSEK >= 0) assetMap[d.assetSymbol].gains.push(d);
       else assetMap[d.assetSymbol].losses.push(d);
@@ -3380,10 +3529,21 @@ const TaxEngine = (() => {
     // Suspicious zero-cost rows: high-value disposals with unknown acquisition
     const suspiciousZeroCost = querySuspiciousZeroCost(result);
 
+    // Group excluded disposals by status for the UI review panel
+    const excludedByStatus = {};
+    for (const d of excludedDisposals) {
+      const s = d.valuationStatus || 'estimated_reviewable';
+      (excludedByStatus[s] = excludedByStatus[s] || []).push(d);
+    }
+
     return {
       k4Rows, totalGains, totalLosses, year, userInfo,
-      formsNeeded: Math.max(1, Math.ceil(k4Rows.length / ROWS_PER_K4_FORM)),
+      formsNeeded:      Math.max(1, Math.ceil(k4Rows.length / ROWS_PER_K4_FORM)),
       suspiciousZeroCost,
+      excludedDisposals,   // full list for debug query
+      excludedByStatus,    // grouped for UI panels
+      excludedCount:       excludedDisposals.length,
+      k4DisposalCount:     k4Disposals.length,
     };
   }
 

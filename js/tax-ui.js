@@ -455,13 +455,18 @@ const TaxUI = (() => {
           <div class="tax-section-header" style="flex-wrap:wrap;gap:6px">
             <h2>Mina tillgångar</h2>
             <!-- Filter toggle -->
-            <div style="display:flex;gap:4px;align-items:center">
+            <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+              <button class="tax-btn tax-btn-sm ${_portFilter === 'valued' ? 'tax-btn-primary' : 'tax-btn-ghost'}"
+                data-port-filter="valued" onclick="TaxUI.setPortFilter('valued')"
+                title="Visa bara tokens som finns i plånboken NU och har ett känt marknadsvärde">
+                📍 Nuvarande
+              </button>
               <button class="tax-btn tax-btn-sm ${_portFilter === 'all' ? 'tax-btn-primary' : 'tax-btn-ghost'}"
-                data-port-filter="all" onclick="TaxUI.setPortFilter('all')" title="Visa alla nuvarande innehav">
-                Alla nuvarande
+                data-port-filter="all" onclick="TaxUI.setPortFilter('all')" title="Visa alla innehav med positivt saldo">
+                Alla innehav
               </button>
               <button class="tax-btn tax-btn-sm ${_portFilter === 'priced' ? 'tax-btn-primary' : 'tax-btn-ghost'}"
-                data-port-filter="priced" onclick="TaxUI.setPortFilter('priced')" title="Visa bara tokens med känt marknadspris">
+                data-port-filter="priced" onclick="TaxUI.setPortFilter('priced')" title="Visa tokens med känt pris (inkl. noll-saldo)">
                 Med pris
               </button>
             </div>
@@ -491,7 +496,9 @@ const TaxUI = (() => {
                 <button class="tax-btn tax-btn-sm tax-btn-ghost"
                   onclick="TaxUI.toggleSmallBalances()">Visa tokens med litet saldo ▾</button>
                 <span style="font-size:10px;color:#475569">
-                  ${sortedHoldings.length} tillgångar · ${sortedHoldings.filter(h => h.currentValueSEK > 0).length} med känt marknadsvärde
+                  ${sortedHoldings.filter(h => (h.currentValueSEK || 0) > 0).length} tillgångar med värde
+                  · ${sortedHoldings.length} totalt importerade
+                  ${_portFilter !== 'all' ? `<button class="tax-btn tax-btn-sm tax-btn-ghost" style="padding:0 6px;height:18px;font-size:9px;margin-left:4px" onclick="TaxUI.setPortFilter('all')">Visa alla →</button>` : ''}
                 </span>
               </div>`
       }
@@ -528,9 +535,11 @@ const TaxUI = (() => {
     const assetExplorerName = solscanTokenUrl ? 'Solscan' : 'CoinGecko';
     // 3-dot menu id (unique per row)
     const menuId = `asset-menu-${displaySym.replace(/[^a-z0-9]/gi, '_')}`;
-    const hasPrice = (h.currentValueSEK || 0) > 0 || (h.currentPriceSEK || 0) > 0;
-    const hideRow  = portFilter === 'priced' && !hasPrice;
-    return `<tr data-has-price="${hasPrice ? '1' : '0'}" style="${hideRow ? 'display:none' : ''}">
+    const hasPrice  = (h.currentValueSEK || 0) > 0 || (h.currentPriceSEK || 0) > 0;
+    const hasValue  = (h.currentValueSEK || 0) > 0;
+    const hideRow   = (portFilter === 'priced' && !hasPrice)
+                   || (portFilter === 'valued' && !hasValue);
+    return `<tr data-has-price="${hasPrice ? '1' : '0'}" data-has-value="${hasValue ? '1' : '0'}" style="${hideRow ? 'display:none' : ''}">
       <td>
         <div class="tax-asset-cell">
           <img class="tax-alloc-icon" src="${icon}"
@@ -1021,16 +1030,19 @@ const TaxUI = (() => {
   }
 
   // ── Portfolio filter state ──────────────────────────────────
-  // 'all'    → show all tokens with remaining computed quantity
-  // 'priced' → show only tokens with a known current market price
-  let _portFilter = 'all';
+  // 'valued' → (default) only tokens with positive current wallet value
+  // 'all'    → all tokens with remaining computed quantity
+  // 'priced' → tokens with any known price (incl. no-value holdings)
+  let _portFilter = 'valued';
   function setPortFilter(mode) {
     _portFilter = mode;
     const tbody = document.getElementById('tax-assets-tbody');
     if (!tbody) return;
     tbody.querySelectorAll('tr[data-has-price]').forEach(row => {
       const hasPrice = row.dataset.hasPrice === '1';
-      if (mode === 'priced') row.style.display = hasPrice ? '' : 'none';
+      const hasValue = row.dataset.hasValue === '1';
+      if (mode === 'priced')      row.style.display = hasPrice ? '' : 'none';
+      else if (mode === 'valued') row.style.display = hasValue ? '' : 'none';
       else row.style.display = '';
     });
     // Update button active state
@@ -1153,15 +1165,22 @@ const TaxUI = (() => {
                 </tr>
               </thead>
               <tbody>
-                ${engineAcqs.map(a => `
+                ${engineAcqs.map(a => {
+                  const isSwapAcq = a.category === 'trade_in';
+                  const costLabel = a.costSEK != null
+                    ? TaxEngine.formatSEK(a.costSEK) + (isSwapAcq
+                        ? ' <span title="Kostnadsbas tilldelad från byte, ej direkt SEK-investering" style="color:#f59e0b;font-size:8px">via swap ⓘ</span>'
+                        : '')
+                    : '—';
+                  return `
                 <tr style="border-bottom:1px solid rgba(148,163,184,.04)">
-                  <td style="padding:4px 8px;color:#64748b;font-family:monospace">${fmtDate(a.date)}</td>
+                  <td style="padding:4px 8px;color:#64748b;font-family:monospace;white-space:nowrap">${fmtDate(a.date)}</td>
                   <td style="padding:4px 8px;color:#94a3b8">${catLabel[a.category] || a.category}</td>
                   <td style="padding:4px 8px;text-align:right;color:#e2e8f0;font-family:monospace">${fmtAmt(a.amount)}</td>
-                  <td style="padding:4px 8px;text-align:right;color:#94a3b8;font-family:monospace">${a.costSEK != null ? TaxEngine.formatSEK(a.costSEK) : '—'}</td>
+                  <td style="padding:4px 8px;text-align:right;color:#94a3b8;font-family:monospace">${costLabel}</td>
                   <td style="padding:4px 8px;color:#64748b;font-family:monospace;font-size:9px">${a.priceSource || '—'}</td>
                   <td style="padding:4px 8px;text-align:center">${a.isTrusted ? '<span style="color:#4ade80">✓</span>' : '<span style="color:#f59e0b">⚠</span>'}</td>
-                </tr>`).join('')}
+                </tr>`; }).join('')}
               </tbody>
             </table>
           </div>`}
@@ -1181,7 +1200,7 @@ const TaxUI = (() => {
                   <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">KB</th>
                   <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">Vinst/Förlust</th>
                   <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Status</th>
-                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Förklaring</th>
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Matematik ▾</th>
                 </tr>
               </thead>
               <tbody>
@@ -1189,16 +1208,28 @@ const TaxUI = (() => {
                   const gl = d.gainLossSEK;
                   const statusColor = d.valuationStatus === 'final' ? '#4ade80'
                     : d.valuationStatus === 'missing_history' ? '#f87171' : '#fbbf24';
-                  const why = buildDisposalExplanation(d);
+                  const statusLabel = {
+                    final: '✓ Klar', missing_history: '⛔ Saknad KB', estimated_reviewable: '⚠ Uppskattad',
+                    blocked_outlier: '🚫 Blockerad', unknown_asset_identity: '❓ Okänd',
+                  }[d.valuationStatus] || d.valuationStatus;
+                  const mathLines = buildDisposalFullExplanation(d);
+                  const mathId = `math-${d.id || Math.random().toString(36).slice(2)}`;
                   return `
-                <tr style="border-bottom:1px solid rgba(148,163,184,.04)">
-                  <td style="padding:4px 8px;color:#64748b;font-family:monospace">${fmtDate(d.date)}</td>
+                <tr style="border-bottom:1px solid rgba(148,163,184,.04);${d.valuationStatus !== 'final' ? 'background:rgba(251,191,36,.03)' : ''}">
+                  <td style="padding:4px 8px;color:#64748b;font-family:monospace;white-space:nowrap">${fmtDate(d.date)}</td>
                   <td style="padding:4px 8px;text-align:right;color:#e2e8f0;font-family:monospace">${fmtAmt(d.amountSold)}</td>
                   <td style="padding:4px 8px;text-align:right;font-family:monospace;color:#94a3b8">${d.proceedsSEK != null ? TaxEngine.formatSEK(d.proceedsSEK) : '—'}</td>
                   <td style="padding:4px 8px;text-align:right;font-family:monospace;color:#94a3b8">${d.costBasisSEK != null ? TaxEngine.formatSEK(d.costBasisSEK) : '—'}</td>
                   <td style="padding:4px 8px;text-align:right;font-family:monospace;color:${gl == null ? '#475569' : gl >= 0 ? '#4ade80' : '#f87171'}">${gl != null ? TaxEngine.formatSEK(gl) : '—'}</td>
-                  <td style="padding:4px 8px"><span style="font-size:9px;color:${statusColor}">${d.valuationStatus || '—'}</span></td>
-                  <td style="padding:4px 8px;font-size:9px;color:#64748b;max-width:200px">${why}</td>
+                  <td style="padding:4px 8px;white-space:nowrap"><span style="font-size:9px;color:${statusColor}">${statusLabel}</span></td>
+                  <td style="padding:4px 8px;font-size:9px;max-width:240px">
+                    <details>
+                      <summary style="cursor:pointer;color:#475569;list-style:none;user-select:none">Visa math ▾</summary>
+                      <div id="${mathId}" style="margin-top:4px;padding:6px 8px;background:rgba(0,0,0,.3);border-radius:4px;border:1px solid rgba(148,163,184,.08);color:#64748b;line-height:1.7">
+                        ${mathLines.map(l => `<div>${l}</div>`).join('')}
+                      </div>
+                    </details>
+                  </td>
                 </tr>`;
                 }).join('')}
               </tbody>
@@ -1229,17 +1260,14 @@ const TaxUI = (() => {
     if (el) el.remove();
   }
 
-  // Build a short plain-language explanation for a disposal row
+  // Build a short plain-language explanation for a disposal row (table view)
   function buildDisposalExplanation(d) {
     const parts = [];
-    // Event type
     const evtMap = { trade:'Byte/swap', sell:'Försäljning', send:'Skickad', transfer_out:'Transfer ut',
       bridge_out:'Bridge ut', income:'Inkomst', staking:'Staking-utdelning' };
     const evtType = (d.eventType && evtMap[d.eventType]) || (d.proceedsSource ? 'Avyttring' : '—');
     parts.push(evtType);
-    // Proceeds source
     if (d.proceedsSource) parts.push(`Intäktskälla: ${d.proceedsSource}`);
-    // Cost basis source
     if (d.avgCostAtSale > 0) parts.push(`Avg.kostnad: ${TaxEngine.formatSEK(d.avgCostAtSale)}/st`);
     if (d.zeroCostReason) {
       const zMap = {
@@ -1250,9 +1278,78 @@ const TaxUI = (() => {
       };
       parts.push(zMap[d.zeroCostReason] || d.zeroCostReason);
     }
-    // Review reasons (first one)
     if (d.reviewReasons?.length) parts.push(d.reviewReasons[0]);
     return parts.slice(0, 3).join(' · ');
+  }
+
+  // Build a FULL plain-language math breakdown for a disposal (audit modal)
+  function buildDisposalFullExplanation(d) {
+    const fmt   = v => TaxEngine.formatSEK(v);
+    const fmtQ  = (v, sym) => `${TaxEngine.formatCrypto(v, 6)} ${sym || ''}`.trim();
+    const lines = [];
+
+    // ── Event type
+    const evtMap = { trade:'Byte/swap', sell:'Försäljning', send:'Skickad',
+      transfer_out:'Transfer ut', bridge_out:'Bridge ut' };
+    const evtType = (d.eventType && evtMap[d.eventType]) || 'Avyttring';
+    if (d.eventSubtype === 'burn') {
+      lines.push('🔥 Bränd/incinererad — intäkter satta till 0');
+    } else {
+      lines.push(`Händelse: ${evtType}`);
+    }
+
+    // ── Proceeds math for swaps
+    if (d.isTrade && d.inAsset && d.inAmount > 0) {
+      const inAsset = d.inAsset;
+      const inAmt   = d.inAmount;
+      if (d.proceedsSEK != null) {
+        const impliedPerUnit = inAmt > 0 ? d.proceedsSEK / inAmt : 0;
+        lines.push(`Mottaget: ${fmtQ(inAmt, inAsset)}`);
+        lines.push(`Intäkt = ${fmtQ(inAmt, inAsset)} × ${fmt(impliedPerUnit)}/${inAsset} = ${fmt(d.proceedsSEK)}`);
+      } else {
+        lines.push(`Mottaget: ${fmtQ(inAmt, inAsset)} (intäkt ej beräknad)`);
+      }
+    } else if (d.proceedsSEK != null) {
+      lines.push(`Intäkt: ${fmt(d.proceedsSEK)}`);
+    }
+
+    // ── Cost basis math
+    if (d.amountSold > 0 && d.costBasisSEK != null) {
+      const cbPerUnit = d.amountSold > 0 ? d.costBasisSEK / d.amountSold : 0;
+      const avgLabel  = d.zeroCostReason
+        ? `(${d.zeroCostReason === 'acquisition_untrusted' ? 'ej betrodd källa' : d.zeroCostReason})`
+        : (d.avgCostAtSale > 0 ? `Avg-kostnad ${fmt(d.avgCostAtSale)}/st` : '');
+      lines.push(`KB = ${fmtQ(d.amountSold, d.assetSymbol)} × ${fmt(cbPerUnit)}/st ${avgLabel} = ${fmt(d.costBasisSEK)}`);
+    } else if (d.zeroCostReason) {
+      const zMap = { acquisition_missing:'Ingen anskaffningshistorik importerad',
+        acquisition_partial:'Sålde mer än importerat', acquisition_untrusted:'Ej betrodd priskälla',
+        confirmed_zero:'Anskaffat till 0 kr (airdrop)' };
+      lines.push(`KB: ${zMap[d.zeroCostReason] || d.zeroCostReason}`);
+    }
+
+    // ── Gain/loss
+    if (d.gainLossSEK != null) {
+      const gl = d.gainLossSEK;
+      lines.push(`Vinst/Förlust = ${fmt(d.proceedsSEK || 0)} − ${fmt(d.costBasisSEK || 0)} = ${gl >= 0 ? '+' : ''}${fmt(gl)}`);
+    }
+
+    // ── Prissource + confidence
+    if (d.priceSource)    lines.push(`Priskälla: ${d.priceSource}`);
+    if (d.proceedsSource && d.proceedsSource !== d.priceSource)
+      lines.push(`Intäktskälla: ${d.proceedsSource}`);
+
+    // ── Acquisition source context
+    const acqSrc = d.proceedsSource || d.priceSource || '';
+    if (acqSrc.includes('swap') || acqSrc.includes('SWAP') || d.isTrade) {
+      lines.push('ℹ Kostnadsbas härledd från tidigare swaps — ej direkt SEK-insättning');
+    }
+
+    // ── Review reasons
+    if (d.reviewReasons?.length) {
+      lines.push(`⚠ ${d.reviewReasons.slice(0, 2).join('; ')}`);
+    }
+
+    return lines;
   }
 
   // ════════════════════════════════════════════════════════════

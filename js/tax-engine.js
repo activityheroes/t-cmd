@@ -3287,14 +3287,29 @@ const TaxEngine = (() => {
         }
 
         case CAT.SEND: {
-          // Unmatched SEND that wasn't caught as internal transfer
-          // — treat as disposal (possible gift/donation, taxable in Sweden)
-          const sendValuation = deriveProceedsValuation(t, null);
-          const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
-            contractAddress: t.contractAddress || null, ...sendValuation,
-          });
-          applyAnomalyCheck(d, t, sym);
-          if (inYear) disposals.push(d);
+          if (t.burnDisposal) {
+            // ── Burn / incinerator: proceeds forced to 0 ──────────
+            // Tokens sent to a known burn program are permanently destroyed.
+            // Under genomsnittsmetoden the disposal is still taxable (proceeds=0,
+            // loss = costBasis), but we must NEVER assign fake swap proceeds.
+            const d = recordDisposal(t, sym, t.amount, 0, feeSEK, {
+              contractAddress: t.contractAddress || null,
+              valuationStatus : 'final',
+              excludeFromK4   : false,
+              reviewReasons   : ['burn_disposal: proceeds forced to 0 (incinerator/burn program)'],
+              eventSubtype    : 'burn',
+            });
+            if (inYear) disposals.push(d);
+          } else {
+            // Unmatched SEND that wasn't caught as internal transfer
+            // — treat as disposal (possible gift/donation, taxable in Sweden)
+            const sendValuation = deriveProceedsValuation(t, null);
+            const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
+              contractAddress: t.contractAddress || null, ...sendValuation,
+            });
+            applyAnomalyCheck(d, t, sym);
+            if (inYear) disposals.push(d);
+          }
           break;
         }
 
@@ -4462,6 +4477,16 @@ const TaxEngine = (() => {
   // Wrapped SOL mint address (economically identical to SOL)
   const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
+  // Known Solana burn / incinerator destinations.
+  // Tokens sent here are permanently destroyed — NOT a market sale.
+  // Proceeds must be treated as 0; any gain/loss = -costBasis (pure loss).
+  const SOLANA_BURN_PROGRAMS = new Set([
+    '1nc1nerator11111111111111111111111111111111',   // Sol Incinerator (primary)
+    'BurnrpeBdYzAhRoNnjNd5MPqxJNfpsmqoE3njXVRm5xC', // BurnR protocol
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  // SPL token program (burn ix dest)
+    '11111111111111111111111111111111',              // System null (closed ATAs)
+  ]);
+
   // DEX names from Helius tx.source field
   const HELIUS_DEX_MAP = {
     JUPITER: 'Jupiter', JUPITER_DCA: 'Jupiter DCA',
@@ -4527,8 +4552,9 @@ const TaxEngine = (() => {
       // Skip WSOL entirely — its economic value is already in netSol
       // from nativeTransfers (the SOL that was wrapped/unwrapped).
       // Skipping WSOL prevents fake "buy WSOL" / "sell WSOL" entries.
-      const tokenNet = {};
-      const wsolSeen = { in: 0, out: 0 };
+      const tokenNet   = {};
+      const wsolSeen   = { in: 0, out: 0 };
+      const burnedMints = new Set(); // mints sent directly to a known burn program
       for (const t of (tx.tokenTransfers || [])) {
         const mint = t.mint;
         if (!mint) continue;
@@ -4538,8 +4564,14 @@ const TaxEngine = (() => {
           if (t.toUserAccount   === walletAddr) wsolSeen.in  += (t.tokenAmount || 0);
           continue;
         }
-        if (t.fromUserAccount === walletAddr) tokenNet[mint] = (tokenNet[mint] || 0) - (t.tokenAmount || 0);
-        if (t.toUserAccount   === walletAddr) tokenNet[mint] = (tokenNet[mint] || 0) + (t.tokenAmount || 0);
+        if (t.fromUserAccount === walletAddr) {
+          tokenNet[mint] = (tokenNet[mint] || 0) - (t.tokenAmount || 0);
+          // If this token went directly to a known burn program, mark it
+          if (t.toUserAccount && SOLANA_BURN_PROGRAMS.has(t.toUserAccount)) {
+            burnedMints.add(mint);
+          }
+        }
+        if (t.toUserAccount === walletAddr) tokenNet[mint] = (tokenNet[mint] || 0) + (t.tokenAmount || 0);
       }
 
       const DUST = 1e-9;
@@ -4570,6 +4602,8 @@ const TaxEngine = (() => {
         tokenNet         : Object.fromEntries(
           [...tokenIn, ...tokenOut].map(([m, v]) => [msym(m), +v.toFixed(9)])
         ),
+        burnedMints: burnedMints.size > 0
+          ? [...burnedMints].map(m => msym(m)) : undefined,
       };
 
       // ── Step 4: Classify event shape ────────────────────────
@@ -4679,10 +4713,25 @@ const TaxEngine = (() => {
         }, accountId, 'solana_wallet');
       }
 
-      // Case H: Pure token send (bridge out / unmatched leg)
+      // Case H: Pure token send (bridge out / unmatched leg / burn)
       if (tokenOut.length > 0 && tokenIn.length === 0 && !hasSolIn) {
         const [outMint, outAmt] = biggest(tokenOut);
         const outSym = msym(outMint);
+        const isBurn = burnedMints.has(outMint);
+        if (isBurn) {
+          // Tokens sent to a known burn/incinerator program.
+          // Classified as SEND with burnDisposal=true so the tax engine
+          // can set proceeds=0 (loss = costBasis only, no fake market gain).
+          return normalizeTransaction({
+            txHash: sig, date: ts, category: CAT.SEND,
+            assetSymbol: outSym, amount: Math.abs(outAmt),
+            feeSEK, contractAddress: outMint,
+            needsReview: false,
+            burnDisposal: true,
+            notes: mkNotes(`Burn/incinerate: ${Math.abs(outAmt).toLocaleString()} ${outSym} → burn program`),
+            _reconstruction: recon,
+          }, accountId, 'solana_wallet');
+        }
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.SEND,
           assetSymbol: outSym, amount: Math.abs(outAmt),

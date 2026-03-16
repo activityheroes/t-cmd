@@ -3577,133 +3577,236 @@ const TaxUI = (() => {
         </div>`;
         })()}
 
-        <!-- Excluded from K4 panel — fail-closed architecture -->
+        <!-- ── Volume ≠ Income clarification banner ─────────────────────── -->
+        ${(() => {
+          const estVol = excEstimated.reduce((s, d) => s + (d.proceedsSEK || 0), 0);
+          if (estVol < 50_000) return '';
+          const estNetGL = excEstimated.reduce((s, d) => s + ((d.proceedsSEK || 0) - (d.costBasisSEK || 0)), 0);
+          return `
+        <div style="margin-bottom:14px;padding:12px 16px;border-radius:10px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.2)">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:18px;flex-shrink:0">💡</span>
+            <div>
+              <div style="font-size:12px;font-weight:700;color:#818cf8;margin-bottom:4px">De stora siffrorna är handelsvolym — inte inkomst</div>
+              <div style="font-size:11px;color:#94a3b8;line-height:1.6">
+                ${excEstimated.length} avyttringar med uppskattade priser visar ett <strong style="color:#e2e8f0">försäljningspris på ${TaxEngine.formatSEK(estVol)}</strong>.
+                Det är total handelsvolym — inte skattemässig inkomst.
+                Vinsten beräknas som försäljningspris <em>minus</em> anskaffningsvärde.
+                Uppskattad nettovinst/-förlust på dessa rader: <strong style="${estNetGL >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${estNetGL >= 0 ? '+' : ''}${TaxEngine.formatSEK(estNetGL)}</strong>.
+              </div>
+              <div style="margin-top:6px;font-size:10px;color:#475569">
+                Dessa rader är <strong>exkluderade från K4</strong> pga uppskattade (ej verifierade) priser — de ingår inte i din deklaration.
+              </div>
+            </div>
+          </div>
+        </div>`;
+        })()}
+
+        <!-- Confidence score widget -->
+        ${(() => {
+          const criticalCount = excManual.length + excMissing.length + excBlocked.length + excSanity.length;
+          const reviewCount   = excTransfer.length + excOpenBal.length + excAirdropCand.length + excSpamCand.length;
+          const infoCount     = excEstimated.length + excUnknownId.length + excNoise.length;
+          const totalAll      = k4RowCount + criticalCount + reviewCount;
+          if (totalAll === 0) return '';
+          const score = Math.round((k4RowCount / totalAll) * 100);
+          const scoreColor = score >= 90 ? '#4ade80' : score >= 70 ? '#fbbf24' : '#f87171';
+          const scoreLabel = score >= 90 ? 'Hög — rapporten är tillförlitlig' : score >= 70 ? 'Medel — åtgärda blockerare' : 'Låg — åtgärd krävs';
+          return `
+        <div style="margin-bottom:14px;padding:12px 16px;border-radius:10px;background:rgba(15,23,42,.4);border:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:10px;color:#475569;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px">Skattekonfidens</div>
+            <div style="font-size:28px;font-weight:800;color:${scoreColor};line-height:1">${score}%</div>
+            <div style="font-size:10px;color:${scoreColor};margin-top:2px">${scoreLabel}</div>
+          </div>
+          <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;min-width:220px">
+            <div style="padding:6px 10px;border-radius:6px;background:rgba(74,222,128,.07);border:1px solid rgba(74,222,128,.15)">
+              <div style="font-size:9px;color:#4ade80;font-weight:600;margin-bottom:2px">✓ VERIFIERADE</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${k4RowCount}</div>
+              <div style="font-size:9px;color:#475569">K4-klara avyttringar</div>
+            </div>
+            <div style="padding:6px 10px;border-radius:6px;background:${criticalCount > 0 ? 'rgba(239,68,68,.07)' : 'rgba(74,222,128,.04)'};border:1px solid ${criticalCount > 0 ? 'rgba(239,68,68,.2)' : 'rgba(74,222,128,.1)'}">
+              <div style="font-size:9px;color:${criticalCount > 0 ? '#f87171' : '#4ade80'};font-weight:600;margin-bottom:2px">${criticalCount > 0 ? '⛔ KRÄVER ÅTGÄRD' : '✓ INGA BLOCKERARE'}</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${criticalCount}</div>
+              <div style="font-size:9px;color:#475569">K4-blockerare</div>
+            </div>
+            <div style="padding:6px 10px;border-radius:6px;background:rgba(251,191,36,.05);border:1px solid rgba(251,191,36,.15)">
+              <div style="font-size:9px;color:#fbbf24;font-weight:600;margin-bottom:2px">~ UPPSKATTADE</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${infoCount}</div>
+              <div style="font-size:9px;color:#475569">uppskattade priser</div>
+            </div>
+          </div>
+        </div>`;
+        })()}
+
+        <!-- Excluded from K4 panel — three-tier severity architecture -->
         ${(() => {
           const totalExc = (k4.excludedCount || 0);
           if (!totalExc) return '';
 
-          const statusMeta = {
-            sanity_flagged:        { icon: '🔎', color: '#f97316', bg: 'rgba(249,115,22,.07)', border: 'rgba(249,115,22,.3)',  label: 'Misstänkta rader — Sanitetskontroll' },
-            estimated_reviewable:  { icon: '⚠',  color: '#fbbf24', bg: 'rgba(251,191,36,.05)', border: 'rgba(251,191,36,.25)', label: 'Uppskattad prissättning' },
-            missing_history:       { icon: '⛔',  color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Okänd anskaffning — oklassificerad' },
-            blocked_outlier:       { icon: '🚫',  color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Blockerad (orimlig/korrupt data)' },
-            unknown_asset_identity:{ icon: '❓',  color: '#94a3b8', bg: 'rgba(148,163,184,.05)',border: 'rgba(148,163,184,.2)', label: 'Okänd tillgångsidentitet' },
-            excluded_noise:        { icon: '🔇',  color: '#475569', bg: 'rgba(71,85,105,.05)',  border: 'rgba(71,85,105,.2)',  label: 'Brus / spam / intern' },
-            // Auto-recovery sub-buckets
-            internal_transfer_candidate: { icon: '🔄', color: '#38bdf8', bg: 'rgba(56,189,248,.06)',  border: 'rgba(56,189,248,.25)',  label: 'Möjlig intern transfer — importera källkontot',  bulkAction: 'resolve_transfer'  },
-            opening_balance_candidate:   { icon: '📅', color: '#a78bfa', bg: 'rgba(167,139,250,.06)', border: 'rgba(167,139,250,.25)', label: 'Möjligt öppningssaldo — token ägdes före import',  bulkAction: 'resolve_openbal'   },
-            airdrop_candidate:           { icon: '📬', color: '#fbbf24', bg: 'rgba(251,191,36,.06)',  border: 'rgba(251,191,36,.25)',  label: 'Möjlig airdrop — mottagning utan köp',           bulkAction: 'resolve_airdrop'   },
-            spam_candidate:              { icon: '🗑️', color: '#94a3b8', bg: 'rgba(148,163,184,.05)', border: 'rgba(148,163,184,.2)',  label: 'Möjlig spam — automatiskt lösbara',              bulkAction: 'resolve_spam'      },
-            manual_review_required:      { icon: '⛔',  color: '#f87171', bg: 'rgba(239,68,68,.07)',  border: 'rgba(239,68,68,.3)',   label: 'Manuell granskning krävs — K4-blockerare'                                 },
+          // ── Shared row renderer ─────────────────────────────────────────
+          const renderDisposalRow = (d) => {
+            const gl = d.gainLossSEK;
+            const sanFlags = (d.sanityFlags || []);
+            const resNote = d.resolutionNote || '';
+            const resConf = d.resolutionConfidence || '';
+            const confColor = resConf === 'high' ? '#4ade80' : resConf === 'medium' ? '#fbbf24' : '#f87171';
+            return `
+            <div style="display:flex;flex-direction:column;gap:3px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
+                <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
+                <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} avyttrat</span>
+                ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Försäljningspris: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Pris: okänt</span>'}
+                ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: saknas</span>'}
+                ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
+                ${resConf ? `<span style="font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(15,23,42,.5);color:${confColor}" title="Återställningskonfidens">${resConf}</span>` : ''}
+                ${sanFlags.map(f => `<span style="padding:1px 5px;border-radius:3px;background:rgba(249,115,22,.12);color:#f97316;font-size:9px;font-family:monospace" title="${f}">${f.split(':')[0]}</span>`).join('')}
+                <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.openAssetAudit('${d.assetSymbol}')" style="padding:1px 5px" title="Granska ${d.assetSymbol}">🔍</button>
+                <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
+              </div>
+              ${resNote ? `<div style="font-size:9px;color:#64748b;line-height:1.4;padding-left:2px">💡 ${resNote}</div>` : ''}
+            </div>`;
           };
 
-          const renderExcGroup = (rows, status) => {
+          // ── Group renderer ──────────────────────────────────────────────
+          const renderGroup = ({ rows, icon, color, bg, border, label, maxRows = 8, bulkBtn = '', volumeLabel = false }) => {
             if (!rows?.length) return '';
-            const m = statusMeta[status] || statusMeta.estimated_reviewable;
             const totalProc = rows.reduce((s, d) => s + (d.proceedsSEK || 0), 0);
-            const show = rows.slice(0, 8);
-            // Bulk action button for auto-recovery buckets
-            const bulkBtn = m.bulkAction ? (() => {
-              switch (m.bulkAction) {
-                case 'resolve_spam':
-                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(148,163,184,.12);color:#94a3b8;border:1px solid rgba(148,163,184,.2)" onclick="TaxUI.bulkResolveSpamCandidates()">🗑️ Lös alla spam (${rows.length})</button>`;
-                case 'resolve_airdrop':
-                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.bulkResolveAirdropCandidates()">📬 Klassificera som airdrops (${rows.length})</button>`;
-                case 'resolve_transfer':
-                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(56,189,248,.1);color:#38bdf8;border:1px solid rgba(56,189,248,.2)" onclick="TaxUI.navigate('accounts')" title="Importera källkontot för att lösa anskaffningshistorik">➕ Importera källkontot</button>`;
-                case 'resolve_openbal':
-                  return `<button class="tax-btn tax-btn-xs" style="background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)" onclick="TaxUI.bulkCreateOpeningBalances()">📅 Skapa öppningssaldon (${rows.length})</button>`;
-                default: return '';
-              }
-            })() : '';
+            const show = rows.slice(0, maxRows);
+            const volLabel = totalProc > 0
+              ? `<span style="font-size:10px;color:${color};font-weight:600">${TaxEngine.formatSEK(totalProc)} ${volumeLabel ? 'handelsvolym' : 'försäljningspris'}</span>`
+              : '';
             return `
-            <details style="margin-bottom:6px">
-              <summary style="cursor:pointer;padding:7px 10px;border-radius:6px;background:${m.bg};border:1px solid ${m.border};display:flex;align-items:center;gap:8px;list-style:none;user-select:none;flex-wrap:wrap">
-                <span style="font-size:13px">${m.icon}</span>
-                <span style="flex:1;font-size:11px;font-weight:600;color:${m.color}">${m.label}</span>
-                <span style="font-size:10px;color:${m.color};opacity:.8">${rows.length} rad${rows.length !== 1 ? 'er' : ''}</span>
-                ${totalProc > 0 ? `<span style="font-size:10px;color:${m.color};font-weight:700">${TaxEngine.formatSEK(totalProc)} intäkter</span>` : ''}
+            <details style="margin-bottom:5px">
+              <summary style="cursor:pointer;padding:7px 10px;border-radius:6px;background:${bg};border:1px solid ${border};display:flex;align-items:center;gap:8px;list-style:none;user-select:none;flex-wrap:wrap">
+                <span style="font-size:13px">${icon}</span>
+                <span style="flex:1;font-size:11px;font-weight:600;color:${color}">${label}</span>
+                <span style="font-size:10px;color:${color};opacity:.8">${rows.length} rad${rows.length !== 1 ? 'er' : ''}</span>
+                ${volLabel}
                 ${bulkBtn}
                 <span style="font-size:10px;color:#475569">▾</span>
               </summary>
               <div style="display:flex;flex-direction:column;gap:3px;margin-top:4px;padding-left:4px">
-                ${show.map(d => {
-                  const gl = d.gainLossSEK;
-                  const sanFlags = (d.sanityFlags || []);
-                  const resNote = d.resolutionNote || '';
-                  const resConf = d.resolutionConfidence || '';
-                  const confColor = resConf === 'high' ? '#4ade80' : resConf === 'medium' ? '#fbbf24' : '#f87171';
-                  return `
-                <div style="display:flex;flex-direction:column;gap:3px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px">
-                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                    <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
-                    <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
-                    <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} avyttrat</span>
-                    ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Intäkt: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Intäkt: okänd</span>'}
-                    ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: saknas</span>'}
-                    ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
-                    ${resConf ? `<span style="font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(15,23,42,.5);color:${confColor}" title="Återställningskonfidens">${resConf}</span>` : ''}
-                    ${sanFlags.map(f => `<span style="padding:1px 5px;border-radius:3px;background:rgba(249,115,22,.12);color:#f97316;font-size:9px;font-family:monospace" title="${f}">${f.split(':')[0]}</span>`).join('')}
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.openAssetAudit('${d.assetSymbol}')" style="padding:1px 5px" title="Granska ${d.assetSymbol}">🔍</button>
-                    <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
-                  </div>
-                  ${resNote ? `<div style="font-size:9px;color:#64748b;line-height:1.4;padding-left:2px">💡 ${resNote}</div>` : ''}
-                </div>`;}).join('')}
-                ${rows.length > 8 ? `<div style="font-size:10px;color:#475569;text-align:center;padding:4px">… och ${rows.length - 8} fler rader</div>` : ''}
+                ${show.map(renderDisposalRow).join('')}
+                ${rows.length > maxRows ? `<div style="font-size:10px;color:#475569;text-align:center;padding:4px">… och ${rows.length - maxRows} fler rader</div>` : ''}
               </div>
             </details>`;
           };
 
+          // ── Severity tier renderer ──────────────────────────────────────
+          const renderTier = ({ icon, label, color, bg, border, description, rows, children }) => {
+            const count = rows ? rows.length : (children || []).reduce((s, r) => s + r.length, 0);
+            if (!count) return '';
+            return `
+            <div style="margin-bottom:10px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <span style="font-size:14px">${icon}</span>
+                <span style="font-size:12px;font-weight:700;color:${color}">${label}</span>
+                <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:${bg};border:1px solid ${border};color:${color}">${count} rader</span>
+              </div>
+              ${description ? `<div style="font-size:10px;color:#475569;margin-bottom:6px;padding-left:22px;line-height:1.5">${description}</div>` : ''}
+            </div>`;
+          };
+
+          // ── Bucket computations ─────────────────────────────────────────
+          const criticalRows   = [...excManual, ...excMissing, ...excBlocked, ...excSanity];
+          const reviewRows     = [...excSpamCand, ...excAirdropCand, ...excTransfer, ...excOpenBal];
+          const infoRows       = [...excEstimated, ...excUnknownId, ...excNoise];
+          const autoSolvable   = excSpamCand.length + excAirdropCand.length;
+          const excSanityGain2 = excSanity.reduce((s, d) => s + (d.gainLossSEK || 0), 0);
+
           return `
-        <div class="tax-section" style="margin-bottom:16px;border-color:rgba(99,102,241,.25)">
-          <div class="tax-section-header" style="margin-bottom:10px">
+        <div class="tax-section" style="margin-bottom:16px;border-color:rgba(99,102,241,.2)">
+          <div class="tax-section-header" style="margin-bottom:8px">
             <h2 style="font-size:14px;color:#818cf8">🔒 Exkluderade från K4 — ${totalExc} rad${totalExc !== 1 ? 'er' : ''}</h2>
             <span class="tax-badge" style="background:rgba(99,102,241,.1);color:#818cf8">Ej deklarerade</span>
           </div>
-          <div style="font-size:11px;color:#94a3b8;margin-bottom:10px;line-height:1.6">
-            Dessa avyttringar uppfyller <strong style="color:#e2e8f0">inte K4-kriterierna</strong> (verifierad priskälla + känd anskaffningshistorik).
-            De visas här för transparens men ingår <strong style="color:#818cf8">inte</strong> i K4-totaler, PDF eller CSV.
-            Åtgärda dem i <button class="tax-btn tax-btn-xs" onclick="TaxUI.navigate('review')" style="font-size:10px;padding:1px 6px;margin:0 2px">Granskning</button> för att inkludera dem.
+          <div style="font-size:11px;color:#475569;margin-bottom:12px;line-height:1.6">
+            Dessa rader uppfyller inte K4-kriterierna och ingår <strong style="color:#818cf8">inte</strong> i din deklaration.
+            De är uppdelade efter allvarlighetsgrad nedan.
           </div>
-          ${excSanity.length > 0 ? `
-          <div style="padding:8px 12px;margin-bottom:8px;border-radius:6px;background:rgba(249,115,22,.08);border:1px solid rgba(249,115,22,.25);font-size:11px;color:#f97316;line-height:1.6">
-            🔎 <strong>${excSanity.length} rad${excSanity.length!==1?'er':''} nedsatta av sanitetskontroll.</strong>
-            Dessa rader hade intäkt/kostnad-förhållanden eller kostnadsbasstorlekar som inte kan bekräftas
-            från importerade transaktioner utan sekundär referens.
-            Total vinst/förlust på dessa rader: <strong>${TaxEngine.formatSEK(excSanityGain)}</strong>.
-            Kontrollera ursprungliga transaktioner och bekräfta i <button class="tax-btn tax-btn-xs" onclick="TaxUI.navigate('review')" style="font-size:10px;padding:1px 6px;margin:0 2px;color:#f97316;border-color:#f97316">Granskning</button>.
+
+          <!-- ────── 🔴 TIER 1: CRITICAL ────── -->
+          ${criticalRows.length > 0 ? `
+          <div style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.25)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+              <span style="font-size:14px">🔴</span>
+              <span style="font-size:12px;font-weight:700;color:#f87171">K4-blockerare — kräver åtgärd</span>
+              <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171">${criticalRows.length} rader</span>
+              <button class="tax-btn tax-btn-xs" style="margin-left:auto;color:#f87171;border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.08)" onclick="TaxUI.navigate('review')">Åtgärda i Granskning →</button>
+            </div>
+            <div style="font-size:10px;color:#64748b;margin-bottom:8px">
+              Dessa rader blockerar din K4-deklaration och måste åtgärdas.
+              De kan ha stor påverkan på din redovisade vinst.
+            </div>
+            ${renderGroup({ rows: excManual,   icon: '⛔', color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.2)',  label: 'Manuell granskning krävs — okänd anskaffning' })}
+            ${renderGroup({ rows: excMissing,  icon: '❓',  color: '#f87171', bg: 'rgba(239,68,68,.04)',  border: 'rgba(239,68,68,.18)', label: 'Okänd anskaffningskälla — oklassificerad' })}
+            ${renderGroup({ rows: excBlocked,  icon: '🚫',  color: '#f87171', bg: 'rgba(239,68,68,.04)',  border: 'rgba(239,68,68,.18)', label: 'Blockerad — orimlig eller korrupt data' })}
+            ${excSanity.length > 0 ? `
+            <details style="margin-bottom:5px">
+              <summary style="cursor:pointer;padding:7px 10px;border-radius:6px;background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.25);display:flex;align-items:center;gap:8px;list-style:none;user-select:none;flex-wrap:wrap">
+                <span style="font-size:13px">🔎</span>
+                <span style="flex:1;font-size:11px;font-weight:600;color:#f97316">Sanitetskontroll — misstänkta siffror</span>
+                <span style="font-size:10px;color:#f97316;opacity:.8">${excSanity.length} rader</span>
+                <span style="font-size:10px;color:#f97316;font-weight:600">Potentiell vinst/förlust: ${TaxEngine.formatSEK(excSanityGain2)}</span>
+                <span style="font-size:10px;color:#475569">▾</span>
+              </summary>
+              <div style="display:flex;flex-direction:column;gap:3px;margin-top:4px;padding-left:4px">
+                <div style="font-size:10px;color:#64748b;padding:4px 8px;line-height:1.5">
+                  Intäkt/kostnad-förhållanden som inte kan bekräftas utan sekundär referens.
+                  Bekräfta i <button class="tax-btn tax-btn-xs" onclick="TaxUI.navigate('review')" style="font-size:10px;padding:1px 5px">Granskning</button>.
+                </div>
+                ${excSanity.slice(0,8).map(renderDisposalRow).join('')}
+                ${excSanity.length > 8 ? `<div style="font-size:10px;color:#475569;text-align:center;padding:4px">… och ${excSanity.length - 8} fler</div>` : ''}
+              </div>
+            </details>` : ''}
+          </div>` : `
+          <div style="margin-bottom:12px;padding:8px 12px;border-radius:8px;background:rgba(74,222,128,.05);border:1px solid rgba(74,222,128,.2);display:flex;align-items:center;gap:8px">
+            <span style="font-size:14px">✅</span>
+            <span style="font-size:11px;color:#4ade80;font-weight:600">Inga K4-blockerare — rapporten är redo att deklareras</span>
+          </div>`}
+
+          <!-- ────── 🟡 TIER 2: REVIEW RECOMMENDED ────── -->
+          ${reviewRows.length > 0 ? `
+          <div style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:rgba(251,191,36,.04);border:1px solid rgba(251,191,36,.2)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+              <span style="font-size:14px">🟡</span>
+              <span style="font-size:12px;font-weight:700;color:#fbbf24">Granskning rekommenderas — inte fatalt</span>
+              <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24">${reviewRows.length} rader</span>
+              ${autoSolvable > 0 ? `
+              <button class="tax-btn tax-btn-xs" style="margin-left:auto;color:#4ade80;border-color:rgba(74,222,128,.3);background:rgba(74,222,128,.07);font-weight:600" onclick="TaxUI.autoResolveAll()" title="Lös spam + klassificera airdrops automatiskt">⚡ Auto-lösa ${autoSolvable} rader</button>` : ''}
+            </div>
+            <div style="font-size:10px;color:#64748b;margin-bottom:8px">
+              Motorn har identifierat möjliga lösningar. Dessa blockerar <em>inte</em> din K4 men bör bekräftas för bästa resultat.
+            </div>
+            ${renderGroup({ rows: excSpamCand, icon: '🗑️', color: '#94a3b8', bg: 'rgba(148,163,184,.05)', border: 'rgba(148,163,184,.2)', label: 'Möjlig spam — kan automatiskt lösas med 0 kr kostnadsbas',
+              bulkBtn: excSpamCand.length > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(148,163,184,.12);color:#94a3b8;border:1px solid rgba(148,163,184,.2)" onclick="TaxUI.bulkResolveSpamCandidates()">🗑️ Lös alla spam (${excSpamCand.length})</button>` : '' })}
+            ${renderGroup({ rows: excAirdropCand, icon: '📬', color: '#fbbf24', bg: 'rgba(251,191,36,.05)', border: 'rgba(251,191,36,.2)', label: 'Möjlig airdrop — mottagning utan köp, FMV som kostnadsbas',
+              bulkBtn: excAirdropCand.length > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.bulkResolveAirdropCandidates()">📬 Klassificera som airdrops (${excAirdropCand.length})</button>` : '' })}
+            ${renderGroup({ rows: excTransfer, icon: '🔄', color: '#38bdf8', bg: 'rgba(56,189,248,.05)', border: 'rgba(56,189,248,.2)', label: 'Möjlig intern transfer — importera källkontot',
+              bulkBtn: `<button class="tax-btn tax-btn-xs" style="background:rgba(56,189,248,.1);color:#38bdf8;border:1px solid rgba(56,189,248,.2)" onclick="TaxUI.navigate('accounts')">➕ Importera källkontot</button>` })}
+            ${renderGroup({ rows: excOpenBal, icon: '📅', color: '#a78bfa', bg: 'rgba(167,139,250,.05)', border: 'rgba(167,139,250,.2)', label: 'Möjligt öppningssaldo — token ägdes troligen före import',
+              bulkBtn: excOpenBal.length > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)" onclick="TaxUI.bulkCreateOpeningBalances()">📅 Skapa öppningssaldon (${excOpenBal.length})</button>` : '' })}
           </div>` : ''}
 
-          ${/* Recovery summary banner — shows when the engine found auto-triageable rows */
-          (excTransfer.length + excOpenBal.length + excAirdropCand.length + excSpamCand.length) > 0 ? `
-          <div style="padding:10px 14px;margin-bottom:10px;border-radius:8px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2)">
-            <div style="font-size:11px;font-weight:700;color:#4ade80;margin-bottom:6px">🤖 Automatisk triagering — motorn hittade möjliga lösningar</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-              ${excSpamCand.length   > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(148,163,184,.1);color:#94a3b8">🗑️ ${excSpamCand.length} spam</span>` : ''}
-              ${excAirdropCand.length > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(251,191,36,.1);color:#fbbf24">📬 ${excAirdropCand.length} airdrop</span>` : ''}
-              ${excTransfer.length   > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(56,189,248,.1);color:#38bdf8">🔄 ${excTransfer.length} intern transfer</span>` : ''}
-              ${excOpenBal.length    > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(167,139,250,.1);color:#a78bfa">📅 ${excOpenBal.length} öppningssaldo</span>` : ''}
-              ${excManual.length     > 0 ? `<span style="font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(239,68,68,.1);color:#f87171">⛔ ${excManual.length} manuell</span>` : ''}
+          <!-- ────── 🔵 TIER 3: INFORMATIONAL ────── -->
+          ${infoRows.length > 0 ? `
+          <div style="margin-bottom:8px;padding:10px 12px;border-radius:8px;background:rgba(99,102,241,.04);border:1px solid rgba(99,102,241,.15)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+              <span style="font-size:14px">🔵</span>
+              <span style="font-size:12px;font-weight:700;color:#818cf8">Information — ingen omedelbar åtgärd krävs</span>
+              <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.2);color:#818cf8">${infoRows.length} rader</span>
             </div>
-            <div style="font-size:10px;color:#64748b">
-              Rader med möjlig lösning visas nedan i separata grupper med förslag och snabbåtgärder.
-              ${excSpamCand.length > 0 ? `<strong style="color:#94a3b8">${excSpamCand.length} spam-rader kan lösas direkt (inga nya data krävs).</strong>` : ''}
+            <div style="font-size:10px;color:#64748b;margin-bottom:8px">
+              Uppskattade priser och brus. Dessa påverkar <strong>inte din K4</strong> — de är redan exkluderade.
+              Handelsvolym är inte detsamma som inkomst.
             </div>
+            ${renderGroup({ rows: excEstimated, icon: '⚠', color: '#fbbf24', bg: 'rgba(251,191,36,.04)', border: 'rgba(251,191,36,.15)',
+              label: `Uppskattade priser — ${excEstimated.length} avyttringar med ej verifierat pris`, volumeLabel: true })}
+            ${renderGroup({ rows: excUnknownId, icon: '❓', color: '#94a3b8', bg: 'rgba(148,163,184,.04)', border: 'rgba(148,163,184,.15)', label: 'Okänd tillgångsidentitet' })}
+            ${renderGroup({ rows: excNoise,     icon: '🔇', color: '#475569', bg: 'rgba(71,85,105,.04)',  border: 'rgba(71,85,105,.15)',  label: 'Brus / dust / interna transfers' })}
           </div>` : ''}
-
-          ${renderExcGroup(excSanity,      'sanity_flagged')}
-          ${/* Auto-recovery buckets — shown before hard blockers */
-            renderExcGroup(excSpamCand,    'spam_candidate')}
-          ${renderExcGroup(excAirdropCand, 'airdrop_candidate')}
-          ${renderExcGroup(excTransfer,    'internal_transfer_candidate')}
-          ${renderExcGroup(excOpenBal,     'opening_balance_candidate')}
-          ${renderExcGroup(excManual,      'manual_review_required')}
-          ${renderExcGroup(excMissing,     'missing_history')}
-          ${/* Non-missing-history buckets */
-            renderExcGroup(excEstimated,   'estimated_reviewable')}
-          ${renderExcGroup(excBlocked,     'blocked_outlier')}
-          ${renderExcGroup(excUnknownId,   'unknown_asset_identity')}
-          ${renderExcGroup(excNoise,       'excluded_noise')}
         </div>`;
         })()}
 
@@ -4478,6 +4581,59 @@ const TaxUI = (() => {
     render();
   }
 
+  /**
+   * One-click auto-resolve: runs spam + airdrop resolution in sequence without
+   * separate confirm dialogs. Skips buckets that are empty.
+   */
+  function autoResolveAll() {
+    const result = S.taxResult || getOrComputeTaxResult();
+    const k4 = TaxEngine.generateK4Report(result);
+    const exc = k4.excludedByStatus || {};
+    const spamRows    = exc['spam_candidate']    || [];
+    const airdropRows = exc['airdrop_candidate'] || [];
+    const total = spamRows.length + airdropRows.length;
+    if (!total) {
+      showTaxToast('ℹ️', 'Inget att lösa', 'Inga spam- eller airdrop-kandidater hittades.', 'info');
+      return;
+    }
+    if (!confirm(
+      `Auto-lösa ${total} rader?\n\n` +
+      (spamRows.length > 0    ? `• ${spamRows.length} spam-rader → exkluderas med 0 kr kostnadsbas\n` : '') +
+      (airdropRows.length > 0 ? `• ${airdropRows.length} airdrop-rader → omklassificeras med FMV-kostnadsbas\n` : '') +
+      `\nDetta går att ångra via Transaktioner.`
+    )) return;
+
+    let txns = TaxEngine.getTransactions();
+
+    // Spam pass
+    if (spamRows.length > 0) {
+      const ids = new Set(spamRows.map(d => d.id).filter(Boolean));
+      txns = txns.map(t => ids.has(t.id) ? { ...t,
+        category: 'spam', priceSEKPerUnit: 0, costBasisSEK: 0,
+        priceSource: 'missing', priceConfidence: 'spam_zero',
+        needsReview: false, reviewReason: 'spam_token', userReviewed: true,
+      } : t);
+    }
+
+    // Airdrop pass
+    if (airdropRows.length > 0) {
+      const syms = new Set(airdropRows.map(d => d.assetSymbol).filter(Boolean));
+      txns = txns.map(t => {
+        if (!syms.has(t.assetSymbol)) return t;
+        const cat = (t.category || '').toLowerCase();
+        if (!['receive', 'transfer_in', 'airdrop'].includes(cat)) return t;
+        return { ...t, category: 'airdrop', needsReview: false, userReviewed: true };
+      });
+    }
+
+    TaxEngine.saveTransactions(txns);
+    S.taxResult = null;
+    showTaxToast('⚡', 'Auto-löst!',
+      `${spamRows.length} spam + ${airdropRows.length} airdrops klassificerade.`,
+      'success');
+    render();
+  }
+
   // Toggle a review group's collapsed state
   function toggleReviewGroup(reason) {
     if (!S.collapsedGroups) S.collapsedGroups = new Set(['received_not_sold']);
@@ -5168,7 +5324,7 @@ const TaxUI = (() => {
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
     bulkAutoInfer, resolveUnknownTokens, toggleReviewGroup,
-    bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances,
+    bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances, autoResolveAll,
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,

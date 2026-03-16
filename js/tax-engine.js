@@ -4012,7 +4012,7 @@ const TaxEngine = (() => {
       // Look for any movement of the same asset ± 5% qty within 72 h that
       // hasn't been marked as an internal transfer yet (and isn't this disposal).
       const candidates = (txsByAsset[sym] || []).filter(t => {
-        if (matched.has ? matched.has(t.id) : false) return false; // skip if already matched
+        if (t.isInternalTransfer || t.category === CAT.TRANSFER_IN || t.category === CAT.BRIDGE_IN) return false;
         const tMs      = new Date(t.date).getTime();
         const timeDiff = Math.abs(tMs - dispMs);
         if (timeDiff > 72 * 3600_000) return false;

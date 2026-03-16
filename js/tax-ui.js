@@ -3464,7 +3464,7 @@ const TaxUI = (() => {
                   ${k4.k4Rows.map((r, i) => {
                     const rowId = `k4r-${i}`;
                     // Build "why does this gain/loss exist" explanation from the disposals
-                    const rowDisposals = disposals.filter(d => d.assetSymbol === r.sym && isK4Eligible(d));
+                    const rowDisposals = disposals.filter(d => d.assetSymbol === r.sym && d.valuationStatus === 'final' && !d.excludeFromK4);
                     const firstD = rowDisposals[0];
                     const whyLines = [];
                     if (firstD) {

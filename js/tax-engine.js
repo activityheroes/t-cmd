@@ -2952,11 +2952,23 @@ const TaxEngine = (() => {
       if (!s) continue;
       const acqCats = [CAT.BUY, CAT.RECEIVE, CAT.INCOME, CAT.STAKING, CAT.AIRDROP, CAT.TRANSFER_IN, CAT.BRIDGE_IN];
       if (acqCats.includes(t.category) && !t.isInternalTransfer) {
-        (acquisitionMap[s] = acquisitionMap[s] || []).push({ id: t.id, date: t.date, category: t.category, amount: t.amount });
+        (acquisitionMap[s] = acquisitionMap[s] || []).push({
+          id: t.id, date: t.date, category: t.category, amount: t.amount,
+          costSEK: t.costSEK || t.valueSEK || null,
+          priceSource: t.priceSource || null,
+          wallet: t.wallet || null,
+          isTrusted: TRUSTED_K4_PRICE_SOURCES.has(t.priceSource),
+        });
       }
       // TRADE in-side: receiving inAsset counts as acquisition
       if (t.category === CAT.TRADE && t.inAsset && t.inAmount > 0) {
-        (acquisitionMap[t.inAsset] = acquisitionMap[t.inAsset] || []).push({ id: t.id, date: t.date, category: 'trade_in', amount: t.inAmount });
+        (acquisitionMap[t.inAsset] = acquisitionMap[t.inAsset] || []).push({
+          id: t.id, date: t.date, category: 'trade_in', amount: t.inAmount,
+          costSEK: t.proceedsSEK || null,  // cost of in-asset = proceeds of out-asset
+          priceSource: t.priceSource || null,
+          wallet: t.wallet || null,
+          isTrusted: TRUSTED_K4_PRICE_SOURCES.has(t.priceSource),
+        });
       }
     }
 
@@ -3539,6 +3551,7 @@ const TaxEngine = (() => {
 
     return {
       year, disposals, income, currentHoldings,
+      assetAcquisitions: acquisitionMap,  // per-asset acquisition history for audit view
       summary: {
         totalTransactions: yearTxns.length,
         totalDisposals: disposals.length,

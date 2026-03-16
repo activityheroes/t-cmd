@@ -452,8 +452,19 @@ const TaxUI = (() => {
 
         <!-- ── ASSETS TABLE ────────────────────────────────── -->
         <div class="tax-section">
-          <div class="tax-section-header">
+          <div class="tax-section-header" style="flex-wrap:wrap;gap:6px">
             <h2>Mina tillgångar</h2>
+            <!-- Filter toggle -->
+            <div style="display:flex;gap:4px;align-items:center">
+              <button class="tax-btn tax-btn-sm ${_portFilter === 'all' ? 'tax-btn-primary' : 'tax-btn-ghost'}"
+                data-port-filter="all" onclick="TaxUI.setPortFilter('all')" title="Visa alla nuvarande innehav">
+                Alla nuvarande
+              </button>
+              <button class="tax-btn tax-btn-sm ${_portFilter === 'priced' ? 'tax-btn-primary' : 'tax-btn-ghost'}"
+                data-port-filter="priced" onclick="TaxUI.setPortFilter('priced')" title="Visa bara tokens med känt marknadspris">
+                Med pris
+              </button>
+            </div>
             <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
               <input class="tax-search-input" id="tax-asset-search" placeholder="Sök tillgång…"
                 oninput="TaxUI.filterAssets(this.value)">
@@ -470,20 +481,26 @@ const TaxUI = (() => {
                   <th class="ta-r">Innehav</th>
                   <th class="ta-r">Vinst / Förlust</th>
                   <th class="ta-r">24h</th>
+                  <th style="width:36px"></th>
                 </tr></thead>
                 <tbody id="tax-assets-tbody">
-                  ${sortedHoldings.map(renderAssetRow).join('')}
+                  ${sortedHoldings.map(h => renderAssetRow(h, _portFilter)).join('')}
                 </tbody>
               </table></div>
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" style="margin-top:10px"
-                onclick="TaxUI.toggleSmallBalances()">Visa tokens med litet saldo ▾</button>`
+              <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+                <button class="tax-btn tax-btn-sm tax-btn-ghost"
+                  onclick="TaxUI.toggleSmallBalances()">Visa tokens med litet saldo ▾</button>
+                <span style="font-size:10px;color:#475569">
+                  ${sortedHoldings.length} tillgångar · ${sortedHoldings.filter(h => h.currentValueSEK > 0).length} med känt marknadsvärde
+                </span>
+              </div>`
       }
         </div>
       </div>
     `;
   }
 
-  function renderAssetRow(h) {
+  function renderAssetRow(h, portFilter) {
     // Resolve the best available display name for the symbol.
     // Priority: (1) h.assetName set by async DexScreener lookup or static map,
     //           (2) resolveTokenDisplay static lookup, (3) raw symbol as fallback.
@@ -511,7 +528,9 @@ const TaxUI = (() => {
     const assetExplorerName = solscanTokenUrl ? 'Solscan' : 'CoinGecko';
     // 3-dot menu id (unique per row)
     const menuId = `asset-menu-${displaySym.replace(/[^a-z0-9]/gi, '_')}`;
-    return `<tr>
+    const hasPrice = (h.currentValueSEK || 0) > 0 || (h.currentPriceSEK || 0) > 0;
+    const hideRow  = portFilter === 'priced' && !hasPrice;
+    return `<tr data-has-price="${hasPrice ? '1' : '0'}" style="${hideRow ? 'display:none' : ''}">
       <td>
         <div class="tax-asset-cell">
           <img class="tax-alloc-icon" src="${icon}"
@@ -553,6 +572,13 @@ const TaxUI = (() => {
         ? `<div class="tax-mono tax-24h-sek ${ch24 >= 0 ? 'tax-port-pos' : 'tax-port-neg'}">${ch24sek >= 0 ? '+' : ''}${TaxEngine.formatSEK(ch24sek)}</div>
            <div class="tax-24h-pct ${ch24 >= 0 ? 'tax-port-pos' : 'tax-port-neg'}">${ch24 >= 0 ? '+' : ''}${ch24.toFixed(2)}%</div>`
         : '<span class="tax-port-loading-val">—</span>'}
+      </td>
+      <td style="text-align:center;padding:4px">
+        <button class="tax-btn tax-btn-xs tax-btn-ghost"
+          onclick="TaxUI.openAssetAudit('${h.symbol}')"
+          title="Granska anskaffnings- och avyttringshistorik för ${displaySym}"
+          style="padding:2px 6px;font-size:10px;opacity:.6;transition:opacity .15s"
+          onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">🔍</button>
       </td>
     </tr>`;
   }
@@ -994,6 +1020,26 @@ const TaxUI = (() => {
     });
   }
 
+  // ── Portfolio filter state ──────────────────────────────────
+  // 'all'    → show all tokens with remaining computed quantity
+  // 'priced' → show only tokens with a known current market price
+  let _portFilter = 'all';
+  function setPortFilter(mode) {
+    _portFilter = mode;
+    const tbody = document.getElementById('tax-assets-tbody');
+    if (!tbody) return;
+    tbody.querySelectorAll('tr[data-has-price]').forEach(row => {
+      const hasPrice = row.dataset.hasPrice === '1';
+      if (mode === 'priced') row.style.display = hasPrice ? '' : 'none';
+      else row.style.display = '';
+    });
+    // Update button active state
+    document.querySelectorAll('[data-port-filter]').forEach(btn => {
+      btn.classList.toggle('tax-btn-primary', btn.dataset.portFilter === mode);
+      btn.classList.toggle('tax-btn-ghost',   btn.dataset.portFilter !== mode);
+    });
+  }
+
   let _showSmallBalances = false;
   function toggleSmallBalances() {
     _showSmallBalances = !_showSmallBalances;
@@ -1008,6 +1054,205 @@ const TaxUI = (() => {
       const val = parseFloat(raw) || 0;
       if (val < THRESHOLD_SEK) row.style.display = _showSmallBalances ? '' : 'none';
     });
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // ASSET AUDIT LEDGER
+  // Per-token drilldown: acquisitions → disposals → current balance
+  // Opens as an overlay modal
+  // ════════════════════════════════════════════════════════════
+  function openAssetAudit(rawSym) {
+    const result = getOrComputeTaxResult();
+    if (!result) return;
+
+    const allTxns = TaxEngine.getTransactions();
+    const sym = rawSym; // canonical symbol as stored in engine
+
+    // ── Acquisitions: all txns where this asset was received ────
+    const ACQ_CATS = ['buy','receive','income','staking','airdrop','transfer_in','bridge_in','trade_in'];
+    const rawAcqs = allTxns.filter(t => {
+      if (t.isInternalTransfer) return false;
+      if (t.assetSymbol === sym && ACQ_CATS.includes(t.category)) return true;
+      if (t.category === 'trade' && t.inAsset === sym && (t.inAmount || 0) > 0) return true;
+      return false;
+    });
+    // Also pull from assetAcquisitions map (richer metadata)
+    const engineAcqs = (result.assetAcquisitions || {})[sym] || [];
+
+    // ── Disposals: all disposals for this symbol (all years) ───
+    const symDisposals = result.disposals.filter(d => d.assetSymbol === sym);
+
+    // ── Current holding ────────────────────────────────────────
+    const holding = result.currentHoldings.find(h => h.symbol === sym || h.symbol === TaxEngine.resolveTokenDisplay?.(sym)?.symbol);
+    const remainingQty = holding ? holding.quantity : 0;
+    const avgCost      = holding ? holding.avgCostSEK : 0;
+    const totalCostBasis = holding ? holding.totalCostSEK : 0;
+
+    // ── Summary stats ──────────────────────────────────────────
+    const totalAcqQty  = engineAcqs.reduce((s, a) => s + (a.amount || 0), 0);
+    const totalDispQty = symDisposals.reduce((s, d) => s + (d.amountSold || 0), 0);
+    const totalGainLoss = symDisposals.reduce((s, d) => s + (d.gainLossSEK || 0), 0);
+    const trustedAcqs  = engineAcqs.filter(a => a.isTrusted).length;
+    const untrustedAcqs = engineAcqs.filter(a => !a.isTrusted).length;
+
+    // ── Category label ─────────────────────────────────────────
+    const catLabel = { buy:'Köp', receive:'Mottagning', income:'Inkomst', staking:'Staking',
+      airdrop:'Airdrop', transfer_in:'Transfer in', bridge_in:'Bridge in', trade_in:'Byte (in)', };
+
+    const fmtDate = d => (d || '').slice(0, 10);
+    const fmtAmt  = v => v != null ? TaxEngine.formatCrypto(v, 6) : '—';
+
+    const html = `
+    <div id="tax-audit-overlay" onclick="if(event.target===this)TaxUI.closeAssetAudit()"
+         style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.75);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto">
+      <div style="background:#0f172a;border:1px solid rgba(148,163,184,.15);border-radius:14px;width:100%;max-width:900px;padding:0;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.6)">
+
+        <!-- Header -->
+        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid rgba(148,163,184,.1);background:rgba(255,255,255,.02)">
+          <span style="font-size:20px;font-weight:800;color:#e2e8f0">${sym}</span>
+          <span style="font-size:13px;color:#94a3b8">Granskningslogg</span>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.filterTxsByAsset('${sym}')">Visa transaktioner →</button>
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.closeAssetAudit()">✕</button>
+          </div>
+        </div>
+
+        <!-- Summary bar -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:rgba(148,163,184,.08);border-bottom:1px solid rgba(148,163,184,.1)">
+          ${[
+            ['Totalt anskaffat', `${fmtAmt(totalAcqQty)} ${sym}`],
+            ['Totalt avyttrat', `${fmtAmt(totalDispQty)} ${sym}`],
+            ['Kvarvarande (beräknat)', `${fmtAmt(remainingQty)} ${sym}`],
+            ['Genomsnittskostnad', avgCost > 0 ? TaxEngine.formatSEK(avgCost) + '/st' : '—'],
+            ['Total kostnadsbas', TaxEngine.formatSEK(totalCostBasis)],
+            ['Realiserat vinst/förlust', `<span style="color:${totalGainLoss >= 0 ? '#4ade80' : '#f87171'}">${TaxEngine.formatSEK(totalGainLoss)}</span>`],
+            ['Betrodda anskaffningar', `${trustedAcqs} ✓ / <span style="color:#fbbf24">${untrustedAcqs} ej betrodda</span>`],
+          ].map(([lbl, val]) => `
+          <div style="padding:10px 14px;background:#0f172a">
+            <div style="font-size:9px;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">${lbl}</div>
+            <div style="font-size:12px;font-weight:600;color:#e2e8f0">${val}</div>
+          </div>`).join('')}
+        </div>
+
+        <!-- Acquisitions -->
+        <div style="padding:14px 20px">
+          <div style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">
+            Anskaffningar (${engineAcqs.length})
+          </div>
+          ${engineAcqs.length === 0 ? `<div style="font-size:11px;color:#f87171;padding:8px 0">⚠ Inga anskaffningar importerade för denna tillgång</div>` : `
+          <div style="max-height:200px;overflow-y:auto;border-radius:6px;border:1px solid rgba(148,163,184,.08)">
+            <table style="width:100%;border-collapse:collapse;font-size:10px">
+              <thead style="position:sticky;top:0;background:#0f172a">
+                <tr style="color:#475569">
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Datum</th>
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Typ</th>
+                  <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">Antal</th>
+                  <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">Kostnad</th>
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Priskälla</th>
+                  <th style="padding:5px 8px;text-align:center;border-bottom:1px solid rgba(148,163,184,.08)">K4-betrodd</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${engineAcqs.map(a => `
+                <tr style="border-bottom:1px solid rgba(148,163,184,.04)">
+                  <td style="padding:4px 8px;color:#64748b;font-family:monospace">${fmtDate(a.date)}</td>
+                  <td style="padding:4px 8px;color:#94a3b8">${catLabel[a.category] || a.category}</td>
+                  <td style="padding:4px 8px;text-align:right;color:#e2e8f0;font-family:monospace">${fmtAmt(a.amount)}</td>
+                  <td style="padding:4px 8px;text-align:right;color:#94a3b8;font-family:monospace">${a.costSEK != null ? TaxEngine.formatSEK(a.costSEK) : '—'}</td>
+                  <td style="padding:4px 8px;color:#64748b;font-family:monospace;font-size:9px">${a.priceSource || '—'}</td>
+                  <td style="padding:4px 8px;text-align:center">${a.isTrusted ? '<span style="color:#4ade80">✓</span>' : '<span style="color:#f59e0b">⚠</span>'}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>`}
+
+          <!-- Disposals -->
+          <div style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin:14px 0 8px">
+            Avyttringar (${symDisposals.length})
+          </div>
+          ${symDisposals.length === 0 ? `<div style="font-size:11px;color:#64748b;padding:8px 0">Inga avyttringar registrerade</div>` : `
+          <div style="max-height:220px;overflow-y:auto;border-radius:6px;border:1px solid rgba(148,163,184,.08)">
+            <table style="width:100%;border-collapse:collapse;font-size:10px">
+              <thead style="position:sticky;top:0;background:#0f172a">
+                <tr style="color:#475569">
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Datum</th>
+                  <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">Antal</th>
+                  <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">Intäkt</th>
+                  <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">KB</th>
+                  <th style="padding:5px 8px;text-align:right;border-bottom:1px solid rgba(148,163,184,.08)">Vinst/Förlust</th>
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Status</th>
+                  <th style="padding:5px 8px;text-align:left;border-bottom:1px solid rgba(148,163,184,.08)">Förklaring</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${symDisposals.map(d => {
+                  const gl = d.gainLossSEK;
+                  const statusColor = d.valuationStatus === 'final' ? '#4ade80'
+                    : d.valuationStatus === 'missing_history' ? '#f87171' : '#fbbf24';
+                  const why = buildDisposalExplanation(d);
+                  return `
+                <tr style="border-bottom:1px solid rgba(148,163,184,.04)">
+                  <td style="padding:4px 8px;color:#64748b;font-family:monospace">${fmtDate(d.date)}</td>
+                  <td style="padding:4px 8px;text-align:right;color:#e2e8f0;font-family:monospace">${fmtAmt(d.amountSold)}</td>
+                  <td style="padding:4px 8px;text-align:right;font-family:monospace;color:#94a3b8">${d.proceedsSEK != null ? TaxEngine.formatSEK(d.proceedsSEK) : '—'}</td>
+                  <td style="padding:4px 8px;text-align:right;font-family:monospace;color:#94a3b8">${d.costBasisSEK != null ? TaxEngine.formatSEK(d.costBasisSEK) : '—'}</td>
+                  <td style="padding:4px 8px;text-align:right;font-family:monospace;color:${gl == null ? '#475569' : gl >= 0 ? '#4ade80' : '#f87171'}">${gl != null ? TaxEngine.formatSEK(gl) : '—'}</td>
+                  <td style="padding:4px 8px"><span style="font-size:9px;color:${statusColor}">${d.valuationStatus || '—'}</span></td>
+                  <td style="padding:4px 8px;font-size:9px;color:#64748b;max-width:200px">${why}</td>
+                </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>`}
+
+          <!-- Reconciliation note -->
+          <div style="margin-top:12px;padding:10px 12px;border-radius:6px;background:rgba(148,163,184,.04);border:1px solid rgba(148,163,184,.08);font-size:10px;color:#64748b;line-height:1.6">
+            <strong style="color:#94a3b8">Avstämning:</strong>
+            Anskaffat ${fmtAmt(totalAcqQty)} − avyttrat ${fmtAmt(totalDispQty)} = beräknat kvar ${fmtAmt(totalAcqQty - totalDispQty)}.
+            Motorn visar ${fmtAmt(remainingQty)} kvar.
+            ${Math.abs((totalAcqQty - totalDispQty) - remainingQty) > 0.001
+              ? `<span style="color:#f59e0b"> ⚠ Delta: ${fmtAmt(Math.abs((totalAcqQty - totalDispQty) - remainingQty))} — möjlig saknad transaktion eller intern transfer.</span>`
+              : `<span style="color:#4ade80"> ✓ Stämmer.</span>`}
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+    // Mount overlay
+    let el = document.getElementById('tax-audit-overlay');
+    if (el) el.remove();
+    document.body.insertAdjacentHTML('beforeend', html);
+  }
+
+  function closeAssetAudit() {
+    const el = document.getElementById('tax-audit-overlay');
+    if (el) el.remove();
+  }
+
+  // Build a short plain-language explanation for a disposal row
+  function buildDisposalExplanation(d) {
+    const parts = [];
+    // Event type
+    const evtMap = { trade:'Byte/swap', sell:'Försäljning', send:'Skickad', transfer_out:'Transfer ut',
+      bridge_out:'Bridge ut', income:'Inkomst', staking:'Staking-utdelning' };
+    const evtType = (d.eventType && evtMap[d.eventType]) || (d.proceedsSource ? 'Avyttring' : '—');
+    parts.push(evtType);
+    // Proceeds source
+    if (d.proceedsSource) parts.push(`Intäktskälla: ${d.proceedsSource}`);
+    // Cost basis source
+    if (d.avgCostAtSale > 0) parts.push(`Avg.kostnad: ${TaxEngine.formatSEK(d.avgCostAtSale)}/st`);
+    if (d.zeroCostReason) {
+      const zMap = {
+        acquisition_missing:'Ingen anskaffning hittad',
+        acquisition_partial:'Delvis anskaffningshistorik',
+        acquisition_untrusted:'Ej betrodd anskaffningskälla',
+        confirmed_zero:'Anskaffat till 0 kr (airdrop)',
+      };
+      parts.push(zMap[d.zeroCostReason] || d.zeroCostReason);
+    }
+    // Review reasons (first one)
+    if (d.reviewReasons?.length) parts.push(d.reviewReasons[0]);
+    return parts.slice(0, 3).join(' · ');
   }
 
   // ════════════════════════════════════════════════════════════
@@ -3216,7 +3461,27 @@ const TaxUI = (() => {
                   <th style="min-width:90px">Tillförlitlighet</th>
                 </tr></thead>
                 <tbody>
-                  ${k4.k4Rows.map((r, i) => `
+                  ${k4.k4Rows.map((r, i) => {
+                    const rowId = `k4r-${i}`;
+                    // Build "why does this gain/loss exist" explanation from the disposals
+                    const rowDisposals = disposals.filter(d => d.assetSymbol === r.sym && isK4Eligible(d));
+                    const firstD = rowDisposals[0];
+                    const whyLines = [];
+                    if (firstD) {
+                      const evtMap = { trade:'Byte/swap', sell:'Försäljning', send:'Skickad',
+                        transfer_out:'Transfer ut', bridge_out:'Bridge ut' };
+                      whyLines.push(`Händelsetyp: ${(firstD.eventType && evtMap[firstD.eventType]) || 'Avyttring'}`);
+                      if (firstD.proceedsSource) whyLines.push(`Intäktskälla: ${firstD.proceedsSource}`);
+                      else if (firstD.priceSource) whyLines.push(`Priskälla: ${firstD.priceSource}`);
+                      if (firstD.avgCostAtSale > 0) whyLines.push(`Avg.kostnad vid försäljning: ${TaxEngine.formatSEK(firstD.avgCostAtSale)}/st`);
+                      whyLines.push(`${rowDisposals.length} avyttring${rowDisposals.length !== 1 ? 'ar' : ''} aggregerade`);
+                      if (r.cost > 0 && r.proc > 0) {
+                        const costPerUnit = r.cost / r.qty;
+                        const procPerUnit = r.proc / r.qty;
+                        whyLines.push(`KB/st: ${TaxEngine.formatSEK(costPerUnit)} · Intäkt/st: ${TaxEngine.formatSEK(procPerUnit)}`);
+                      }
+                    }
+                    return `
                     <tr class="${(i + 1) % ROWS_PER_K4_FORM === 0 && i !== k4.k4Rows.length - 1 ? 'tax-k4-page-break' : ''}${r.confidence && r.confidence !== 'exact' ? ' tax-k4-row--uncertain' : ''}">
                       <td>
                         <div class="tax-asset-cell" style="gap:4px">
@@ -3232,6 +3497,7 @@ const TaxUI = (() => {
                                 : (() => { const mint = TaxEngine.SYM_TO_MINT && TaxEngine.SYM_TO_MINT[r.sym]; return mint ? `<a href="https://solscan.io/token/${mint}" target="_blank" rel="noopener noreferrer" class="tax-explorer-link" style="font-size:9px;padding:0px 4px" title="View token on Solscan">Solscan ↗</a>` : ''; })()
                               }
                               <button class="tax-explorer-icon" style="background:transparent;border:none;cursor:pointer;font-size:10px;color:#64748b" onclick="TaxUI.filterTxsByAsset('${r.sym}')" title="Visa transaktioner för ${r.sym}">📋</button>
+                              <button class="tax-explorer-icon" style="background:transparent;border:none;cursor:pointer;font-size:10px;color:#64748b" onclick="TaxUI.openAssetAudit('${r.sym}')" title="Granska historik för ${r.sym}">🔍</button>
                             </div>
                           </div>
                         </div>
@@ -3242,10 +3508,20 @@ const TaxUI = (() => {
                       <td class="ta-r tax-mono ${r.gain > 0 ? 'tax-green' : ''}">${r.gain ? TaxEngine.formatSEK(r.gain) : ''}</td>
                       <td class="ta-r tax-mono ${r.loss > 0 ? 'tax-red' : ''}">${r.loss ? TaxEngine.formatSEK(r.loss) : ''}</td>
                       <td>
-                        ${k4ConfBadge(r) || '<span style="font-size:10px;color:var(--tax-muted)">✓ Exakt</span>'}
-                        ${k4RowDebugPanel(r)}
+                        <div style="display:flex;flex-direction:column;gap:3px">
+                          ${k4ConfBadge(r) || '<span style="font-size:10px;color:var(--tax-muted)">✓ Exakt</span>'}
+                          ${k4RowDebugPanel(r)}
+                          ${whyLines.length ? `
+                          <details style="margin-top:2px">
+                            <summary style="font-size:9px;color:#475569;cursor:pointer;list-style:none;user-select:none">Varför? ▾</summary>
+                            <div style="margin-top:3px;font-size:9px;color:#64748b;line-height:1.6;padding:4px 6px;background:rgba(0,0,0,.2);border-radius:4px;max-width:220px">
+                              ${whyLines.map(l => `<div>${l}</div>`).join('')}
+                            </div>
+                          </details>` : ''}
+                        </div>
                       </td>
-                    </tr>`).join('')}
+                    </tr>`;
+                  }).join('')}
                   <tr class="tax-k4-sum-row">
                     <td colspan="5"><strong>Summa</strong></td>
                     <td class="ta-r tax-green"><strong>${TaxEngine.formatSEK(k4.totalGains)}</strong></td>
@@ -4482,7 +4758,8 @@ const TaxUI = (() => {
     // Bulk merge
     mergeSameHash, mergeTrade, mergeTransfer, mergeMultipleTransfers,
     // Portfolio dashboard
-    portSetRange, filterAssets, toggleSmallBalances,
+    portSetRange, filterAssets, toggleSmallBalances, setPortFilter,
+    openAssetAudit, closeAssetAudit,
     // expose for inline onclick patterns
     filterTxns, sortTxnsArr: txns => sortTxnsArr(txns),
     filterTxsByAsset,

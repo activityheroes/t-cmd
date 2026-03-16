@@ -366,8 +366,8 @@ const TaxUI = (() => {
             <!-- Quick tax stat -->
             <div class="tax-port-sum-div" style="margin-top:auto"></div>
             <div class="tax-port-tax-pill">
-              <span class="tax-port-tax-pill-lbl">Skatt ${S.taxYear} (est. 30%)</span>
-              <span class="tax-port-tax-pill-val tax-red">${TaxEngine.formatSEK(summary.estimatedTax)}</span>
+              <span class="tax-port-tax-pill-lbl">Skatt ${S.taxYear} (est. 30%, K4)</span>
+              <span class="tax-port-tax-pill-val tax-red">${TaxEngine.formatSEK(summary.k4EstimatedTax || 0)}</span>
             </div>
           </div>
 
@@ -2863,7 +2863,26 @@ const TaxUI = (() => {
     const excEstGain      = excEstimated.reduce((s, d) => s + (d.proceedsSEK || 0) - (d.costBasisSEK || 0), 0);
     const excMissingProc  = excMissing.reduce((s, d) => s + (d.proceedsSEK || 0), 0);
     const issues = TaxEngine.getReviewIssues(null, result).length;
-    const deductibleLoss = summary.deductibleLoss || (summary.totalLosses * 0.70);
+    // ── K4-only summary figures ── ALL summary cards must use these, never the
+    // portfolio-level totalGains/taxableGain/estimatedTax which include excluded rows.
+    const k4Gains       = summary.k4TotalGains    || 0;
+    const k4Losses      = summary.k4TotalLosses   || 0;
+    const deductibleLoss = summary.k4DeductibleLoss ?? (k4Losses * 0.70);
+    const k4TaxableGain  = summary.k4TaxableGain  ?? Math.max(0, k4Gains - deductibleLoss);
+    const k4EstimatedTax = summary.k4EstimatedTax ?? (k4TaxableGain * 0.30);
+    const k4RowCount     = k4.k4DisposalCount     || 0;
+    const excCount       = k4.excludedCount        || summary.excludedCount || 0;
+
+    // Dev assertion: taxable gain must match formula from the K4 rows themselves
+    (() => {
+      const expected = Math.max(0, k4Gains - k4Losses * 0.70);
+      const diff = Math.abs(k4TaxableGain - expected);
+      if (diff > 1) {
+        console.error(`[K4 ASSERT] taxableGain mismatch: rendered=${k4TaxableGain} expected=${expected} diff=${diff}`, {
+          k4Gains, k4Losses, deductibleLoss, k4TaxableGain, k4EstimatedTax, summary
+        });
+      }
+    })();
     const health = TaxEngine.computeReportHealth ? TaxEngine.computeReportHealth(result) : null;
 
     // ── Health banner colors ──
@@ -2948,20 +2967,38 @@ const TaxUI = (() => {
             <div class="tax-rh-item tax-rh-highlight">
               <div class="tax-rh-label">Skattepliktig vinst (netto)</div>
               <div class="tax-rh-label-sub">Vinst − avdragsgill förlust</div>
-              <div class="tax-rh-val">${TaxEngine.formatSEK(summary.taxableGain)}</div>
+              <div class="tax-rh-val">${TaxEngine.formatSEK(k4TaxableGain)}</div>
             </div>
           </div>
           <div class="tax-rh-tax-est" style="${health?.canFile===false?'opacity:.45':''}">
             <span class="tax-rh-tax-label">Beräknad skatt (30%)</span>
-            <span class="tax-rh-tax-val">${TaxEngine.formatSEK(summary.estimatedTax)}</span>
+            <span class="tax-rh-tax-val">${TaxEngine.formatSEK(k4EstimatedTax)}</span>
             ${health?.canFile===false ? `<span style="display:block;font-size:10px;color:#f87171;margin-top:2px">⚠️ troligen felaktig — åtgärda K4-blockerare</span>` : ''}
           </div>
-          ${(summary.totalProceeds || 0) > 0 ? `
+          ${k4RowCount > 0 ? (() => {
+            const k4Proceeds = k4.k4Rows.reduce((s,r) => s + (r.proceeds || 0), 0);
+            const k4Cost     = k4.k4Rows.reduce((s,r) => s + (r.cost    || 0), 0);
+            return `
           <div class="tax-rh-detail-row">
-            <span>Totalt försäljningspris: <strong>${TaxEngine.formatSEK(summary.totalProceeds)}</strong></span>
-            <span>Totalt omkostnadsbelopp: <strong>${TaxEngine.formatSEK(summary.totalCostBasis || 0)}</strong></span>
-            <span>Antal avyttringar: <strong>${disposals.length}</strong></span>
-          </div>` : ''}
+            <span>Totalt försäljningspris (K4): <strong>${TaxEngine.formatSEK(k4Proceeds)}</strong></span>
+            <span>Totalt omkostnadsbelopp (K4): <strong>${TaxEngine.formatSEK(k4Cost)}</strong></span>
+            <span>K4-avyttringar: <strong>${k4RowCount} st</strong> ${excCount > 0 ? `· <span style="color:#f59e0b">${excCount} exkluderade</span>` : ''}</span>
+          </div>`;
+          })() : ''}
+
+          <!-- Debug panel: always visible, remove when numbers confirmed correct -->
+          <details style="margin-top:8px;font-size:10px;color:#64748b;border-top:1px solid rgba(255,255,255,.06);padding-top:6px">
+            <summary style="cursor:pointer;font-size:10px;color:#475569">🔍 K4-summering debug</summary>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px 16px;margin-top:6px;font-family:monospace">
+              <span>k4TotalGains: <strong style="color:#4ade80">${TaxEngine.formatSEK(k4Gains)}</strong></span>
+              <span>k4TotalLosses: <strong style="color:#f87171">${TaxEngine.formatSEK(k4Losses)}</strong></span>
+              <span>deductibleLoss: <strong style="color:#fbbf24">${TaxEngine.formatSEK(deductibleLoss)}</strong></span>
+              <span>k4TaxableGain: <strong style="color:#e2e8f0">${TaxEngine.formatSEK(k4TaxableGain)}</strong></span>
+              <span>k4EstimatedTax: <strong style="color:#e2e8f0">${TaxEngine.formatSEK(k4EstimatedTax)}</strong></span>
+              <span>k4 rows: <strong>${k4RowCount}</strong> · excluded: <strong style="color:#f59e0b">${excCount}</strong></span>
+              <span style="grid-column:1/-1;color:#334155">source: summary.k4TotalGains=${TaxEngine.formatSEK(summary.k4TotalGains||0)} k4TotalLosses=${TaxEngine.formatSEK(summary.k4TotalLosses||0)} taxableGain=${TaxEngine.formatSEK(summary.taxableGain||0)}</span>
+            </div>
+          </details>
         </div>
 
         <!-- Confidence breakdown panel -->
@@ -3219,7 +3256,7 @@ const TaxUI = (() => {
                       Skattepliktig vinst = ${TaxEngine.formatSEK(k4.totalGains)} − (${TaxEngine.formatSEK(k4.totalLosses)} × 70%)
                     </td>
                     <td colspan="2" class="ta-r" style="font-size:12px;font-weight:600;color:#e2e8f0">
-                      = ${TaxEngine.formatSEK(summary.taxableGain)}
+                      = ${TaxEngine.formatSEK(k4TaxableGain)}
                     </td>
                   </tr>
                 </tbody>

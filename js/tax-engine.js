@@ -2962,7 +2962,15 @@ const TaxEngine = (() => {
 
     // Per-asset inventory: { totalQty, totalCostSEK }
     // Assets are tracked by canonical symbol (WETH→ETH already normalised at import)
+    //
+    // Two parallel pools:
+    //   holdings — all acquisitions (portfolio inventory, P&L display)
+    //   taxPool  — trusted acquisitions only (K4 cost-basis source of truth)
+    //
+    // Only TRUSTED_K4_PRICE_SOURCES acquisitions enter taxPool.
+    // When taxPool has insufficient qty at disposal time → missing_history (not zero-cost fraud).
     const holdings  = {};
+    const taxPool   = {};  // K4 cost-basis pool — trusted acquisitions only
     const disposals = [];  // in target year
     const income    = [];  // in target year
 
@@ -2972,52 +2980,45 @@ const TaxEngine = (() => {
     const _priceCache = getPriceCache();
 
     function ensure(sym) {
-      if (!holdings[sym]) holdings[sym] = {
-        totalQty: 0, totalCostSEK: 0,
-        // Pool integrity: 'clean' means every contributing acquisition used a
-        // trusted price source. 'tainted' means at least one acquisition entered
-        // with an untrusted/estimated cost, so the average-cost pool is unreliable
-        // and later disposals cannot be K4-final.
-        integrity: 'clean', taintReasons: [],
-      };
-    }
-    // Mark an asset's cost-basis pool as tainted.
-    // Called when an untrusted value is added (estimated acquisition or estimated
-    // TRADE in-side proceeds).  Taint is permanent for the rest of computeTaxYear.
-    function taintPool(sym, reason) {
-      ensure(sym);
-      const h = holdings[sym];
-      if (h.integrity === 'clean') h.integrity = 'tainted';
-      h.taintReasons.push(reason);
+      if (!holdings[sym]) holdings[sym] = { totalQty: 0, totalCostSEK: 0 };
+      if (!taxPool[sym])  taxPool[sym]  = { totalQty: 0, totalCostSEK: 0 };
     }
     function avg(sym) {
       const h = holdings[sym];
       return (h && h.totalQty > 0) ? h.totalCostSEK / h.totalQty : 0;
     }
+    // taxAvg: average cost from the trusted K4 pool (used in recordDisposal for cost basis)
+    function taxAvg(sym) {
+      const tp = taxPool[sym];
+      return (tp && tp.totalQty > 0) ? tp.totalCostSEK / tp.totalQty : 0;
+    }
 
     // Record a disposal into the ledger
     // unknownAcq = true when we're selling more than we ever recorded acquiring
     function recordDisposal(t, sym, qty, proceedsSEK, feeSEK, extraFields = {}) {
-      const h = holdings[sym] || { totalQty: 0, totalCostSEK: 0 };
-      const available = h.totalQty;
-      const unknownAcq = qty > available + 0.0001;  // sold more than we have
-      const safeQty    = unknownAcq ? qty : Math.min(qty, available);
-      // Under Genomsnittsmetoden: when acquisition is unknown, cost basis = 0
-      // (Skatteverket assumes full proceeds = gain when no evidence of cost exists).
-      // Exception: stablecoins pegged to a known fiat value. Using their ~1 USD / ~1 EUR
-      // peg as fallback avoids inflating K4 with fictional gains on pass-through stables.
+      const h  = holdings[sym] || { totalQty: 0, totalCostSEK: 0 };
+      const tp = taxPool[sym]  || { totalQty: 0, totalCostSEK: 0 };
+
+      const available       = h.totalQty;
+      const unknownAcq      = qty > available + 0.0001;     // portfolio has insufficient qty
+      const unknownTaxBasis = tp.totalQty < qty - 0.0001;  // tax pool has insufficient trusted qty
+      const safeQty         = unknownAcq ? qty : Math.min(qty, available);
+
+      // Cost basis from the trusted taxPool under Genomsnittsmetoden.
+      // If taxPool is insufficient (untrusted acquisitions, missing imports): route to Review.
+      // Exception: stablecoins use peg as fallback regardless.
       let costBasis;
-      if (!unknownAcq) {
-        costBasis = avg(sym) * safeQty;
+      if (!unknownTaxBasis) {
+        costBasis = taxAvg(sym) * safeQty;
       } else if (STABLES.has(sym)) {
         const stableSEK = EUR_STABLES.has(sym) ? STABLE_SEK.EUR : STABLE_SEK.USD;
         costBasis = safeQty * stableSEK;
       } else {
-        costBasis = 0;  // Unknown non-stable: full proceeds = gain (Skatteverket default)
+        costBasis = 0;  // No trusted cost basis — hasMissingHistory will null-report it
       }
-      const gainLoss   = proceedsSEK - feeSEK - costBasis;
+      const gainLoss = proceedsSEK - feeSEK - costBasis;
 
-      // Acquisition debug: classify WHY cost basis is zero for this disposal
+      // Acquisition debug: classify WHY cost basis is absent/partial
       let zeroCostReason = null;
       let acquisitionDebug = null;
       if (unknownAcq) {
@@ -3038,8 +3039,15 @@ const TaxEngine = (() => {
             reason: `${priorAcqs.length} anskaffning(ar) hittad — sålde mer än importerat`,
           };
         }
+      } else if (unknownTaxBasis && !STABLES.has(sym)) {
+        // Portfolio holds the asset but all/some acquisitions used untrusted price sources
+        zeroCostReason = 'acquisition_untrusted';
+        acquisitionDebug = {
+          status: 'untrusted',
+          reason: 'Anskaffat med ej betrodd priskälla — kan ej användas som K4-underlag',
+        };
       } else if (costBasis === 0 && proceedsSEK > 0) {
-        // Holdings exist but avg cost = 0 (received at zero FMV: airdrop/reward)
+        // Holdings exist but taxAvg = 0 (received at zero FMV: airdrop/reward)
         zeroCostReason = 'confirmed_zero';
         acquisitionDebug = {
           status: 'confirmed_zero',
@@ -3047,16 +3055,26 @@ const TaxEngine = (() => {
         };
       }
 
-      // Reduce holdings (floor at 0) — always use internal costBasis for inventory math
+      // Reduce holdings (always) — use holdings avg for inventory math
+      const holdingsCb = avg(sym) * safeQty;
       h.totalQty     = Math.max(0, h.totalQty - safeQty);
-      h.totalCostSEK = Math.max(0, h.totalCostSEK - costBasis);
+      h.totalCostSEK = Math.max(0, h.totalCostSEK - holdingsCb);
+
+      // Reduce taxPool proportionally (only if it had inventory)
+      const tpObj = taxPool[sym];
+      if (tpObj && tpObj.totalQty > 0) {
+        const tpQty = Math.min(safeQty, tpObj.totalQty);
+        const tpCb  = taxAvg(sym) * tpQty;
+        tpObj.totalQty     = Math.max(0, tpObj.totalQty - tpQty);
+        tpObj.totalCostSEK = Math.max(0, tpObj.totalCostSEK - tpCb);
+      }
 
       // ── Fail-closed reporting ──────────────────────────────────────────────
       // For missing-history disposals we NULL the declared cost/gain rather than
       // showing 0 kr. A zero cost basis would declare the full proceeds as a gain,
       // which is the Skatteverket default ONLY when the user explicitly acknowledges
       // the missing history and files anyway. Here we instead route to Review.
-      const hasMissingHistory = unknownAcq && !STABLES.has(sym);
+      const hasMissingHistory = (unknownAcq || unknownTaxBasis) && !STABLES.has(sym);
       const reportedCostBasis = hasMissingHistory ? null : costBasis;
       const reportedGainLoss  = hasMissingHistory ? null : gainLoss;
 
@@ -3064,7 +3082,9 @@ const TaxEngine = (() => {
       const baseValuationStatus = hasMissingHistory ? 'missing_history' : 'final';
       const baseExcludeFromK4   = hasMissingHistory;
       const baseReviewReasons   = hasMissingHistory
-        ? [`Missing acquisition history for ${sym}: sold ${safeQty.toFixed(6)} but only ${available.toFixed(6)} imported`]
+        ? [unknownAcq
+            ? `Missing acquisition history for ${sym}: sold ${safeQty.toFixed(6)} but only ${available.toFixed(6)} imported`
+            : `Untrusted acquisition cost for ${sym}: taxPool qty ${(taxPool[sym]?.totalQty || 0).toFixed(6)} < ${safeQty.toFixed(6)} sold`]
         : [];
 
       // Merge with caller-supplied valuation (extraFields wins for status/excludeFromK4
@@ -3181,9 +3201,10 @@ const TaxEngine = (() => {
           const cost = proceedsSEK + feeSEK;
           h.totalQty     += t.amount;
           h.totalCostSEK += cost;
-          // Pool integrity: taint if acquisition price is not from a trusted source
-          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
-            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          // taxPool: only trusted sources build the K4 cost-basis pool
+          if (TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taxPool[sym].totalQty     += t.amount;
+            taxPool[sym].totalCostSEK += cost;
           }
           // Unclassified receives count as income per Skatteverket default
           if (inYear && t.category === CAT.RECEIVE) {
@@ -3198,8 +3219,9 @@ const TaxEngine = (() => {
           // Staking rewards & income: add at FMV, report as income
           h.totalQty     += t.amount;
           h.totalCostSEK += proceedsSEK;
-          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
-            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          if (TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taxPool[sym].totalQty     += t.amount;
+            taxPool[sym].totalCostSEK += proceedsSEK;
           }
           if (inYear) {
             income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
@@ -3212,8 +3234,9 @@ const TaxEngine = (() => {
           // Airdrops = income at FMV (Skatteverket ruling)
           h.totalQty     += t.amount;
           h.totalCostSEK += proceedsSEK;
-          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
-            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          if (TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taxPool[sym].totalQty     += t.amount;
+            taxPool[sym].totalCostSEK += proceedsSEK;
           }
           if (inYear) {
             income.push({ date: t.date, assetSymbol: sym, amount: t.amount,
@@ -3228,24 +3251,21 @@ const TaxEngine = (() => {
           // Cost basis moves with the asset: use the asset's market price at arrival
           // (the sending side already deducted from its holdings)
           const costAtArrival = proceedsSEK + feeSEK;
+          const inboundCost   = costAtArrival || (avg(sym) * t.amount);
           h.totalQty     += t.amount;
-          h.totalCostSEK += costAtArrival || (avg(sym) * t.amount);
-          if (t.priceSource && !TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
-            taintPool(sym, `acq_untrusted:${t.priceSource}`);
+          h.totalCostSEK += inboundCost;
+          if (TRUSTED_K4_PRICE_SOURCES.has(t.priceSource)) {
+            taxPool[sym].totalQty     += t.amount;
+            taxPool[sym].totalCostSEK += inboundCost;
           }
           break;
         }
 
         // ── Disposal events ─────────────────────────────────
         case CAT.SELL: {
-          const sellValuationRaw = deriveProceedsValuation(t, null);
-          // Pool integrity gate: if the avg-cost pool is tainted, a 'final'
-          // valuation is not supportable — cost basis is unreliable.
-          const poolTaintedSell = (holdings[sym]?.integrity || 'clean') === 'tainted';
-          const sellValuation   = (poolTaintedSell && sellValuationRaw.valuationStatus === 'final')
-            ? { valuationStatus: 'estimated_reviewable', excludeFromK4: true,
-                reviewReasons: [...sellValuationRaw.reviewReasons, `cost_basis_pool_tainted: ${(holdings[sym].taintReasons||[]).slice(0,2).join(', ')}`] }
-            : sellValuationRaw;
+          // Pool integrity is now structural: recordDisposal uses taxPool for cost basis.
+          // If taxPool.totalQty < qty the disposal gets missing_history automatically.
+          const sellValuation = deriveProceedsValuation(t, null);
           const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
             contractAddress: t.contractAddress || null, ...sellValuation,
           });
@@ -3257,12 +3277,7 @@ const TaxEngine = (() => {
         case CAT.SEND: {
           // Unmatched SEND that wasn't caught as internal transfer
           // — treat as disposal (possible gift/donation, taxable in Sweden)
-          const sendValuationRaw = deriveProceedsValuation(t, null);
-          const poolTaintedSend  = (holdings[sym]?.integrity || 'clean') === 'tainted';
-          const sendValuation    = (poolTaintedSend && sendValuationRaw.valuationStatus === 'final')
-            ? { valuationStatus: 'estimated_reviewable', excludeFromK4: true,
-                reviewReasons: [...sendValuationRaw.reviewReasons, `cost_basis_pool_tainted: ${(holdings[sym].taintReasons||[]).slice(0,2).join(', ')}`] }
-            : sendValuationRaw;
+          const sendValuation = deriveProceedsValuation(t, null);
           const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
             contractAddress: t.contractAddress || null, ...sendValuation,
           });
@@ -3273,11 +3288,19 @@ const TaxEngine = (() => {
 
         case CAT.TRANSFER_OUT:
         case CAT.BRIDGE_OUT: {
-          // Non-taxable outbound: reduce inventory, preserve cost basis ratio
+          // Non-taxable outbound: reduce both holdings and taxPool proportionally
           const qty  = Math.min(t.amount, h.totalQty);
           const cb   = avg(sym) * qty;
           h.totalQty     = Math.max(0, h.totalQty - qty);
           h.totalCostSEK = Math.max(0, h.totalCostSEK - cb);
+          // Reduce taxPool by the same proportion (taxAvg × min(qty, tp.totalQty))
+          const tpOut = taxPool[sym];
+          if (tpOut && tpOut.totalQty > 0) {
+            const tpQty = Math.min(qty, tpOut.totalQty);
+            const tpCb  = taxAvg(sym) * tpQty;
+            tpOut.totalQty     = Math.max(0, tpOut.totalQty - tpQty);
+            tpOut.totalCostSEK = Math.max(0, tpOut.totalCostSEK - tpCb);
+          }
           break;
         }
 
@@ -3387,36 +3410,17 @@ const TaxEngine = (() => {
             }
           }
 
-          // ── Pool integrity check ────────────────────────────────────────────
-          // If the avg-cost pool for the disposed asset is tainted (one or more
-          // acquisitions used an untrusted/estimated cost), the cost basis is
-          // unreliable and the disposal cannot be K4-final.
-          const poolTainted = (holdings[sym]?.integrity || 'clean') === 'tainted';
-
           // Out side: disposal of `sym`
           // ── Determine valuation status for this trade row ─────────────────
           // Priority order: outlier_blocked > reference_mismatch > swap_at_cost > pricing chain
+          // Pool integrity is now structural: recordDisposal uses taxPool for cost basis,
+          // so untrusted acquisitions naturally produce missing_history without a taint flag.
           const tradeSwapSource = swapOutlier          ? 'swap_outlier_blocked'
             : swapReferenceMismatch                    ? 'swap_reference_mismatch'
             : swapAtCost                               ? swapProceedsSource
             : null;  // null = use priceSource from pricing chain
 
-          // Merge pool-integrity check with source-based valuation.
-          // Pool taint overrides 'final' → 'estimated_reviewable' but never
-          // upgrades a row that is already excluded for another reason.
-          const tradeValuationRaw = deriveProceedsValuation(t, tradeSwapSource);
-          const effectiveValuationStatus =
-            (poolTainted && tradeValuationRaw.valuationStatus === 'final')
-              ? 'estimated_reviewable'
-              : tradeValuationRaw.valuationStatus;
-          const tradeValuation = {
-            valuationStatus: effectiveValuationStatus,
-            excludeFromK4:   effectiveValuationStatus !== 'final',
-            reviewReasons:   [
-              ...tradeValuationRaw.reviewReasons,
-              ...(poolTainted ? [`cost_basis_pool_tainted: ${(holdings[sym].taintReasons || []).slice(0,2).join(', ')}`] : []),
-            ],
-          };
+          const tradeValuation = deriveProceedsValuation(t, tradeSwapSource);
 
           // Blocked outliers: null the proceeds so they cannot enter K4 or totals.
           // Reference mismatches: keep the value visible in the review panel.
@@ -3445,14 +3449,15 @@ const TaxEngine = (() => {
 
           // In side: acquisition of `inSym` at cost = FMV of what was given up.
           // Use effectiveProceedsSEK (not finalTrade) so inventory is consistent.
-          // Taint inSym pool when this trade's proceeds are not trusted — the cost
-          // we're recording for the received asset is then also untrustworthy.
+          // taxPool for inSym is only updated when this trade's valuation is final —
+          // if proceeds are estimated, the incoming cost basis is also untrustworthy.
           if (inSym && inAmt > 0) {
             ensure(inSym);
             holdings[inSym].totalQty     += inAmt;
             holdings[inSym].totalCostSEK += (effectiveProceedsSEK || 0);
-            if (effectiveValuationStatus !== 'final') {
-              taintPool(inSym, 'trade_in_untrusted');
+            if (tradeValuation.valuationStatus === 'final') {
+              taxPool[inSym].totalQty     += inAmt;
+              taxPool[inSym].totalCostSEK += (effectiveProceedsSEK || 0);
             }
           }
           break;
@@ -3489,7 +3494,7 @@ const TaxEngine = (() => {
       }
     }
 
-    // Summary
+    // Summary — all disposals (portfolio P&L, may include estimated/blocked rows)
     const totalGains = disposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
     const totalLosses = disposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
     const netGainLoss = totalGains - totalLosses;
@@ -3498,6 +3503,16 @@ const TaxEngine = (() => {
     const taxableGain = Math.max(0, totalGains - deductLoss);
     const estimatedTax = taxableGain * TAX_RATE;
     const totalIncome = income.reduce((s, i) => s + i.valueSEK, 0);
+
+    // K4-verified figures — only isK4Eligible disposals (final status, non-null amounts)
+    const k4EligibleDisposals = disposals.filter(d => isK4Eligible(d));
+    const k4TotalGains   = k4EligibleDisposals.filter(d => d.gainLossSEK > 0).reduce((s, d) => s + d.gainLossSEK, 0);
+    const k4TotalLosses  = k4EligibleDisposals.filter(d => d.gainLossSEK < 0).reduce((s, d) => s + Math.abs(d.gainLossSEK), 0);
+    const k4NetGainLoss  = k4TotalGains - k4TotalLosses;
+    const k4DeductLoss   = k4TotalLosses * LOSS_DEDUCTION;
+    const k4TaxableGain  = Math.max(0, k4TotalGains - k4DeductLoss);
+    const k4EstimatedTax = k4TaxableGain * TAX_RATE;
+    const excludedCount  = disposals.length - k4EligibleDisposals.length;
 
     // Target-year transactions only (for stats)
     const yearTxns = txns.filter(t => new Date(t.date).getFullYear() === year);
@@ -3531,6 +3546,10 @@ const TaxEngine = (() => {
         totalGains, totalLosses, netGainLoss,
         taxableGain, deductibleLoss: deductLoss,
         estimatedTax, totalIncome,
+        // K4-verified figures (excludes estimated/blocked/missing-history rows)
+        k4TotalGains, k4TotalLosses, k4NetGainLoss,
+        k4TaxableGain, k4DeductibleLoss: k4DeductLoss,
+        k4EstimatedTax, excludedCount,
       },
     };
   }

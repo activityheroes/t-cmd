@@ -384,8 +384,13 @@ const TaxUI = (() => {
             <div class="tax-stat-value">${TaxEngine.formatSEK(summary.netGainLoss)}</div>
           </div>
           <div class="tax-stat-card">
-            <div class="tax-stat-label">Realiserad vinst ${S.taxYear}</div>
-            <div class="tax-stat-value ${summary.totalGains >= 0 ? 'tax-port-pos' : ''}">${TaxEngine.formatSEK(summary.totalGains || 0)}</div>
+            <div class="tax-stat-label">K4-verifierad vinst ${S.taxYear}</div>
+            <div class="tax-stat-value tax-port-pos">${TaxEngine.formatSEK(summary.k4TotalGains || 0)}</div>
+            ${(summary.excludedCount || 0) > 0 ? `<div style="font-size:10px;color:#f59e0b;margin-top:2px">⚠️ ${summary.excludedCount} rad(er) exkluderade</div>` : ''}
+          </div>
+          <div class="tax-stat-card">
+            <div class="tax-stat-label" title="Inkluderar uppskattade och exkluderade rader">Uppskattad total P&L ${S.taxYear}</div>
+            <div class="tax-stat-value ${(summary.totalGains - summary.totalLosses) >= 0 ? 'tax-port-pos' : ''}" style="font-size:13px;opacity:0.75">${TaxEngine.formatSEK((summary.totalGains || 0) - (summary.totalLosses || 0))}</div>
           </div>
           <div class="tax-stat-card">
             <div class="tax-stat-label">Transaktioner ${S.taxYear}</div>

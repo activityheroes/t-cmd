@@ -2838,6 +2838,11 @@ const TaxEngine = (() => {
     const disposals = [];  // in target year
     const income    = [];  // in target year
 
+    // Price cache (read-only snapshot) — used in the swap-at-cost fallback to
+    // look up the MARKET price of the received asset (e.g. SOL) before falling
+    // back to avg-cost estimation, which can inflate K4 when inAmount is wrong.
+    const _priceCache = getPriceCache();
+
     function ensure(sym) {
       if (!holdings[sym]) holdings[sym] = { totalQty: 0, totalCostSEK: 0 };
     }
@@ -3017,52 +3022,100 @@ const TaxEngine = (() => {
           const inSym  = t.inAsset;
           const inAmt  = t.inAmount || 0;
 
-          // ── Swap-at-cost fallback ───────────────────────────────────────────
+          // ── Swap proceeds fallback ─────────────────────────────────────────
           // When the pricing chain could not price the out-side asset (memecoin
-          // with no market data), proceedsSEK = 0. Storing 0 as the in-side cost
-          // cascades into phantom gains every time the received asset (e.g. SOL)
-          // is later disposed of.
-          //
-          // Fallback strategy (in priority order):
+          // with no market data), proceedsSEK = 0. We derive an estimate in this
+          // priority order:
           //   1. proceedsSEK > 0 from pricing chain → use it directly (happy path)
-          //   2. avg(inSym) > 0 → use avg cost of received asset × qty as a
-          //      neutral "swap at cost" estimate (no gain, no loss on this trade)
-          //   3. avg(sym) > 0 → use avg cost of out-side × qty (your cost basis
-          //      is used as proceeds — zero-gain treatment)
-          //   4. Fall through with 0 (unresolvable, flagged in review)
+          //   2. Market price of received asset (from price cache) × inAmt
+          //      — this is the REAL value of what the user received in the swap
+          //      (proceedsSource: 'swap_received_market', confidence: estimated)
+          //   3. avg(inSym) × inAmt — user's avg purchase cost of received asset
+          //      (revenue-neutral estimate; proceedsSource: 'swap_at_cost')
+          //   4. avg(sym) × t.amount — out-side avg cost as proxy
+          //      (zero-gain treatment; proceedsSource: 'swap_at_cost')
+          //   5. Fall through with 0 (unresolvable, flagged in review)
           //
-          // The 'proceedsSource: swap_at_cost' field is propagated to the disposal
-          // record so the health checker and UI can flag these rows distinctly from
-          // fully-priced disposals.
+          // Safety guards:
+          //   • SOL inAmount cap: more than 10,000 SOL in a single personal swap
+          //     is physically implausible — mirrors the Level 2 guard in priceOneTxn.
+          //   • Per-unit sanity cap: if the implied price per sold unit would exceed
+          //     50,000 kr for a non-major asset with estimated (not market-sourced)
+          //     proceeds, it is almost certainly a data corruption artefact.
+          //     Block it → set proceeds = 0 and route to review as 'outlier'.
           let effectiveProceedsSEK = proceedsSEK;
-          let swapAtCost = false;
+          let swapAtCost           = false;
+          let swapProceedsSource   = 'swap_at_cost';
+          let swapOutlier          = false;
 
           if (effectiveProceedsSEK <= 0 && inSym && inAmt > 0) {
             ensure(inSym);
-            const inAvgCost = avg(inSym);
-            if (inAvgCost > 0) {
-              // Use the avg cost of the received asset as a proxy for trade value.
-              // This is defensible: we know what we received is worth at least its
-              // average purchase price. Result: trade is revenue-neutral.
-              effectiveProceedsSEK = inAvgCost * inAmt;
-              swapAtCost = true;
-            } else {
-              // Received asset has 0 avg cost (also unknown). Try out-side avg cost.
-              const outAvgCost = avg(sym);
-              if (outAvgCost > 0) {
-                effectiveProceedsSEK = outAvgCost * t.amount;
-                swapAtCost = true;
+
+            // Apply the same SOL inAmount guard that Level 2 in priceOneTxn uses.
+            let effectiveInAmt = inAmt;
+            if (inSym === 'SOL' && effectiveInAmt > 10_000) effectiveInAmt = 0;
+
+            if (effectiveInAmt > 0) {
+              // Priority 1 (market): look up the CURRENT cached market price of
+              // the received asset — gives the actual SEK value of the swap output.
+              const inDateStr  = (t.date || '').slice(0, 10);
+              const inMktPrice = lookupCachedSEK(inSym, inDateStr, _priceCache, null);
+              if (inMktPrice && inMktPrice > 0) {
+                effectiveProceedsSEK = inMktPrice * effectiveInAmt;
+                swapAtCost         = true;
+                swapProceedsSource = 'swap_received_market';
+              } else {
+                // Priority 2 (avg cost neutral): avg cost of received asset.
+                const inAvgCost = avg(inSym);
+                if (inAvgCost > 0) {
+                  effectiveProceedsSEK = inAvgCost * effectiveInAmt;
+                  swapAtCost           = true;
+                  swapProceedsSource   = 'swap_at_cost';
+                } else {
+                  // Priority 3: avg cost of out-side (zero-gain treatment).
+                  const outAvgCost = avg(sym);
+                  if (outAvgCost > 0) {
+                    effectiveProceedsSEK = outAvgCost * t.amount;
+                    swapAtCost           = true;
+                    swapProceedsSource   = 'swap_at_cost';
+                  }
+                }
+              }
+            }
+
+            // ── Per-unit sanity cap ─────────────────────────────────────────────
+            // If the implied per-unit price for a non-major asset is implausibly
+            // high AND we derived it from avg-cost (not a real market price), the
+            // inAmount field is likely corrupted (e.g. lamport-scale artefact).
+            // Zero the proceeds and flag the disposal as an outlier for review.
+            if (swapAtCost && swapProceedsSource === 'swap_at_cost'
+                && !MAJOR_ASSETS.has(sym) && t.amount > 0) {
+              const impliedUnit = effectiveProceedsSEK / t.amount;
+              if (impliedUnit > 50_000) {          // 50 k kr/unit for a meme coin?
+                swapAtCost           = false;
+                effectiveProceedsSEK = 0;
+                swapOutlier          = true;
               }
             }
           }
 
           // Out side: disposal of `sym`
-          const tradeExtra = { isTrade: true, inAsset: inSym, inAmount: inAmt };
+          const tradeExtra = {
+            isTrade: true, inAsset: inSym, inAmount: inAmt,
+            contractAddress: t.contractAddress || null,
+          };
           if (swapAtCost) {
-            tradeExtra.proceedsSource = 'swap_at_cost';
-            tradeExtra.swapAtCostEstimate = effectiveProceedsSEK;
+            tradeExtra.proceedsSource      = swapProceedsSource;
+            tradeExtra.swapAtCostEstimate  = effectiveProceedsSEK;
             // Keep needsReview = true so these show in the review queue
             tradeExtra.needsReview = true;
+          }
+          if (swapOutlier) {
+            tradeExtra.needsReview    = true;
+            tradeExtra.reviewReason   = 'outlier';
+            tradeExtra.proceedsSource = 'swap_outlier_blocked';
+            tradeExtra.notes = (t.notes ? t.notes + ' | ' : '')
+              + `Beräknade intäkter blockerade: implicerat enhetspris extremt högt för icke-major tillgång (trolig datakorruption i inAmount)`;
           }
           const d = recordDisposal(t, sym, t.amount, effectiveProceedsSEK, feeSEK, tradeExtra);
           if (inYear) disposals.push(d);
@@ -3170,7 +3223,7 @@ const TaxEngine = (() => {
 
     // Count problem categories
     const unknownAcqCount = disposals.filter(d => d.unknownAcquisition).length;
-    const swapAtCostCount = disposals.filter(d => d.proceedsSource === 'swap_at_cost').length;
+    const swapAtCostCount = disposals.filter(d => d.proceedsSource === 'swap_at_cost' || d.proceedsSource === 'swap_received_market').length;
     // Zero-cost disposals that are NOT flagged as unknownAcquisition (silent 0-cost rows)
     const silentZeroCost  = disposals.filter(d =>
       !d.unknownAcquisition &&
@@ -3269,7 +3322,7 @@ const TaxEngine = (() => {
         const cost = gains.reduce((s, d) => s + d.costBasisSEK, 0);
         const gain = gains.reduce((s, d) => s + d.gainLossSEK, 0);
         const unknownAcqCount = gains.filter(d => d.unknownAcquisition).length;
-        const swapAtCostCount = gains.filter(d => d.proceedsSource === 'swap_at_cost').length;
+        const swapAtCostCount = gains.filter(d => d.proceedsSource === 'swap_at_cost' || d.proceedsSource === 'swap_received_market').length;
         const confidence = unknownAcqCount > 0 ? 'unknown'
           : swapAtCostCount > 0 ? 'estimated'
           : cost === 0 && proc > 0 ? 'zero_cost'
@@ -3298,7 +3351,7 @@ const TaxEngine = (() => {
         const cost = losses.reduce((s, d) => s + d.costBasisSEK, 0);
         const loss = Math.abs(losses.reduce((s, d) => s + d.gainLossSEK, 0));
         const unknownAcqCount = losses.filter(d => d.unknownAcquisition).length;
-        const swapAtCostCount = losses.filter(d => d.proceedsSource === 'swap_at_cost').length;
+        const swapAtCostCount = losses.filter(d => d.proceedsSource === 'swap_at_cost' || d.proceedsSource === 'swap_received_market').length;
         const confidence = unknownAcqCount > 0 ? 'unknown'
           : swapAtCostCount > 0 ? 'estimated'
           : cost === 0 && proc > 0 ? 'zero_cost'
@@ -3336,6 +3389,52 @@ const TaxEngine = (() => {
 
   // ════════════════════════════════════════════════════════════
   // SUSPICIOUS ZERO-COST QUERY
+  // ════════════════════════════════════════════════════════════
+  // DEBUG QUERY — estimated / high-proceeds meme coin disposals
+  // Returns per-row debug traces for the query:
+  //   confidence IN ('estimated') AND proceeds_sek > 10 000
+  //   AND asset NOT IN (BTC, ETH, SOL, WBTC, USDC, USDT …)
+  // Exposes inflated swap-at-cost rows immediately.
+  // ════════════════════════════════════════════════════════════
+  function queryEstimatedHighProceedsDisposals(taxResult) {
+    if (!taxResult?.disposals) return [];
+    const FILTER_MAJOR = new Set([
+      'BTC','WBTC','ETH','WETH','SOL','WSOL','BNB','WBNB',
+      'USDC','USDT','BUSD','DAI','EURC','EUROC',
+      'MATIC','POL','AVAX','ADA','DOT','ARB','OP',
+    ]);
+    const ESTIMATED_SOURCES = new Set([
+      'swap_at_cost','swap_received_market','swap_outlier_blocked',
+    ]);
+    return taxResult.disposals
+      .filter(d => {
+        if (FILTER_MAJOR.has((d.assetSymbol || '').toUpperCase())) return false;
+        if (d.proceedsSEK <= 10_000) return false;
+        return ESTIMATED_SOURCES.has(d.proceedsSource)
+          || (d.proceedsSEK > 10_000 && d.costBasisSEK < d.proceedsSEK * 0.01);
+      })
+      .sort((a, b) => b.proceedsSEK - a.proceedsSEK)
+      .map(d => ({
+        tx_id:                d.id,
+        asset_symbol:         d.assetSymbol,
+        mint_address:         d.contractAddress || null,
+        normalized_amount:    d.amountSold,
+        asset_received:       d.inAsset     || null,
+        amount_received:      d.inAmount    || null,
+        price_source:         d.proceedsSource || 'unknown',
+        implied_unit_price_sek: d.amountSold > 0
+          ? Math.round(d.proceedsSEK / d.amountSold) : null,
+        proceeds_sek:         Math.round(d.proceedsSEK),
+        cost_basis_sek:       Math.round(d.costBasisSEK),
+        gain_loss_sek:        Math.round(d.gainLossSEK),
+        date:                 d.date,
+        needs_review:         d.needsReview,
+        review_reason:        d.reviewReason || null,
+        zeroCostReason:       d.zeroCostReason || null,
+        acq_debug:            d.acquisitionDebug?.reason || null,
+      }));
+  }
+
   // Returns disposals where proceeds are significant but cost
   // basis is 0 and acquisition is unresolved — the most likely
   // phantom gains that need investigation.
@@ -5369,7 +5468,8 @@ const TaxEngine = (() => {
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine
-    computeTaxYear, computeReportHealth, querySuspiciousZeroCost,
+    computeTaxYear, computeReportHealth,
+    querySuspiciousZeroCost, queryEstimatedHighProceedsDisposals,
     // K4 export
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review

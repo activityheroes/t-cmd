@@ -2838,6 +2838,9 @@ const TaxUI = (() => {
     const result = getOrComputeTaxResult();
     const { summary, disposals } = result;
     const k4 = TaxEngine.generateK4Report(result);
+    // Pre-compute estimated high-proceeds debug rows (exposed in panel below K4 table)
+    const estimatedHighProceeds = TaxEngine.queryEstimatedHighProceedsDisposals
+      ? TaxEngine.queryEstimatedHighProceedsDisposals(result) : [];
     // Trusted total = only exact + estimated rows (exclude unknown-cost rows)
     const trustedGains   = k4.k4Rows.filter(r => r.side === 'gain' && (r.confidence === 'exact' || r.confidence === 'estimated')).reduce((s, r) => s + r.gain, 0);
     const unknownGainsAmt = k4.k4Rows.filter(r => r.side === 'gain' && r.confidence === 'unknown').reduce((s, r) => s + r.gain, 0);
@@ -3058,6 +3061,60 @@ const TaxUI = (() => {
             Gå till <button class="tax-btn tax-btn-xs" style="font-size:10px;padding:1px 6px;margin:0 2px" onclick="TaxUI.navigate('accounts')">Konton</button>
             och lägg till den exchange eller wallet där dessa tokens ursprungligen köptes.
             Motorn matchar transaktionerna automatiskt när historiken importerats.
+          </div>
+        </div>`;
+        })()}
+
+        <!-- Estimated high-proceeds meme coin panel -->
+        ${(() => {
+          if (!estimatedHighProceeds.length) return '';
+          const totalEstProc = estimatedHighProceeds.reduce((s, r) => s + r.proceeds_sek, 0);
+          const blocked = estimatedHighProceeds.filter(r => r.price_source === 'swap_outlier_blocked');
+          const market  = estimatedHighProceeds.filter(r => r.price_source === 'swap_received_market');
+          const avgCost = estimatedHighProceeds.filter(r => r.price_source === 'swap_at_cost');
+          const sourceLabel = s => s === 'swap_received_market' ? '📈 Marknadspris mottaget'
+            : s === 'swap_at_cost'         ? '📊 Genomsnittskostnad'
+            : s === 'swap_outlier_blocked' ? '🚫 Blockerad (orimlig)'
+            : s;
+          return `
+        <div class="tax-section" style="margin-bottom:16px;border-color:rgba(251,191,36,.35)">
+          <div class="tax-section-header" style="margin-bottom:10px">
+            <h2 style="font-size:14px;color:#fbbf24">⚠ Uppskattade meme coin-intäkter — granska innan deklaration</h2>
+            <span class="tax-badge" style="background:rgba(251,191,36,.12);color:#fbbf24">
+              ${estimatedHighProceeds.length} rad${estimatedHighProceeds.length !== 1 ? 'er' : ''}
+              ${blocked.length ? ` · ${blocked.length} blockerade` : ''}
+            </span>
+          </div>
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:10px;line-height:1.6">
+            Dessa swap-avyttringar kunde inte prissättas exakt. Intäkterna är <em>uppskattade</em>
+            från mottaget tillgångsvärde eller genomsnittskostnad — inte verifierade marknadspriser.
+            ${blocked.length ? `<strong style="color:#f87171"> ${blocked.length} rad${blocked.length !== 1 ? 'er' : ''} blockerad${blocked.length !== 1 ? 'e' : ''} pga orimligt enhetspris (trolig datakorruption) — ingår INTE i K4.</strong>` : ''}
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${estimatedHighProceeds.slice(0, 15).map(row => {
+              const isBlocked = row.price_source === 'swap_outlier_blocked';
+              const borderColor = isBlocked ? 'rgba(239,68,68,.35)' : 'rgba(251,191,36,.2)';
+              const bgColor     = isBlocked ? 'rgba(239,68,68,.05)' : 'rgba(251,191,36,.04)';
+              return `<div style="display:grid;grid-template-columns:90px 1fr auto auto auto;align-items:center;gap:8px;padding:7px 10px;background:${bgColor};border:1px solid ${borderColor};border-radius:6px;font-size:11px;flex-wrap:wrap">
+                <span class="tax-mono" style="font-weight:600;color:${isBlocked ? '#f87171' : '#e2e8f0'}">${row.asset_symbol}</span>
+                <div style="min-width:0">
+                  <span style="color:#94a3b8">${row.date?.slice(0,10) || ''}</span>
+                  <span style="color:#475569;margin-left:6px">${TaxEngine.formatCrypto(row.normalized_amount, 4)} → ${row.amount_received ? TaxEngine.formatCrypto(row.amount_received, 4) + ' ' + (row.asset_received || '') : '?'}</span>
+                  <span style="font-size:10px;padding:1px 5px;border-radius:3px;margin-left:6px;background:rgba(148,163,184,.08);color:#64748b">${sourceLabel(row.price_source)}</span>
+                  ${row.implied_unit_price_sek != null ? `<span style="font-size:10px;color:#64748b;margin-left:4px">${row.implied_unit_price_sek.toLocaleString('sv-SE')} kr/enhet</span>` : ''}
+                </div>
+                <span style="color:#94a3b8;text-align:right;white-space:nowrap">KB: ${TaxEngine.formatSEK(row.cost_basis_sek)}</span>
+                <span style="color:${isBlocked ? '#f87171' : '#fbbf24'};font-weight:700;text-align:right;white-space:nowrap">${TaxEngine.formatSEK(row.proceeds_sek)}</span>
+                <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${row.tx_id}')" style="font-size:10px;padding:2px 6px">✏️</button>
+              </div>`;
+            }).join('')}
+          </div>
+          ${estimatedHighProceeds.length > 15 ? `<div style="font-size:10px;color:#64748b;margin-top:6px;text-align:center">… och ${estimatedHighProceeds.length - 15} fler rader</div>` : ''}
+          <div style="margin-top:10px;font-size:11px;color:#64748b">
+            <strong style="color:#94a3b8">Källkoder:</strong>
+            📈 Marknadspris = intäkt beräknad från mottaget tillgångs marknadspris (rekommenderat) ·
+            📊 Genomsnittskostnad = swap-at-cost uppskattning ·
+            🚫 Blockerad = orimlig uppskattning borttagen från K4
           </div>
         </div>`;
         })()}

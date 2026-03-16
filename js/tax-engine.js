@@ -56,6 +56,26 @@ const TaxEngine = (() => {
   const ANOMALY_LOW_PROCEEDS         = 1_000;   // kr
   const ANOMALY_RATIO_MIN            = 100;     // ×; minimum ratio to trigger anomaly gate
 
+  // ── Mid-tier sanity thresholds (below anomaly, above noise) ─────────────
+  // These catch JOS/KNET-style rows: plausible-looking numbers that are still
+  // economically implausible for meme/small-cap tokens without secondary proof.
+  //
+  //  SANITY_GAIN_RATIO     — proc/cost ratio that requires secondary reference
+  //                          confirmation before a non-major row can stay Exakt.
+  //                          JOS: 9,824/728 = 13.5× → fires (13.5 > 8)
+  //  SANITY_GAIN_MIN_PROC  — minimum proceeds (kr) to trigger ratio check (avoids
+  //                          noise on tiny trades like 40 kr / 5 kr)
+  //  SANITY_GAIN_MAX_COST  — maximum cost (kr) to trigger ratio check; if cost is
+  //                          already large the row may be a real position
+  //  SANITY_LARGE_COST     — cost threshold above which we require ≥N trusted acqs
+  //  SANITY_MIN_TRUSTED_ACQS — minimum trusted acquisition events to support a
+  //                          large non-major cost basis without review
+  const SANITY_GAIN_RATIO      = 8;       // ×; proc/cost > 8 triggers check
+  const SANITY_GAIN_MIN_PROC   = 3_000;   // kr
+  const SANITY_GAIN_MAX_COST   = 4_000;   // kr
+  const SANITY_LARGE_COST      = 8_000;   // kr; triggers acquisition-count check
+  const SANITY_MIN_TRUSTED_ACQS = 2;      // acquisitions required for large cost
+
   // ── Global asset canonical identities ─────────────────────
   // Maps alternate/wrapped/bridged names → canonical symbol.
   // Used so the same economic asset is tracked as one across chains/sources.
@@ -3203,6 +3223,70 @@ const TaxEngine = (() => {
         );
       }
 
+      // ── Mid-tier sanity check ─────────────────────────────────────────────
+      // Runs AFTER applyAnomalyCheck (so already-blocked rows are skipped).
+      // Catches JOS/KNET-style rows that pass the extreme-asymmetry gate but
+      // are still economically implausible for non-major meme tokens:
+      //   (A) High gain ratio without secondary-reference confirmation
+      //   (B) Large cost basis on a non-major with too few trusted acquisitions
+      //
+      // Downgrade: estimated_reviewable + sanityFlags[] (value preserved for review)
+      // NOT blocked_outlier — we don't null the fields, just remove Exact status.
+      function applySanityChecks(d, t, sym, acqMap) {
+        if (d.valuationStatus !== 'final') return;
+        if (MAJOR_ASSETS.has(sym) || STABLES.has(sym)) return;
+        const proc = d.proceedsSEK  || 0;
+        const cost = d.costBasisSEK || 0;
+        const flags = [];
+
+        // ── A: High gain ratio for non-major with no confirming reference ──
+        // Targets: "meme token appears to have 8×+ gain without proof"
+        // JOS: proc=9,824 kr / cost=728 kr = 13.5× → fires
+        if (proc > SANITY_GAIN_MIN_PROC && cost > 0
+            && cost < SANITY_GAIN_MAX_COST
+            && proc / cost > SANITY_GAIN_RATIO) {
+          const _dateStr  = (t.date || '').slice(0, 10);
+          const _refPrice = lookupCachedSEK(sym, _dateStr, _priceCache, t.contractAddress);
+          if (_refPrice && _refPrice > 0 && t.amount > 0) {
+            // Reference exists — check if it confirms the ratio
+            const _refTotal = _refPrice * t.amount;
+            const _ratio    = Math.max(proc / _refTotal, _refTotal / proc);
+            if (_ratio > SECONDARY_REF_DEVIATION_MAX) {
+              flags.push(`meme_high_gain_ratio:${Math.round(proc/cost)}x_ref_disagrees`);
+            }
+            // else reference supports — allow Exakt to stand
+          } else {
+            // No reference to confirm this unusual gain — require review
+            flags.push(`meme_high_gain_ratio:${Math.round(proc/cost)}x_no_reference`);
+          }
+        }
+
+        // ── B: Large cost basis with very few trusted acquisitions ──────────
+        // Targets: "how did this junk token cost basis get so large?"
+        // KNET: cost=13,591 kr but only N trusted acquisitions for this asset
+        if (cost > SANITY_LARGE_COST) {
+          const trustedAcqs = (acqMap[sym] || []).filter(a => a.isTrusted);
+          const trustedCostSEK = trustedAcqs.reduce((s, a) => s + (a.costSEK || 0), 0);
+          if (trustedAcqs.length < SANITY_MIN_TRUSTED_ACQS) {
+            flags.push(`large_meme_cost_few_trusted_acqs:${trustedAcqs.length}_acqs_for_${Math.round(cost)}kr_KB`);
+          } else if (trustedCostSEK > 0 && cost > trustedCostSEK * 1.8) {
+            // Cost basis is > 1.8× what trusted acquisitions can explain
+            flags.push(`cost_basis_exceeds_trusted_acqs:KB_${Math.round(cost)}kr_vs_trusted_${Math.round(trustedCostSEK)}kr`);
+          }
+        }
+
+        if (flags.length === 0) return;
+
+        // Downgrade to estimated_reviewable — keep financial values visible for
+        // review panel, but exclude from K4 and flag as needing verification.
+        d.valuationStatus = 'estimated_reviewable';
+        d.excludeFromK4   = true;
+        d.sanityFlags     = flags;
+        (d.reviewReasons  = d.reviewReasons || []).push(
+          `sanity_check_failed: ${flags.join(' | ')}`
+        );
+      }
+
       switch (t.category) {
 
         // ── Acquisition events: add to inventory ───────────
@@ -3282,6 +3366,7 @@ const TaxEngine = (() => {
             contractAddress: t.contractAddress || null, ...sellValuation,
           });
           applyAnomalyCheck(d, t, sym);
+          applySanityChecks(d, t, sym, acquisitionMap);
           if (inYear) disposals.push(d);
           break;
         }
@@ -3308,6 +3393,7 @@ const TaxEngine = (() => {
               contractAddress: t.contractAddress || null, ...sendValuation,
             });
             applyAnomalyCheck(d, t, sym);
+            applySanityChecks(d, t, sym, acquisitionMap);
             if (inYear) disposals.push(d);
           }
           break;
@@ -3472,6 +3558,7 @@ const TaxEngine = (() => {
           }
           const d = recordDisposal(t, sym, t.amount, finalTradeProceedsSEK, feeSEK, tradeExtra);
           applyAnomalyCheck(d, t, sym);
+          applySanityChecks(d, t, sym, acquisitionMap);
           if (inYear) disposals.push(d);
 
           // In side: acquisition of `inSym` at cost = FMV of what was given up.
@@ -3764,12 +3851,16 @@ const TaxEngine = (() => {
     // Suspicious zero-cost rows: high-value disposals with unknown acquisition
     const suspiciousZeroCost = querySuspiciousZeroCost(result);
 
-    // Group excluded disposals by status for the UI review panel
+    // Group excluded disposals by status for the UI review panel.
+    // Rows with sanityFlags go into a dedicated 'sanity_flagged' bucket
+    // (separate from estimated_reviewable so they surface in their own section).
     const excludedByStatus = {};
     for (const d of excludedDisposals) {
-      const s = d.valuationStatus || 'estimated_reviewable';
+      let s = d.valuationStatus || 'estimated_reviewable';
+      if (d.sanityFlags && d.sanityFlags.length > 0) s = 'sanity_flagged';
       (excludedByStatus[s] = excludedByStatus[s] || []).push(d);
     }
+    const sanityFlaggedCount = (excludedByStatus['sanity_flagged'] || []).length;
 
     return {
       k4Rows, totalGains, totalLosses, year, userInfo,
@@ -3778,6 +3869,7 @@ const TaxEngine = (() => {
       excludedDisposals,   // full list for debug query
       excludedByStatus,    // grouped for UI panels
       excludedCount:       excludedDisposals.length,
+      sanityFlaggedCount,  // rows downgraded by mid-tier sanity checks
       k4DisposalCount:     k4Disposals.length,
     };
   }

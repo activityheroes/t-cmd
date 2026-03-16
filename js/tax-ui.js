@@ -3197,11 +3197,13 @@ const TaxUI = (() => {
     const unknownGainsAmt = 0; // All uncertain rows are now excluded, not in K4
     // Excluded disposals summary
     const excByStatus     = k4.excludedByStatus || {};
+    const excSanity       = (excByStatus['sanity_flagged']          || []);
     const excEstimated    = (excByStatus['estimated_reviewable']   || []);
     const excMissing      = (excByStatus['missing_history']         || []);
     const excBlocked      = (excByStatus['blocked_outlier']         || []);
     const excUnknownId    = (excByStatus['unknown_asset_identity']  || []);
     const excNoise        = (excByStatus['excluded_noise']          || []);
+    const excSanityGain   = excSanity.reduce((s, d) => s + (d.gainLossSEK || 0), 0);
     const excEstGain      = excEstimated.reduce((s, d) => s + (d.proceedsSEK || 0) - (d.costBasisSEK || 0), 0);
     const excMissingProc  = excMissing.reduce((s, d) => s + (d.proceedsSEK || 0), 0);
     const issues = TaxEngine.getReviewIssues(null, result).length;
@@ -3468,6 +3470,7 @@ const TaxUI = (() => {
           if (!totalExc) return '';
 
           const statusMeta = {
+            sanity_flagged:        { icon: '🔎', color: '#f97316', bg: 'rgba(249,115,22,.07)', border: 'rgba(249,115,22,.3)',  label: 'Misstänkta rader — Sanitetskontroll' },
             estimated_reviewable:  { icon: '⚠', color: '#fbbf24', bg: 'rgba(251,191,36,.05)', border: 'rgba(251,191,36,.25)', label: 'Uppskattad prissättning' },
             missing_history:       { icon: '⛔', color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Saknad anskaffningshistorik' },
             blocked_outlier:       { icon: '🚫', color: '#f87171', bg: 'rgba(239,68,68,.05)',  border: 'rgba(239,68,68,.25)',  label: 'Blockerad (orimlig/korrupt data)' },
@@ -3490,17 +3493,23 @@ const TaxUI = (() => {
                 <span style="font-size:10px;color:#475569">▾</span>
               </summary>
               <div style="display:flex;flex-direction:column;gap:3px;margin-top:4px;padding-left:4px">
-                ${show.map(d => `
+                ${show.map(d => {
+                  const gl = d.gainLossSEK;
+                  const sanFlags = (d.sanityFlags || []);
+                  return `
                 <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px;flex-wrap:wrap">
                   <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
                   <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
-                  <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} sold</span>
+                  <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} avyttrat</span>
                   ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Intäkt: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Intäkt: okänd</span>'}
                   ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: okänd</span>'}
-                  <span style="padding:1px 4px;border-radius:3px;background:rgba(148,163,184,.08);color:#475569">${d.proceedsSource || '—'}</span>
-                  ${(d.reviewReasons||[]).length ? (d.reviewReasons||[]).slice(0,2).map(r => `<span style="color:#64748b;font-style:italic;font-size:9px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r}">${r}</span>`).join('') : ''}
+                  ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
+                  ${sanFlags.map(f => `<span style="padding:1px 5px;border-radius:3px;background:rgba(249,115,22,.12);color:#f97316;font-size:9px;font-family:monospace" title="${f}">${f.split(':')[0]}</span>`).join('')}
+                  ${sanFlags.length === 0 ? `<span style="padding:1px 4px;border-radius:3px;background:rgba(148,163,184,.08);color:#475569">${d.proceedsSource || '—'}</span>` : ''}
+                  ${(d.reviewReasons||[]).filter(r => !r.startsWith('sanity_check')).slice(0,1).map(r => `<span style="color:#64748b;font-style:italic;font-size:9px" title="${r}">${r.slice(0,60)}</span>`).join('')}
+                  <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.openAssetAudit('${d.assetSymbol}')" style="padding:1px 5px" title="Granska ${d.assetSymbol}">🔍</button>
                   <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
-                </div>`).join('')}
+                </div>`;}).join('')}
                 ${rows.length > 8 ? `<div style="font-size:10px;color:#475569;text-align:center;padding:4px">… och ${rows.length - 8} fler rader</div>` : ''}
               </div>
             </details>`;
@@ -3517,6 +3526,15 @@ const TaxUI = (() => {
             De visas här för transparens men ingår <strong style="color:#818cf8">inte</strong> i K4-totaler, PDF eller CSV.
             Åtgärda dem i <button class="tax-btn tax-btn-xs" onclick="TaxUI.navigate('review')" style="font-size:10px;padding:1px 6px;margin:0 2px">Granskning</button> för att inkludera dem.
           </div>
+          ${excSanity.length > 0 ? `
+          <div style="padding:8px 12px;margin-bottom:8px;border-radius:6px;background:rgba(249,115,22,.08);border:1px solid rgba(249,115,22,.25);font-size:11px;color:#f97316;line-height:1.6">
+            🔎 <strong>${excSanity.length} rad${excSanity.length!==1?'er':''} nedsatta av sanitetskontroll.</strong>
+            Dessa rader hade intäkt/kostnad-förhållanden eller kostnadsbasstorlekar som inte kan bekräftas
+            från importerade transaktioner utan sekundär referens.
+            Total vinst/förlust på dessa rader: <strong>${TaxEngine.formatSEK(excSanityGain)}</strong>.
+            Kontrollera ursprungliga transaktioner och bekräfta i <button class="tax-btn tax-btn-xs" onclick="TaxUI.navigate('review')" style="font-size:10px;padding:1px 6px;margin:0 2px;color:#f97316;border-color:#f97316">Granskning</button>.
+          </div>` : ''}
+          ${renderExcGroup(excSanity,    'sanity_flagged')}
           ${renderExcGroup(excMissing,   'missing_history')}
           ${renderExcGroup(excEstimated, 'estimated_reviewable')}
           ${renderExcGroup(excBlocked,   'blocked_outlier')}

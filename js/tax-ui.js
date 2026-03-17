@@ -1402,6 +1402,21 @@ const TaxUI = (() => {
       }
     }
 
+    // ── Economic event reconstruction provenance (Solana)
+    if (d.reconstructionSummary) {
+      const confIcon = d.reconstructionConfidence === 'exact' ? '✅'
+        : d.reconstructionConfidence === 'high'   ? '🔍'
+        : d.reconstructionConfidence === 'medium' ? '⚠'
+        : '🔴';
+      lines.push(`${confIcon} Rekonstruktion: "${d.reconstructionSummary}"`);
+      if (d.ignoredRouteLegs?.length) {
+        lines.push(`   Ignorerat: ${d.ignoredRouteLegs.join(', ')}`);
+      }
+      if (d.reconstructionConfidence === 'low') {
+        lines.push('🔴 Lågkonfidens rekonstruktion — exkluderad från K4 tills du bekräftar manuellt');
+      }
+    }
+
     // ── Transaction-level over-allocation warning
     if (d.txProceedsOverallocated) {
       lines.push(`🔴 INTÄKTS-DUBLETT: Samma tx-utdata tilldelad ${d.txRowCount || 2} rader — exkluderad från K4`);

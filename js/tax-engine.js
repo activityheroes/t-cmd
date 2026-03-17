@@ -1450,6 +1450,27 @@ const TaxEngine = (() => {
   //   'unknown_asset_identity'→ excluded from K4; mint / decimals unresolved
   //   'excluded_noise'        → excluded from K4; spam / dust / ATA rent
   function deriveProceedsValuation(t, swapProceedsSource) {
+    // ── Economic event confidence gate (Solana) ──────────────────────────
+    // If the Solana transaction reconstruction produced a 'low' confidence
+    // economic event (ambiguous shape — LP withdrawal, multi-asset, etc.)
+    // we MUST NOT mark the disposal as 'final' even if the pricing chain
+    // found a trusted price.  The rule: Tax the user's ACTION, not the
+    // blockchain plumbing.  If we cannot cleanly state "sold X for Y paying
+    // fee Z", the disposal must stay in estimated_reviewable for manual confirmation.
+    const reconConf = t._reconstruction?.economicEvent?.confidence;
+    if (reconConf === 'low') {
+      const summary = t._reconstruction?.economicEvent?.oneLineSummary || '';
+      return {
+        valuationStatus: 'estimated_reviewable',
+        excludeFromK4:   true,
+        reviewReasons:   [
+          `Solana-rekonstruktion: lågkonfidens ekonomisk händelse — kan inte säkert beskrivas som en enkel swap. `
+          + (summary ? `Motorn säger: "${summary}". ` : '')
+          + `Bekräfta manuellt i Granskning.`,
+        ],
+      };
+    }
+
     // ── Swap-at-cost fallback path ────────────────────────────────────────
     // These sources are set by computeTaxYear after the pricing chain failed.
     // They are NEVER trusted enough for a final K4 declaration.
@@ -3812,10 +3833,19 @@ const TaxEngine = (() => {
           // Reference mismatches: keep the value visible in the review panel.
           const finalTradeProceedsSEK = swapOutlier ? null : effectiveProceedsSEK;
 
+          // Surface reconstruction metadata on the disposal for audit trail + UI
+          const econEvt = t._reconstruction?.economicEvent;
           const tradeExtra = {
             isTrade: true, inAsset: inSym, inAmount: inAmt,
             contractAddress: t.contractAddress || null,
             ...(t.jupiterMultiHop ? { jupiterMultiHop: true, routeHops: t.routeHops } : {}),
+            // Reconstruction provenance — shown in Varför? panel
+            ...(econEvt ? {
+              reconstructionConfidence: econEvt.confidence,
+              reconstructionSummary:    econEvt.oneLineSummary,
+              reconstructionKind:       econEvt.kind,
+              ignoredRouteLegs:         econEvt.ignoredLegs?.length > 0 ? econEvt.ignoredLegs : undefined,
+            } : {}),
             ...tradeValuation,
           };
           if (swapAtCost) {
@@ -5169,6 +5199,206 @@ const TaxEngine = (() => {
     PHOENIX: 'Phoenix', OPENBOOK: 'OpenBook', DRIFT: 'Drift',
   };
 
+  // ════════════════════════════════════════════════════════════
+  // ECONOMIC EVENT RECONSTRUCTION
+  //
+  // Rule: Tax the user's ACTION, not the blockchain plumbing.
+  //
+  // Before any K4 row is generated, every Solana transaction must
+  // be described as one of these canonical events:
+  //   swap        — user exchanged asset A for asset B
+  //   transfer_in / transfer_out — moved between own wallets
+  //   burn        — tokens permanently destroyed
+  //   airdrop     — received tokens without sending anything
+  //   cleanup     — token account close / rent refund (non-taxable)
+  //   fee_only    — nothing moved except the network fee
+  //   ambiguous   — cannot cleanly describe; MUST NOT be 'final'
+  //
+  // Confidence levels:
+  //   'exact'   clean 1-in/1-out, known DEX, amounts clear
+  //   'high'    clean shape but DEX unknown, or minor extra legs
+  //   'medium'  multiple legs but a dominant pair exists (> 50% of flow)
+  //   'low'     truly ambiguous — CANNOT produce a 'final' disposal
+  //
+  // The oneLineSummary must be passable as a plain-English sentence:
+  //   "User swapped X amount of A for Y amount of B paying fee F"
+  // If it cannot say that cleanly, confidence must be 'low'.
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Classify the ECONOMIC shape of a Solana transaction from its net flows.
+   * All parameters come from the already-computed net-flow analysis in normalizeSolanaTx.
+   *
+   * @param {Object} p
+   * @param {number}   p.netSol       — net SOL change for the wallet (positive = received)
+   * @param {Array}    p.tokenIn      — [[mint, amount], …] tokens received (net positive)
+   * @param {Array}    p.tokenOut     — [[mint, amount], …] tokens sent (net negative, amounts < 0)
+   * @param {Object}   p.wsolSeen     — {in, out} totals for WSOL transfers (already excluded from tokenNet)
+   * @param {Set}      p.burnedMints  — mints sent to known burn/incinerator programs
+   * @param {string|null} p.dex       — DEX name from Helius tx.source, if known
+   * @param {number}   p.feeSol       — network fee in SOL
+   * @param {Function} p.msym         — mint → symbol resolver
+   * @returns {EconomicEvent}
+   */
+  function classifySolanaEconomicEvent({ netSol, tokenIn, tokenOut, wsolSeen, burnedMints, dex, feeSol, msym }) {
+    const DUST = 1e-9;
+    const hasSolIn  = netSol >  DUST;
+    const hasSolOut = netSol < -DUST;
+    const tIn  = tokenIn.length;
+    const tOut = tokenOut.length;
+
+    const biggest = arr => arr.reduce((a, b) => Math.abs(a[1]) >= Math.abs(b[1]) ? a : b);
+
+    // ── Build ignored-legs list ──────────────────────────────────────────────
+    const ignoredLegs = [];
+    const wsolCollapsed = wsolSeen.in > 0 || wsolSeen.out > 0;
+    if (wsolCollapsed) ignoredLegs.push('WSOL wrap/unwrap collapsed to SOL');
+    // Extra legs beyond the dominant one on each side
+    if (tIn  > 1) ignoredLegs.push(`${tIn  - 1} extra token-in routing leg${tIn  > 2 ? 's' : ''}`);
+    if (tOut > 1) ignoredLegs.push(`${tOut - 1} extra token-out routing leg${tOut > 2 ? 's' : ''}`);
+
+    // ── Confidence from shape complexity ────────────────────────────────────
+    const totalNet = (hasSolIn || tIn > 0 ? 1 : 0) + (hasSolOut || tOut > 0 ? 1 : 0);
+    const cleanShape = (tIn + (hasSolIn ? 1 : 0)) <= 1 && (tOut + (hasSolOut ? 1 : 0)) <= 1;
+    const baseConf = cleanShape
+      ? (dex ? 'exact' : 'high')
+      : (tIn <= 2 && tOut <= 2) ? 'medium'
+      : 'low';
+
+    // ── Case: pure fee, no net asset movement ───────────────────────────────
+    if (!hasSolIn && !hasSolOut && tIn === 0 && tOut === 0) {
+      return {
+        kind: 'fee_only',
+        soldAsset: null, soldAmount: null, boughtAsset: null, boughtAmount: null,
+        feeSOL: feeSol, confidence: 'exact', ignoredLegs,
+        oneLineSummary: 'Fee-only transaction — no asset movement',
+      };
+    }
+
+    // ── Case: SOL out + token(s) in → BUY/swap ──────────────────────────────
+    if (hasSolOut && tIn >= 1 && tOut === 0) {
+      const [inMint, inAmt] = biggest(tokenIn);
+      const inSym = msym(inMint);
+      const solSpent = Math.abs(netSol);
+      return {
+        kind: 'swap',
+        soldAsset: 'SOL', soldAmount: solSpent,
+        boughtAsset: inSym, boughtAmount: Math.abs(inAmt), boughtMint: inMint,
+        feeSOL: feeSol, confidence: baseConf, ignoredLegs,
+        oneLineSummary: `Swapped ${solSpent.toFixed(6)} SOL → ${Math.abs(inAmt).toLocaleString()} ${inSym}${dex ? ` via ${dex}` : ''}`,
+      };
+    }
+
+    // ── Case: token(s) out + SOL in → SELL/swap ─────────────────────────────
+    if (hasSolIn && tOut >= 1 && tIn === 0) {
+      const [outMint, outAmt] = biggest(tokenOut);
+      const outSym = msym(outMint);
+      const solRcvd = Math.abs(netSol);
+      // Rent refund: the SOL is the ATA rent deposit returning, not trade proceeds
+      if (solRcvd <= 0.0025) {
+        return {
+          kind: 'cleanup',
+          soldAsset: outSym, soldAmount: Math.abs(outAmt), soldMint: outMint,
+          boughtAsset: 'SOL', boughtAmount: solRcvd,
+          feeSOL: feeSol, confidence: 'exact',
+          ignoredLegs: [...ignoredLegs, `rent refund: ${solRcvd.toFixed(6)} SOL`],
+          oneLineSummary: `Token account closed (${outSym}) — rent refund ${solRcvd.toFixed(6)} SOL, not a sale`,
+        };
+      }
+      return {
+        kind: 'swap',
+        soldAsset: outSym, soldAmount: Math.abs(outAmt), soldMint: outMint,
+        boughtAsset: 'SOL', boughtAmount: solRcvd,
+        feeSOL: feeSol, confidence: baseConf, ignoredLegs,
+        oneLineSummary: `Swapped ${Math.abs(outAmt).toLocaleString()} ${outSym} → ${solRcvd.toFixed(6)} SOL${dex ? ` via ${dex}` : ''}`,
+      };
+    }
+
+    // ── Case: token(s) out + token(s) in + tiny SOL → token-token swap ──────
+    if (tOut >= 1 && tIn >= 1 && Math.abs(netSol) < 0.01) {
+      const [outMint, outAmt] = biggest(tokenOut);
+      const [inMint,  inAmt]  = biggest(tokenIn);
+      const outSym = msym(outMint);
+      const inSym  = msym(inMint);
+      return {
+        kind: 'swap',
+        soldAsset: outSym, soldAmount: Math.abs(outAmt), soldMint: outMint,
+        boughtAsset: inSym, boughtAmount: Math.abs(inAmt), boughtMint: inMint,
+        feeSOL: feeSol, confidence: baseConf, ignoredLegs,
+        oneLineSummary: `Swapped ${Math.abs(outAmt).toLocaleString()} ${outSym} → ${Math.abs(inAmt).toLocaleString()} ${inSym}${dex ? ` via ${dex}` : ''}`,
+      };
+    }
+
+    // ── Case: complex LP / multi-asset (ambiguous) ───────────────────────────
+    if (hasSolOut && tIn >= 1 && tOut >= 1) {
+      return {
+        kind: 'ambiguous',
+        soldAsset: 'SOL', soldAmount: Math.abs(netSol),
+        boughtAsset: tIn > 0 ? msym(biggest(tokenIn)[0]) : null, boughtAmount: null,
+        feeSOL: feeSol, confidence: 'low', ignoredLegs,
+        oneLineSummary: `Complex LP/DeFi: SOL out + ${tIn} token(s) in + ${tOut} token(s) out — needs manual review`,
+      };
+    }
+    if (hasSolIn && tOut >= 1 && tIn >= 1) {
+      return {
+        kind: 'ambiguous',
+        soldAsset: tOut > 0 ? msym(biggest(tokenOut)[0]) : null, soldAmount: null,
+        boughtAsset: 'SOL', boughtAmount: Math.abs(netSol),
+        feeSOL: feeSol, confidence: 'low', ignoredLegs,
+        oneLineSummary: `Complex LP/DeFi: SOL in + ${tOut} token(s) out + ${tIn} token(s) in — needs manual review`,
+      };
+    }
+
+    // ── Case: pure token receive (airdrop / bridge in) ───────────────────────
+    if (tIn > 0 && tOut === 0 && !hasSolOut) {
+      const [inMint, inAmt] = biggest(tokenIn);
+      const inSym = msym(inMint);
+      return {
+        kind: 'airdrop',
+        soldAsset: null, soldAmount: null,
+        boughtAsset: inSym, boughtAmount: Math.abs(inAmt), boughtMint: inMint,
+        feeSOL: feeSol, confidence: 'high', ignoredLegs,
+        oneLineSummary: `Received ${Math.abs(inAmt).toLocaleString()} ${inSym} — nothing sent (airdrop or bridge)`,
+      };
+    }
+
+    // ── Case: pure token send (transfer / burn) ──────────────────────────────
+    if (tOut > 0 && tIn === 0 && !hasSolIn) {
+      const [outMint, outAmt] = biggest(tokenOut);
+      const outSym = msym(outMint);
+      const isBurn = burnedMints.has(outMint);
+      return {
+        kind: isBurn ? 'burn' : 'transfer_out',
+        soldAsset: outSym, soldAmount: Math.abs(outAmt), soldMint: outMint,
+        boughtAsset: null, boughtAmount: null,
+        feeSOL: feeSol, confidence: 'high', ignoredLegs,
+        oneLineSummary: isBurn
+          ? `Burned ${Math.abs(outAmt).toLocaleString()} ${outSym}`
+          : `Sent ${Math.abs(outAmt).toLocaleString()} ${outSym}`,
+      };
+    }
+
+    // ── Case: pure SOL movement ──────────────────────────────────────────────
+    if (Math.abs(netSol) > DUST && tIn === 0 && tOut === 0) {
+      const isOut = netSol < 0;
+      return {
+        kind: isOut ? 'transfer_out' : 'transfer_in',
+        soldAsset:   isOut ? 'SOL' : null,      soldAmount:   isOut ? Math.abs(netSol) : null,
+        boughtAsset: isOut ? null  : 'SOL',     boughtAmount: isOut ? null  : Math.abs(netSol),
+        feeSOL: feeSol, confidence: 'high', ignoredLegs,
+        oneLineSummary: `${isOut ? 'Sent' : 'Received'} ${Math.abs(netSol).toFixed(6)} SOL`,
+      };
+    }
+
+    // ── Fallback ─────────────────────────────────────────────────────────────
+    return {
+      kind: 'ambiguous',
+      soldAsset: null, soldAmount: null, boughtAsset: null, boughtAmount: null,
+      feeSOL: feeSol, confidence: 'low', ignoredLegs,
+      oneLineSummary: 'Could not reconstruct economic event — no significant asset flow detected',
+    };
+  }
+
   // ── normalizeSolanaTx ────────────────────────────────────────
   // Converts a Helius Enhanced Transaction into ONE canonical economic
   // event by computing net wallet-level flows and classifying the shape.
@@ -5257,13 +5487,22 @@ const TaxEngine = (() => {
       const msym    = mint => mintToSym(mint) || mint?.slice(0, 8) || 'UNKNOWN';
       const biggest = list => list.reduce((a, b) => Math.abs(a[1]) >= Math.abs(b[1]) ? a : b);
 
+      // ── Step 3b: Reconstruct the canonical economic event ───────────────────
+      // This is the authoritative description of what the USER did.
+      // All case logic below must be consistent with this reconstruction.
+      const evt = classifySolanaEconomicEvent({
+        netSol, tokenIn, tokenOut, wsolSeen, burnedMints,
+        dex, feeSol: feeSol, msym,
+      });
+
       const wsolCollapsed = wsolSeen.in > 0 || wsolSeen.out > 0;
       const extraLegs     = Math.max(0, tokenIn.length + tokenOut.length - 2);
       const mkNotes       = desc => [
-        desc,
+        evt.oneLineSummary !== desc ? desc : null,   // avoid duplicating summary
         dex ? `DEX: ${dex}` : null,
         wsolCollapsed ? 'WSOL→SOL ✓' : null,
         extraLegs > 0 ? `${extraLegs} routing hop(s) collapsed` : null,
+        evt.confidence === 'low' ? '⚠ low reconstruction confidence — review required' : null,
       ].filter(Boolean).join(' | ');
 
       const recon = {
@@ -5277,6 +5516,17 @@ const TaxEngine = (() => {
         ),
         burnedMints: burnedMints.size > 0
           ? [...burnedMints].map(m => msym(m)) : undefined,
+        // ── Economic event reconstruction (the authoritative description) ──
+        economicEvent: {
+          kind:           evt.kind,
+          confidence:     evt.confidence,
+          ignoredLegs:    evt.ignoredLegs,
+          oneLineSummary: evt.oneLineSummary,
+          soldAsset:      evt.soldAsset,
+          soldAmount:     evt.soldAmount,
+          boughtAsset:    evt.boughtAsset,
+          boughtAmount:   evt.boughtAmount,
+        },
       };
 
       // ── Step 4: Classify event shape ────────────────────────

@@ -4236,9 +4236,12 @@ const TaxEngine = (() => {
         const best     = candidates[0];
         const diffH    = Math.abs(new Date(best.date).getTime() - dispMs) / 3600_000;
         const confidence = diffH < 1 ? 'high' : diffH < 24 ? 'medium' : 'low';
-        d.resolutionType          = RT.INTERNAL_TRANSFER;
-        d.resolutionConfidence    = confidence;
-        d.resolutionCandidateTxId = best.id;
+        d.resolutionType             = RT.INTERNAL_TRANSFER;
+        d.resolutionCandidateType    = RT.INTERNAL_TRANSFER;
+        d.resolutionConfidence       = confidence;
+        d.resolutionCandidateTxId    = best.id;
+        d.autoResolvable             = false;   // needs user to import the source account
+        d.blocksCurrentK4            = false;   // row is excluded from K4, not a blocker
         d.resolutionNote = `Hittade möjlig intern transfer: ${best.category} av ${best.amount.toFixed(4)} ${sym} `
           + `(${diffH < 1 ? 'inom 1h' : Math.round(diffH) + 'h senare/tidigare'}, konto ${best.accountId || '?'}). `
           + `Importera det kontot — motorn matchar automatiskt och löser kostnadsbas.`;
@@ -4251,8 +4254,11 @@ const TaxEngine = (() => {
       if (earliestMs > 0 && dispMs <= earliestMs + 90 * 24 * 3600_000) {
         const daysAfter = Math.round((dispMs - earliestMs) / (24 * 3600_000));
         const confidence = daysAfter < 0 ? 'high' : daysAfter < 14 ? 'high' : 'medium';
-        d.resolutionType       = RT.OPENING_BALANCE;
-        d.resolutionConfidence = confidence;
+        d.resolutionType          = RT.OPENING_BALANCE;
+        d.resolutionCandidateType = RT.OPENING_BALANCE;
+        d.resolutionConfidence    = confidence;
+        d.autoResolvable          = false;   // needs user to enter historical cost
+        d.blocksCurrentK4         = false;
         d.resolutionNote = daysAfter < 0
           ? `Avyttring sker FÖRE det tidigaste importerade datumet — token ägdes definitivt före importen.`
           : `Avyttring sker ${daysAfter} dagar efter importstarten. `
@@ -4273,8 +4279,11 @@ const TaxEngine = (() => {
       const fakeT = { assetSymbol: sym, category: CAT.RECEIVE, amount: qty,
                       notes: '', priceSource: null, coinGeckoId: null };
       if (isLikelySpamToken(fakeT) || isLikelySpamToken(inboundTxn || {})) {
-        d.resolutionType       = RT.SPAM;
-        d.resolutionConfidence = 'high';
+        d.resolutionType          = RT.SPAM;
+        d.resolutionCandidateType = RT.SPAM;
+        d.resolutionConfidence    = 'high';
+        d.autoResolvable          = true;   // engine can zero-cost this automatically
+        d.blocksCurrentK4         = false;
         d.resolutionNote = `Spam-airdrop detekterad: ${sym} matchar spam-mönster (inga köp, okänd token). `
           + `Kan klassificeras som 0 kr kostnadsbas utan skatteeffekt.`;
         continue;
@@ -4283,15 +4292,22 @@ const TaxEngine = (() => {
       if (inboundTxn) {
         const ac = classifyAirdropEvent(inboundTxn, txHashMap);
         if (ac.subtype === 'spam') {
-          d.resolutionType       = RT.SPAM;
-          d.resolutionConfidence = ac.confidence;
+          d.resolutionType          = RT.SPAM;
+          d.resolutionCandidateType = RT.SPAM;
+          d.resolutionConfidence    = ac.confidence;
+          d.autoResolvable          = ac.confidence === 'high';
+          d.blocksCurrentK4         = false;
           d.resolutionNote = `Mottogs som spam-airdrop (${ac.reasons.join(', ')}). `
             + `Klassificeras med 0 kr kostnadsbas.`;
           continue;
         }
         if (ac.subtype === 'unsolicited' || ac.subtype === 'claimed') {
-          d.resolutionType       = RT.AIRDROP;
-          d.resolutionConfidence = ac.confidence;
+          d.resolutionType          = RT.AIRDROP;
+          d.resolutionCandidateType = RT.AIRDROP;
+          d.resolutionConfidence    = ac.confidence;
+          // Auto-resolvable if high confidence: engine sets costBasis = FMV at receipt date
+          d.autoResolvable          = ac.confidence === 'high';
+          d.blocksCurrentK4         = false;
           d.resolutionNote = `Mottogs som ${ac.subtype === 'claimed' ? 'claimad' : 'oönskad'} airdrop `
             + `(konfidens: ${ac.confidence}). Kostnadsbas = FMV vid mottagning. `
             + (ac.confidence !== 'high' ? 'Verifiera marknadspriset vid mottagningsdatumet.' : '');
@@ -4300,9 +4316,15 @@ const TaxEngine = (() => {
       }
 
       // ── Pass 4: Manual review required ───────────────────────────────
+      // Only remaining missing_history rows land here.  These are the
+      // TRUE hard K4 blockers: no transfer match, no opening-balance signal,
+      // no airdrop/spam pattern, and no auto-resolvable path.
       const acqCount = (acquisitionMap[sym] || []).length;
-      d.resolutionType       = RT.MANUAL;
-      d.resolutionConfidence = 'none';
+      d.resolutionType          = RT.MANUAL;
+      d.resolutionCandidateType = RT.MANUAL;
+      d.resolutionConfidence    = 'low';
+      d.autoResolvable          = false;
+      d.blocksCurrentK4         = true;   // this is a genuine hard blocker
       d.resolutionNote = acqCount === 0
         ? `Inga anskaffningar importerade för ${sym}. Importera köphistorik från börsen eller plånboken där tokenen ursprungligen anskaffades.`
         : `Anskaffningshistorik finns (${acqCount} transaktioner) men täcker inte denna avyttring. Kontrollera om fler transaktioner saknas.`;
@@ -4310,89 +4332,264 @@ const TaxEngine = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
+  // CANONICAL STATUS SUMMARY
+  //
+  // This is the SINGLE source of truth used by both Reports and
+  // Review pages.  It eliminates the contradiction where Reports
+  // shows "0 blockers" while Review shows a large blocker count.
+  //
+  // Severity model:
+  //   hard_k4_blockers       — rows that make the current K4 export
+  //                            untrustworthy.  Must be fixed before
+  //                            filing. These show as "⛔ BLOCKER" on
+  //                            both Reports and Review.
+  //   review_recommended     — excluded rows that do NOT block the
+  //                            K4-ready subset export.  Optional to
+  //                            fix but improve accuracy. Show as
+  //                            "🟡 REVIEW" on Review, not on Reports.
+  //   informational          — rows that are already handled but
+  //                            worth knowing about (spam, estimated-
+  //                            priced rows, etc.).  Show as
+  //                            "🔵 INFO" on Review only.
+  //
+  // A row is a HARD K4 BLOCKER if and only if it:
+  //   • is a disposal (not excluded from K4 logic) AND
+  //   • has valuationStatus 'missing_history' AND
+  //   • resolutionCandidateType is 'manual_unknown_acquisition'
+  //     (or no resolution candidate was found)
+  //
+  // Rows that are EXCLUDED (excludeFromK4=true) are NOT hard blockers
+  // because they don't appear in the K4 export at all — the export
+  // is already generated without them.  They are review_recommended
+  // or informational depending on their resolutionCandidateType.
+  //
+  // The `taxConfidencePct` score is the ratio of verified K4 rows
+  // to all disposal-like events (verified + excluded + hard blockers).
+  // ════════════════════════════════════════════════════════════
+
+  function computeStatusSummary(taxResult, k4Report) {
+    if (!taxResult || !taxResult.disposals) {
+      return _emptyStatusSummary();
+    }
+    const { disposals } = taxResult;
+    const k4 = k4Report || {};
+    const excByStatus = k4.excludedByStatus || {};
+
+    // ── 1. K4-verified (final, trusted, in export) ──────────────────────
+    const verifiedRows = (k4.k4Rows || []).length;
+
+    // ── 2. Classify all excluded rows ────────────────────────────────────
+    // 'hard_k4_blockers': disposals still in the pipeline with missing
+    // cost basis AND no auto-resolution candidate.  These are the
+    // rare rows that remain after resolveUnknownAcquisitions.
+    const allExcluded = [
+      ...(excByStatus['missing_history']             || []),
+      ...(excByStatus['manual_review_required']      || []),
+      ...(excByStatus['sanity_flagged']              || []),
+      ...(excByStatus['blocked_outlier']             || []),
+    ];
+    const autoResolvableTypes = new Set([
+      'internal_transfer_candidate',
+      'opening_balance_candidate',
+      'airdrop_candidate',
+      'spam_candidate',
+    ]);
+
+    // A disposal is a hard K4 blocker only if:
+    //   a) it was NOT excluded (i.e. still in the K4 pipeline) AND
+    //   b) it has missing_history or unknown_acquisition flag AND
+    //   c) there's no auto-resolvable candidate type
+    const hardBlockers = disposals.filter(d =>
+      !d.excludeFromK4 &&
+      (d.unknownAcquisition || d.valuationStatus === 'missing_history') &&
+      !autoResolvableTypes.has(d.resolutionCandidateType)
+    );
+
+    // Review-recommended: excluded rows with actionable resolution path
+    const reviewRecommended = [
+      ...(excByStatus['internal_transfer_candidate'] || []),
+      ...(excByStatus['opening_balance_candidate']   || []),
+      ...(excByStatus['airdrop_candidate']           || []),
+      ...(excByStatus['manual_review_required']      || []),
+      // Also include sanity-flagged rows (duplicate proceeds etc.)
+      ...(excByStatus['sanity_flagged']              || []),
+    ].filter(d => !autoResolvableTypes.has(d.resolutionCandidateType)
+      || d.resolutionConfidence !== 'high');
+
+    // Auto-resolvable: high-confidence candidates the engine can fix automatically
+    const autoResolvable = [
+      ...(excByStatus['internal_transfer_candidate'] || []),
+      ...(excByStatus['opening_balance_candidate']   || []),
+      ...(excByStatus['airdrop_candidate']           || []),
+      ...(excByStatus['spam_candidate']              || []),
+    ].filter(d => d.resolutionConfidence === 'high' && d.autoResolvable);
+
+    // Informational: excluded but low-risk (spam, estimated pricing, noise)
+    const informational = [
+      ...(excByStatus['spam_candidate']              || []),
+      ...(excByStatus['estimated_reviewable']        || []),
+      ...(excByStatus['unknown_asset_identity']      || []),
+      ...(excByStatus['excluded_noise']              || []),
+    ];
+
+    const hardBlockerCount     = hardBlockers.length;
+    const reviewRecommendedCount = reviewRecommended.length;
+    const autoResolvableCount  = autoResolvable.length;
+    const informationalCount   = informational.length;
+    const excludedCount        = (k4.excludedCount || 0);
+
+    // ── 3. Tax confidence score ───────────────────────────────────────────
+    // Ratio of verified rows to (verified + hard blockers + review-recommended)
+    // Informational rows don't penalize score (they're already handled).
+    const scoreDenominator = verifiedRows + hardBlockerCount + reviewRecommendedCount;
+    const taxConfidencePct = scoreDenominator > 0
+      ? Math.round((verifiedRows / scoreDenominator) * 100)
+      : 100;
+
+    // ── 4. Overall status ─────────────────────────────────────────────────
+    // Status only reflects the K4 EXPORT quality, not the excluded backlog.
+    // "ok" means the current export is trustworthy, NOT that everything is resolved.
+    let overallStatus;
+    if (hardBlockerCount === 0 && verifiedRows > 0) {
+      overallStatus = taxConfidencePct >= 90 ? 'k4_ready_verified' : 'k4_ready_with_backlog';
+    } else if (hardBlockerCount > 0 && hardBlockerCount / Math.max(verifiedRows, 1) > 0.25) {
+      overallStatus = 'invalid';
+    } else if (hardBlockerCount > 0) {
+      overallStatus = 'needs_review';
+    } else {
+      overallStatus = 'ok';
+    }
+
+    // ── 5. Report wording (precise, avoids "ready to declare") ───────────
+    const reportLabel = {
+      k4_ready_verified: 'K4-redo — verifierat underlag',
+      k4_ready_with_backlog: 'K4-redo delmängd tillgänglig',
+      needs_review:  'Granska innan inlämning',
+      invalid:       'Ofullständig — granska krävs',
+      ok:            'Klar',
+    }[overallStatus] || 'Okänd status';
+
+    const reportSublabel = {
+      k4_ready_verified:
+        `${verifiedRows} avyttring${verifiedRows !== 1 ? 'ar' : ''} verifierade — exporten innehåller bara betrodda rader.`,
+      k4_ready_with_backlog:
+        `${verifiedRows} verifierade K4-rader. ${excludedCount} exkluderade rader väntar på valfri granskning — blockerar inte aktuell export.`,
+      needs_review:
+        `${hardBlockerCount} avyttring${hardBlockerCount !== 1 ? 'ar' : ''} med okänd kostnadsbas kräver åtgärd.`,
+      invalid:
+        `${hardBlockerCount} avyttring${hardBlockerCount !== 1 ? 'ar' : ''} med saknad kostnadsbas — exporten är inte tillförlitlig.`,
+      ok:
+        `Inga avyttringar att deklarera.`,
+    }[overallStatus] || '';
+
+    return {
+      // Counts
+      verifiedRows,
+      excludedCount,
+      hardBlockerCount,
+      reviewRecommendedCount,
+      autoResolvableCount,
+      informationalCount,
+      taxConfidencePct,
+      // Arrays (for drill-down)
+      hardBlockers,
+      reviewRecommended,
+      autoResolvable,
+      informational,
+      // Presentation
+      overallStatus,
+      reportLabel,
+      reportSublabel,
+      // canFile: true when the K4-ready subset can be exported right now
+      canFile: hardBlockerCount === 0 && verifiedRows > 0,
+      // hasBacklog: there are excluded rows that could improve accuracy if resolved
+      hasBacklog: excludedCount > 0,
+    };
+  }
+
+  function _emptyStatusSummary() {
+    return {
+      verifiedRows: 0, excludedCount: 0, hardBlockerCount: 0,
+      reviewRecommendedCount: 0, autoResolvableCount: 0, informationalCount: 0,
+      taxConfidencePct: 100,
+      hardBlockers: [], reviewRecommended: [], autoResolvable: [], informational: [],
+      overallStatus: 'ok', reportLabel: 'Inga data', reportSublabel: '',
+      canFile: false, hasBacklog: false,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════
   // REPORT HEALTH — sanity check before presenting K4 totals
   // Analyses the disposals list for signs that the numbers are
   // unreliable, and returns a health status with actionable details.
+  // Now delegates to computeStatusSummary for the status/label/count
+  // fields so both functions stay in sync.
   // ════════════════════════════════════════════════════════════
-  function computeReportHealth(taxResult) {
+  function computeReportHealth(taxResult, k4Report) {
     if (!taxResult || !taxResult.disposals) {
-      return { status: 'unknown', level: -1, label: 'Inga data', canFile: false, details: [] };
+      return { status: 'unknown', level: -1, label: 'Inga data', canFile: false, details: [],
+        k4Blockers: 0, unknownAcqCount: 0, swapAtCostCount: 0, silentZeroCost: 0 };
     }
     const { disposals, summary } = taxResult;
     const total = disposals.length;
 
     if (total === 0) {
-      return { status: 'ok', level: 3, label: 'Inga avyttringar att deklarera', canFile: true, details: [] };
+      return { status: 'ok', level: 3, label: 'Inga avyttringar att deklarera', canFile: true,
+        details: [], k4Blockers: 0, unknownAcqCount: 0, swapAtCostCount: 0, silentZeroCost: 0 };
     }
 
-    // Count problem categories
-    const unknownAcqCount = disposals.filter(d => d.unknownAcquisition).length;
-    const swapAtCostCount = disposals.filter(d => d.proceedsSource === 'swap_at_cost' || d.proceedsSource === 'swap_received_market').length;
-    // Zero-cost disposals that are NOT flagged as unknownAcquisition (silent 0-cost rows)
-    const silentZeroCost  = disposals.filter(d =>
-      !d.unknownAcquisition &&
-      d.proceedsSEK > 100 &&
-      d.costBasisSEK === 0 &&
-      d.proceedsSource !== 'swap_at_cost'
-    ).length;
-    const k4Blockers = unknownAcqCount + silentZeroCost;
+    // Derive from computeStatusSummary so both functions are in sync
+    const ss = computeStatusSummary(taxResult, k4Report);
 
-    // Fraction of disposals with unresolved pricing
-    const pctUnresolved = total > 0 ? k4Blockers / total : 0;
-    // Is the gain suspiciously large relative to proceeds? (>10× gain ratio = likely phantom)
+    // Additional detail counts that go beyond the summary
+    const unknownAcqCount = disposals.filter(d => d.unknownAcquisition).length;
+    const swapAtCostCount = disposals.filter(d =>
+      d.proceedsSource === 'swap_at_cost' || d.proceedsSource === 'swap_received_market'
+    ).length;
+    const silentZeroCost  = disposals.filter(d =>
+      !d.unknownAcquisition && d.proceedsSEK > 100 &&
+      d.costBasisSEK === 0 && d.proceedsSource !== 'swap_at_cost'
+    ).length;
+    const k4Blockers = ss.hardBlockerCount;  // single source of truth
+
     const gainRatio = (summary.totalProceeds || 0) > 1000
-      ? (summary.totalGains || 0) / (summary.totalProceeds || 1)
-      : 0;
+      ? (summary.totalGains || 0) / (summary.totalProceeds || 1) : 0;
     const suspiciouslyHighGain = gainRatio > 0.95 && (summary.totalGains || 0) > 50000;
 
     const details = [];
-    if (unknownAcqCount > 0)  details.push(`${unknownAcqCount} avyttring${unknownAcqCount !== 1 ? 'ar' : ''} med okänd anskaffning (kostnadsbas = 0)`);
-    if (silentZeroCost > 0)   details.push(`${silentZeroCost} avyttring${silentZeroCost !== 1 ? 'ar' : ''} med saknat pris (0 kr kostnadsbas)`);
-    if (swapAtCostCount > 0)  details.push(`${swapAtCostCount} swap${swapAtCostCount !== 1 ? 's' : ''} prissatt med uppskattning (swap-at-cost)`);
-    if (suspiciouslyHighGain) details.push(`Vinst/försäljningspris-kvot ${(gainRatio * 100).toFixed(0)}% — ovanligt hög, kontrollera importhistorik`);
+    if (k4Blockers > 0)       details.push(`${k4Blockers} avyttring${k4Blockers !== 1 ? 'ar' : ''} med okänd anskaffning (hårt blockerare)`);
+    if (ss.reviewRecommendedCount > 0) details.push(`${ss.reviewRecommendedCount} exkluderade rader rekommenderas granskning (blockar inte aktuell export)`);
+    if (swapAtCostCount > 0)  details.push(`${swapAtCostCount} swap${swapAtCostCount !== 1 ? 's' : ''} prissatt med uppskattning`);
+    if (suspiciouslyHighGain) details.push(`Vinst/försäljningspris-kvot ${(gainRatio * 100).toFixed(0)}% — ovanligt hög`);
 
-    // Status levels: 0 = invalid, 1 = needs_review, 2 = warnings, 3 = ok
-    if (pctUnresolved > 0.25 || suspiciouslyHighGain) {
-      return {
-        status: 'invalid',
-        level: 0,
-        label: 'Sannolikt felaktigt — granska innan inlämning',
-        sublabel: 'Många avyttringar saknar korrekt kostnadsbas. Kontrollera importhistoriken.',
-        canFile: false,
-        details,
-        k4Blockers, unknownAcqCount, swapAtCostCount, silentZeroCost,
-      };
+    // Map computeStatusSummary.overallStatus to the legacy level/status model
+    // so callers that use health.status / health.level / health.canFile still work.
+    const statusMap = {
+      k4_ready_verified: { status: 'ok',           level: 3, canFile: true  },
+      k4_ready_with_backlog: { status: 'warnings', level: 2, canFile: true  },
+      needs_review:      { status: 'needs_review',  level: 1, canFile: false },
+      invalid:           { status: 'invalid',       level: 0, canFile: false },
+      ok:                { status: 'ok',            level: 3, canFile: true  },
+    };
+    const mapped = statusMap[ss.overallStatus] || { status: 'unknown', level: -1, canFile: false };
+
+    // Override sublabel to match the precise wording from computeStatusSummary
+    let sublabel = ss.reportSublabel;
+    if (suspiciouslyHighGain && !sublabel.includes('ovanlig')) {
+      sublabel += ` Vinst/försäljningspris-kvot ovanligt hög — kontrollera importhistorik.`;
     }
-    if (pctUnresolved > 0.05 || unknownAcqCount > 3 || (swapAtCostCount > 10 && unknownAcqCount > 0)) {
-      return {
-        status: 'needs_review',
-        level: 1,
-        label: 'Granska innan inlämning',
-        sublabel: `${k4Blockers} avyttring${k4Blockers !== 1 ? 'ar' : ''} kräver granskning.`,
-        canFile: false,
-        details,
-        k4Blockers, unknownAcqCount, swapAtCostCount, silentZeroCost,
-      };
-    }
-    if (unknownAcqCount > 0 || swapAtCostCount > 0 || silentZeroCost > 0) {
-      return {
-        status: 'warnings',
-        level: 2,
-        label: 'Klar med varningar',
-        sublabel: details.join(' · '),
-        canFile: true,
-        details,
-        k4Blockers, unknownAcqCount, swapAtCostCount, silentZeroCost,
-      };
-    }
+
     return {
-      status: 'ok',
-      level: 3,
-      label: 'Klar för inlämning',
-      sublabel: `${total} avyttring${total !== 1 ? 'ar' : ''} — fullständig importhistorik`,
-      canFile: true,
-      details: [],
-      k4Blockers: 0, unknownAcqCount: 0, swapAtCostCount: 0, silentZeroCost: 0,
+      ...mapped,
+      label:    ss.reportLabel,
+      sublabel,
+      details,
+      k4Blockers,
+      unknownAcqCount,
+      swapAtCostCount,
+      silentZeroCost,
+      // Pass through full summary so callers can read the new fields
+      statusSummary: ss,
     };
   }
 
@@ -7325,7 +7522,8 @@ const TaxEngine = (() => {
     // Prices
     fetchAllSEKPrices, getPriceCache, savePriceCache,
     // Tax engine
-    computeTaxYear, computeReportHealth,
+    computeTaxYear, computeReportHealth, computeStatusSummary,
+    buildAssetProvenance,
     querySuspiciousZeroCost, queryEstimatedHighProceedsDisposals,
     resolveUnknownAcquisitions, RT,  // recovery pipeline + resolution type constants
     // K4 export
@@ -7350,4 +7548,130 @@ const TaxEngine = (() => {
     formatSEK, formatCrypto, getAvailableTaxYears,
     isPipelineRunning: () => _pipelineRunning,
   };
+
+  // ════════════════════════════════════════════════════════════
+  // PER-ASSET PROVENANCE VIEW
+  //
+  // For each unresolved asset, produces a record showing:
+  //   sym               — asset symbol
+  //   contractAddress   — on-chain mint/contract address
+  //   firstSeenDate     — earliest transaction date for this asset
+  //   sourceWallet      — accountId where it first appeared
+  //   inboundType       — first inbound category (RECEIVE, AIRDROP, TRADE, etc.)
+  //   likelyClassification — best guess: 'airdrop', 'spam', 'opening_balance',
+  //                           'internal_transfer', 'purchased', 'unknown'
+  //   stillHeld         — true if currentHoldings contains this asset
+  //   laterDisposed     — true if there's a disposal (SELL/TRADE/SEND) for this asset
+  //   disposalStatus    — 'resolved', 'excluded', 'blocked', 'no_disposal'
+  //   unresolvedCount   — number of unresolved disposals
+  //   autoResolvable    — true if all unresolved disposals have autoResolvable=true
+  //   resolutionNote    — plain-language action text
+  // ════════════════════════════════════════════════════════════
+  function buildAssetProvenance(taxResult, options = {}) {
+    if (!taxResult) return [];
+    const { disposals, currentHoldings } = taxResult;
+    const allTxns = getTransactions();
+    const heldSyms = new Set((currentHoldings || []).map(h => h.symbol));
+
+    // Group transactions by asset symbol
+    const txsByAsset = {};
+    for (const t of allTxns) {
+      if (!t.assetSymbol) continue;
+      (txsByAsset[t.assetSymbol] = txsByAsset[t.assetSymbol] || []).push(t);
+    }
+
+    // Determine which assets have unresolved disposals
+    const unresolvedByAsset = {};
+    for (const d of (disposals || [])) {
+      if (!d.excludeFromK4 && !d.blocksCurrentK4) continue;
+      if (!d.assetSymbol) continue;
+      (unresolvedByAsset[d.assetSymbol] = unresolvedByAsset[d.assetSymbol] || []).push(d);
+    }
+
+    // Also include assets with excluded disposals that have a resolution path
+    for (const d of (disposals || [])) {
+      if (!d.resolutionCandidateType) continue;
+      if (!d.assetSymbol) continue;
+      if (!unresolvedByAsset[d.assetSymbol]) {
+        unresolvedByAsset[d.assetSymbol] = [];
+      }
+      if (!unresolvedByAsset[d.assetSymbol].includes(d)) {
+        unresolvedByAsset[d.assetSymbol].push(d);
+      }
+    }
+
+    const result = [];
+
+    for (const [sym, symDisposals] of Object.entries(unresolvedByAsset)) {
+      const txs = txsByAsset[sym] || [];
+      if (txs.length === 0 && symDisposals.length === 0) continue;
+
+      // First inbound transaction
+      const inbounds = txs
+        .filter(t => [CAT.RECEIVE, CAT.AIRDROP, CAT.TRADE, CAT.BUY, CAT.TRANSFER_IN, CAT.BRIDGE_IN].includes(t.category))
+        .sort((a, b) => new Date(a.date) - new Date(b.date));
+      const firstInbound = inbounds[0] || txs.sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+
+      const firstSeenDate    = firstInbound?.date?.slice(0, 10) || null;
+      const sourceWallet     = firstInbound?.accountId || null;
+      const contractAddress  = firstInbound?.contractAddress || symDisposals[0]?.contractAddress || null;
+
+      // Inbound type heuristic
+      const inboundCat = firstInbound?.category;
+      let inboundType  = inboundCat || 'unknown';
+      if (inboundCat === CAT.RECEIVE && !firstInbound?.coinGeckoId) inboundType = 'receive_unknown_token';
+
+      // Classify based on resolution info from the best disposal
+      const repDisposal = symDisposals.find(d => d.resolutionCandidateType) || symDisposals[0];
+      const resType = repDisposal?.resolutionCandidateType;
+      const likelyClassification =
+        resType === RT.SPAM              ? 'spam'
+        : resType === RT.AIRDROP         ? 'airdrop'
+        : resType === RT.INTERNAL_TRANSFER ? 'internal_transfer'
+        : resType === RT.OPENING_BALANCE  ? 'opening_balance'
+        : inboundCat === CAT.BUY || inboundCat === CAT.TRADE ? 'purchased'
+        : inboundCat === CAT.AIRDROP     ? 'airdrop'
+        : 'unknown';
+
+      // Disposal status
+      const hardBlockers = symDisposals.filter(d => d.blocksCurrentK4);
+      const excluded     = symDisposals.filter(d => d.excludeFromK4 && !d.blocksCurrentK4);
+      const disposalStatus =
+        hardBlockers.length > 0 ? 'blocked'
+        : excluded.length > 0  ? 'excluded'
+        : symDisposals.length > 0 ? 'resolved'
+        : 'no_disposal';
+
+      const autoResolvable = symDisposals.length > 0 && symDisposals.every(d => d.autoResolvable);
+      const resolutionNote = repDisposal?.resolutionNote || null;
+      const resolutionConf = repDisposal?.resolutionConfidence || 'unknown';
+
+      const laterDisposed = txs.some(t =>
+        [CAT.SELL, CAT.TRADE, CAT.SEND, CAT.NFT_SALE, CAT.TRANSFER_OUT].includes(t.category)
+      );
+
+      result.push({
+        sym, contractAddress, firstSeenDate, sourceWallet,
+        inboundType, likelyClassification,
+        stillHeld:       heldSyms.has(sym),
+        laterDisposed,
+        disposalStatus,
+        unresolvedCount: symDisposals.length,
+        hardBlockerCount: hardBlockers.length,
+        autoResolvable,
+        resolutionCandidateType: resType || null,
+        resolutionConfidence:    resolutionConf,
+        resolutionNote,
+      });
+    }
+
+    // Sort: hard blockers first, then by unresolvedCount desc
+    result.sort((a, b) => {
+      if (a.hardBlockerCount !== b.hardBlockerCount) return b.hardBlockerCount - a.hardBlockerCount;
+      return b.unresolvedCount - a.unresolvedCount;
+    });
+
+    return result;
+  }
+
 })();

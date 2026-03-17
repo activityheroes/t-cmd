@@ -165,7 +165,19 @@ const TaxUI = (() => {
 
   function renderSidebar() {
     const txns = TaxEngine.getTransactions();
-    const reviewCount = TaxEngine.getReviewIssues(txns).length;
+    // Use computeStatusSummary as the single source of truth for the sidebar badge.
+    // Show hard blocker count (rows that genuinely block the K4 export) NOT the
+    // total review count, so the badge only fires when action is truly required.
+    let sidebarBlockerCount = 0;
+    if (S.taxResult && S.k4Report && TaxEngine.computeStatusSummary) {
+      const ss = TaxEngine.computeStatusSummary(S.taxResult, S.k4Report);
+      sidebarBlockerCount = ss.hardBlockerCount;
+    } else if (S.taxResult) {
+      // Fallback: count raw missing_history + MANUAL rows
+      sidebarBlockerCount = (S.taxResult.disposals || []).filter(d =>
+        d.blocksCurrentK4 === true
+      ).length;
+    }
     const years = TaxEngine.getAvailableTaxYears();
     const pages = [
       { id: 'portfolio',     icon: '💼', label: 'Portfolio' },
@@ -175,16 +187,19 @@ const TaxUI = (() => {
       { id: 'reports',       icon: '📊', label: 'Reports' },
     ];
 
-    // ── Filing status pill (uses cached taxResult when available) ──
-    const health = (S.taxResult && TaxEngine.computeReportHealth)
-      ? TaxEngine.computeReportHealth(S.taxResult) : null;
+    // ── Filing status pill — reads from statusSummary, not health ──
+    const k4Report = S.k4Report;
+    const ss = (S.taxResult && k4Report && TaxEngine.computeStatusSummary)
+      ? TaxEngine.computeStatusSummary(S.taxResult, k4Report) : null;
     const STATUS_PILL = {
-      ok:           { icon: '✅', label: 'Klar för inlämning',       c: '#4ade80', bg: 'rgba(34,197,94,.08)',   border: 'rgba(34,197,94,.2)'   },
-      warnings:     { icon: '⚠️', label: 'Klar med varningar',        c: '#fbbf24', bg: 'rgba(251,191,36,.07)', border: 'rgba(251,191,36,.2)'  },
-      needs_review: { icon: '🔍', label: 'Granska innan inlämning',   c: '#fbbf24', bg: 'rgba(251,191,36,.1)',  border: 'rgba(251,191,36,.3)'  },
-      invalid:      { icon: '🔴', label: 'Beräkning ofullständig',    c: '#f87171', bg: 'rgba(239,68,68,.1)',   border: 'rgba(239,68,68,.3)'   },
+      k4_ready_verified: { icon: '✅', label: 'K4-redo — verifierat',       c: '#4ade80', bg: 'rgba(34,197,94,.08)',   border: 'rgba(34,197,94,.2)'   },
+      k4_ready_with_backlog: { icon: '📋', label: 'K4-redo delmängd',       c: '#60a5fa', bg: 'rgba(96,165,250,.07)', border: 'rgba(96,165,250,.2)'  },
+      needs_review:      { icon: '🔍', label: 'Granska innan inlämning',   c: '#fbbf24', bg: 'rgba(251,191,36,.1)',  border: 'rgba(251,191,36,.3)'  },
+      invalid:           { icon: '🔴', label: 'Beräkning ofullständig',    c: '#f87171', bg: 'rgba(239,68,68,.1)',   border: 'rgba(239,68,68,.3)'   },
+      ok:                { icon: '✅', label: 'Klar',                       c: '#4ade80', bg: 'rgba(34,197,94,.08)',  border: 'rgba(34,197,94,.2)'   },
+      warnings:          { icon: '⚠️', label: 'Klar med varningar',        c: '#fbbf24', bg: 'rgba(251,191,36,.07)', border: 'rgba(251,191,36,.2)'  },
     };
-    const pill = health ? (STATUS_PILL[health.status] || null) : null;
+    const pill = ss ? (STATUS_PILL[ss.overallStatus] || null) : null;
 
     return `
       <div class="tax-logo">
@@ -215,7 +230,7 @@ const TaxUI = (() => {
           <button class="tax-nav-item ${S.page === p.id ? 'active' : ''}" data-page="${p.id}">
             <span class="tax-nav-icon">${p.icon}</span>
             <span class="tax-nav-label">${p.label}</span>
-            ${p.id === 'review' && reviewCount > 0 ? `<span class="tax-nav-badge">${reviewCount}</span>` : ''}
+            ${p.id === 'review' && sidebarBlockerCount > 0 ? `<span class="tax-nav-badge">${sidebarBlockerCount}</span>` : ''}
           </button>
         `).join('')}
       </nav>
@@ -2934,19 +2949,41 @@ const TaxUI = (() => {
     const collapsed  = S.collapsedGroups || new Set(['received_not_sold']);
     const activeTab  = S.reviewTab || 'blockers';
 
-    // ── Issue counts per tab category ──
-    const BLOCKER_REASONS = new Set(['missing_sek_price','unknown_acquisition','negative_balance','ambiguous_swap','unclassified']);
-    const WARNING_REASONS = new Set(['duplicate','unmatched_transfer','outlier','split_trade','bridge_review','unknown_asset','unsupported_defi','unknown_contract','special_transaction']);
-    const INFO_REASONS    = new Set(['received_not_sold','spam_token']);
+    // ── Canonical status summary (single source of truth, shared with Reports) ──
+    // Use this instead of deriving counts locally so both pages agree.
+    const k4Report = S.k4Report;
+    const ss = (taxResult && k4Report && TaxEngine.computeStatusSummary)
+      ? TaxEngine.computeStatusSummary(taxResult, k4Report) : null;
 
-    const blockersAll = issues.filter(i => BLOCKER_REASONS.has(i.reason) || i.isK4Blocker);
-    const warningsAll = issues.filter(i => WARNING_REASONS.has(i.reason) && !i.isK4Blocker);
+    // ── Issue counts per severity tier ─────────────────────────────────────────
+    // HARD BLOCKERS: only rows that genuinely prevent the K4 export from being valid.
+    //   These are disposals with blocksCurrentK4=true (RT.MANUAL after resolveUnknownAcquisitions).
+    //   Source: ss.hardBlockerCount (from computeStatusSummary).
+    //
+    // REVIEW RECOMMENDED: excluded rows with an actionable resolution path.
+    //   These do NOT block the current K4 export. Show as "🟡" not "⛔".
+    //   Source: ss.reviewRecommendedCount.
+    //
+    // INFORMATIONAL: already handled / low-risk rows (spam, estimated pricing).
+    //   Source: ss.informationalCount.
+    //
+    // NOTE: this is the SAME model used by Reports. Both pages read from ss.
+    const HARD_BLOCKER_REASONS = new Set(['missing_sek_price','unknown_acquisition','negative_balance','ambiguous_swap','unclassified']);
+    const REVIEW_REASONS       = new Set(['duplicate','unmatched_transfer','outlier','split_trade','bridge_review','unknown_asset','unsupported_defi','unknown_contract','special_transaction']);
+    const INFO_REASONS         = new Set(['received_not_sold','spam_token']);
+
+    // For the review QUEUE (transaction-level issues from getReviewIssues):
+    const blockersAll = issues.filter(i => HARD_BLOCKER_REASONS.has(i.reason) || i.isK4Blocker);
+    const warningsAll = issues.filter(i => REVIEW_REASONS.has(i.reason) && !i.isK4Blocker);
     const infoAll     = issues.filter(i => INFO_REASONS.has(i.reason));
-    const nBlockers   = blockersAll.length;
-    const nWarnings   = warningsAll.length;
-    const nInfo       = infoAll.length;
 
-    // Filtered issues for active tab
+    // For the HEADER: use ss (disposal-level) counts if available, otherwise fall back to issue queue
+    const nHardBlockers = ss ? ss.hardBlockerCount        : blockersAll.length;
+    const nReviewRec    = ss ? ss.reviewRecommendedCount  : warningsAll.length;
+    const nInfo         = ss ? ss.informationalCount      : infoAll.length;
+    const nAutoFix      = ss ? ss.autoResolvableCount     : 0;
+
+    // Active tab still uses issue queue (transaction-level)
     const filteredIssues = activeTab === 'blockers' ? blockersAll
       : activeTab === 'warnings' ? warningsAll
       : activeTab === 'info'     ? infoAll
@@ -2977,7 +3014,7 @@ const TaxUI = (() => {
       <div class="tax-page">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Granska transaktioner</h1>
-          <span class="tax-page-subtitle">${nBlockers} K4-blockerare · ${nWarnings} varningar · ${nInfo} informations</span>
+          <span class="tax-page-subtitle">${nHardBlockers > 0 ? `⛔ ${nHardBlockers} hårda blockerare` : '✅ Inga hårda blockerare'}${nReviewRec > 0 ? ` · 🟡 ${nReviewRec} valfri granskning` : ''}${nInfo > 0 ? ` · 🔵 ${nInfo} info` : ''}${nAutoFix > 0 ? ` · ✨ ${nAutoFix} auto-lösningsbara` : ''}</span>
           ${issues.length > 0 ? `
             <div class="tax-page-actions" style="gap:8px">
               ${unknownAssetCount > 0 ? `<button class="tax-btn tax-btn-sm" id="btn-resolve-tokens" style="background:rgba(14,165,233,.12);color:#38bdf8;border:1px solid rgba(14,165,233,.25)" onclick="TaxUI.resolveUnknownTokens()">🔍 Slå upp ${unknownAssetCount} okända tokens</button>` : ''}
@@ -3059,6 +3096,73 @@ const TaxUI = (() => {
           </div>`;
         })()}
 
+        <!-- ── Per-asset provenance view ──────────────────────── -->
+        ${(() => {
+          if (!taxResult || !TaxEngine.buildAssetProvenance) return '';
+          const provenance = TaxEngine.buildAssetProvenance(taxResult);
+          if (provenance.length === 0) return '';
+
+          const CLASSIFICATION_LABELS = {
+            spam:              { icon: '🗑️', label: 'Spam-token',         color: '#f87171', canAuto: true  },
+            airdrop:           { icon: '🪂', label: 'Airdrop',            color: '#818cf8', canAuto: true  },
+            internal_transfer: { icon: '↔️', label: 'Intern transfer',    color: '#60a5fa', canAuto: false },
+            opening_balance:   { icon: '📅', label: 'Öppningssaldo',      color: '#fbbf24', canAuto: false },
+            purchased:         { icon: '🛒', label: 'Köpt',               color: '#4ade80', canAuto: false },
+            unknown:           { icon: '❓', label: 'Okänd källa',        color: '#94a3b8', canAuto: false },
+          };
+          const DISPOSAL_STATUS_LABELS = {
+            blocked:    { icon: '⛔', label: 'Hårt blockerare',    color: '#f87171' },
+            excluded:   { icon: '🟡', label: 'Exkluderad (valfri)', color: '#fbbf24' },
+            resolved:   { icon: '✅', label: 'Löst',               color: '#4ade80' },
+            no_disposal:{ icon: '📥', label: 'Ingen avyttring',    color: '#475569' },
+          };
+
+          const showAll = S.provenanceShowAll;
+          const visibleRows = showAll ? provenance : provenance.slice(0, 10);
+
+          return `
+          <div style="margin-bottom:16px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div>
+                <span style="font-size:12px;font-weight:700;color:#64748b;letter-spacing:.06em;text-transform:uppercase">Token-proveniens</span>
+                <span style="font-size:11px;color:#475569;margin-left:8px">${provenance.length} token${provenance.length !== 1 ? 'er' : ''} med oklar ursprung</span>
+              </div>
+              ${provenance.length > 10 ? `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.toggleProvenanceAll()">${showAll ? 'Visa färre ↑' : `Visa alla ${provenance.length} →`}</button>` : ''}
+            </div>
+            <div style="display:grid;gap:4px">
+              ${visibleRows.map(p => {
+                const cl  = CLASSIFICATION_LABELS[p.likelyClassification] || CLASSIFICATION_LABELS.unknown;
+                const dsl = DISPOSAL_STATUS_LABELS[p.disposalStatus]      || DISPOSAL_STATUS_LABELS.no_disposal;
+                const confBadge = p.resolutionConfidence === 'high'   ? { label: 'hög konf.', c: '#4ade80' }
+                                : p.resolutionConfidence === 'medium' ? { label: 'medel konf.', c: '#fbbf24' }
+                                : p.resolutionConfidence === 'low'    ? { label: 'låg konf.', c: '#f87171' }
+                                : null;
+                return `
+                <div style="display:flex;align-items:flex-start;gap:8px;padding:7px 10px;background:rgba(15,23,42,.4);border-radius:7px;border:1px solid rgba(255,255,255,.05);font-size:11px">
+                  <span style="font-size:16px;flex-shrink:0;margin-top:1px">${cl.icon}</span>
+                  <div style="flex:1;min-width:0">
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:2px">
+                      <span style="font-weight:700;color:#e2e8f0">${p.sym}</span>
+                      <span style="padding:1px 5px;border-radius:3px;background:rgba(15,23,42,.6);color:${cl.color};font-size:10px">${cl.label}</span>
+                      <span style="padding:1px 5px;border-radius:3px;background:rgba(15,23,42,.6);color:${dsl.color};font-size:10px">${dsl.icon} ${dsl.label}</span>
+                      ${confBadge ? `<span style="font-size:9px;color:${confBadge.c}">${confBadge.label}</span>` : ''}
+                      ${p.autoResolvable ? `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,.15);color:#818cf8">✨ auto-lösbar</span>` : ''}
+                    </div>
+                    <div style="display:flex;gap:10px;color:#475569;flex-wrap:wrap">
+                      ${p.firstSeenDate ? `<span>📅 Först sedd: ${p.firstSeenDate}</span>` : ''}
+                      ${p.sourceWallet  ? `<span>📍 Konto: ${p.sourceWallet.slice(0,12)}…</span>` : ''}
+                      ${p.unresolvedCount > 0 ? `<span style="color:${p.hardBlockerCount > 0 ? '#f87171' : '#fbbf24'}">${p.unresolvedCount} avyttring${p.unresolvedCount !== 1 ? 'ar' : ''} olösta</span>` : ''}
+                      ${p.stillHeld  ? '<span style="color:#60a5fa">📦 Hålls fortfarande</span>' : ''}
+                      ${p.laterDisposed ? '<span style="color:#94a3b8">→ Avyttrad</span>' : ''}
+                    </div>
+                    ${p.resolutionNote ? `<div style="margin-top:3px;font-size:10px;color:#64748b;line-height:1.4">${p.resolutionNote.slice(0, 120)}${p.resolutionNote.length > 120 ? '…' : ''}</div>` : ''}
+                  </div>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>`;
+        })()}
+
         ${issues.length === 0 ? `
           <div class="tax-review-done">
             <div style="font-size:48px">✅</div>
@@ -3067,14 +3171,17 @@ const TaxUI = (() => {
           </div>
         ` : `
 
-        <!-- Tab bar -->
+        <!-- Tab bar — uses statusSummary counts so it agrees with Reports page -->
         <div style="display:flex;gap:4px;margin-bottom:16px;padding:4px;background:rgba(255,255,255,.03);border:1px solid var(--tax-border);border-radius:10px;width:fit-content">
           ${[
-            { key: 'blockers', label: 'K4-blockerare', count: nBlockers, color: nBlockers > 0 ? '#f87171' : null },
-            { key: 'warnings', label: 'Varningar',     count: nWarnings, color: nWarnings > 0 ? '#fbbf24' : null },
-            { key: 'info',     label: 'Informations',  count: nInfo,     color: nInfo > 0 ? '#818cf8' : null },
-            { key: 'all',      label: 'Alla',          count: issues.length, color: null },
-          ].map(({ key, label, count, color }) => {
+            { key: 'blockers', label: '⛔ Hårda blockerare', count: nHardBlockers,  color: nHardBlockers > 0 ? '#f87171' : null,
+              tooltip: 'Disposals that prevent the current K4 export from being valid. Must be fixed before filing.' },
+            { key: 'warnings', label: '🟡 Valfri granskning', count: nReviewRec,    color: nReviewRec > 0 ? '#fbbf24' : null,
+              tooltip: 'Excluded rows that do not block the current K4 export. Optional — fixing improves accuracy.' },
+            { key: 'info',     label: '🔵 Info',             count: nInfo,          color: nInfo > 0 ? '#818cf8' : null,
+              tooltip: 'Already handled rows (spam, estimated pricing). Informational only.' },
+            { key: 'all',      label: 'Alla',                count: issues.length,  color: null },
+          ].map(({ key, label, count, color, tooltip }) => {
             const isActive = activeTab === key;
             return `<button
               onclick="window.setReviewTab('${key}')"
@@ -3092,10 +3199,10 @@ const TaxUI = (() => {
           <div style="text-align:center;padding:40px 20px;color:var(--tax-muted)">
             <div style="font-size:36px;margin-bottom:8px">✅</div>
             <div style="font-size:14px;font-weight:500;color:#e2e8f0">
-              ${activeTab === 'blockers' ? 'Inga K4-blockerare!' :
-                activeTab === 'warnings' ? 'Inga varningar!' :
-                activeTab === 'info' ? 'Inga informations-poster!' :
-                'Inga undantag!'}
+              ${activeTab === 'blockers' ? '✅ Inga hårda K4-blockerare — exporten är redo!' :
+                activeTab === 'warnings' ? '✅ Inga valfria granskningsposter!' :
+                activeTab === 'info' ? '✅ Inga informations-poster!' :
+                '✅ Inga undantag!'}
             </div>
             <div style="font-size:12px;margin-top:4px">
               ${activeTab !== 'all' ? `<a href="#" style="color:#818cf8" onclick="window.setReviewTab('all');return false">Visa alla flikar →</a>` : 'Skatteberäkningarna är baserade på fullständig data.'}
@@ -3361,15 +3468,30 @@ const TaxUI = (() => {
         });
       }
     })();
-    const health = TaxEngine.computeReportHealth ? TaxEngine.computeReportHealth(result) : null;
+    const health = TaxEngine.computeReportHealth ? TaxEngine.computeReportHealth(result, k4) : null;
+    // Canonical status summary — single source of truth used by both Reports and Review
+    const ss = TaxEngine.computeStatusSummary ? TaxEngine.computeStatusSummary(result, k4) : null;
+    // Cache k4Report on S so the sidebar can read it without recomputing
+    S.k4Report = k4;
 
-    // ── Health banner colors ──
-    const healthStyle = !health ? null : {
-      invalid:      { bg: 'rgba(239,68,68,.12)',    border: 'rgba(239,68,68,.35)',    color: '#f87171',    icon: '🔴' },
-      needs_review: { bg: 'rgba(251,191,36,.1)',    border: 'rgba(251,191,36,.3)',    color: '#fbbf24',    icon: '🟡' },
-      warnings:     { bg: 'rgba(251,191,36,.08)',   border: 'rgba(251,191,36,.2)',    color: '#fbbf24',    icon: '⚠️' },
-      ok:           { bg: 'rgba(34,197,94,.08)',    border: 'rgba(34,197,94,.25)',    color: '#4ade80',    icon: '✅' },
-    }[health.status] || { bg: 'rgba(148,163,184,.06)', border: 'rgba(148,163,184,.15)', color: '#94a3b8', icon: 'ℹ️' };
+    // ── Health banner colors — now maps ss.overallStatus directly ──
+    // 'k4_ready_verified' and 'k4_ready_with_backlog' are green/blue (not red),
+    // because excluded rows in the backlog do NOT block the current export.
+    const HEALTH_STYLE = {
+      k4_ready_verified: { bg: 'rgba(34,197,94,.08)',    border: 'rgba(34,197,94,.25)',    color: '#4ade80',    icon: '✅' },
+      k4_ready_with_backlog: { bg: 'rgba(96,165,250,.07)', border: 'rgba(96,165,250,.25)', color: '#60a5fa',  icon: '📋' },
+      needs_review:      { bg: 'rgba(251,191,36,.1)',    border: 'rgba(251,191,36,.3)',    color: '#fbbf24',    icon: '🟡' },
+      invalid:           { bg: 'rgba(239,68,68,.12)',    border: 'rgba(239,68,68,.35)',    color: '#f87171',    icon: '🔴' },
+      ok:                { bg: 'rgba(34,197,94,.08)',    border: 'rgba(34,197,94,.25)',    color: '#4ade80',    icon: '✅' },
+      warnings:          { bg: 'rgba(251,191,36,.08)',   border: 'rgba(251,191,36,.2)',    color: '#fbbf24',    icon: '⚠️' },
+    };
+    const effectiveStatus = ss ? ss.overallStatus : (health ? health.status : null);
+    const healthStyle = (effectiveStatus ? HEALTH_STYLE[effectiveStatus] : null)
+      || { bg: 'rgba(148,163,184,.06)', border: 'rgba(148,163,184,.15)', color: '#94a3b8', icon: 'ℹ️' };
+    const displayLabel   = ss ? ss.reportLabel   : (health ? health.label   : '');
+    const displaySublabel = ss ? ss.reportSublabel : (health ? health.sublabel : '');
+    const isInvalid = effectiveStatus === 'invalid';
+    const isReady   = effectiveStatus === 'k4_ready_verified' || effectiveStatus === 'k4_ready_with_backlog' || effectiveStatus === 'ok';
 
     return `
       <div class="tax-page">
@@ -3378,25 +3500,30 @@ const TaxUI = (() => {
           <span class="tax-page-subtitle">${S.taxYear} — Skatteverket K4</span>
         </div>
 
-        ${health ? `
-        <div style="margin-bottom:16px;padding:${health.status==='invalid'?'16px':'12px'} 16px;border-radius:12px;background:${healthStyle.bg};border:${health.status==='invalid'?'2px':'1px'} solid ${healthStyle.border}">
-          <div style="display:flex;align-items:${health.status==='invalid'?'flex-start':'center'};gap:12px;flex-wrap:wrap">
-            <span style="font-size:${health.status==='invalid'?'28px':'20px'}">${healthStyle.icon}</span>
+        ${(ss || health) ? `
+        <div style="margin-bottom:16px;padding:${isInvalid?'16px':'12px'} 16px;border-radius:12px;background:${healthStyle.bg};border:${isInvalid?'2px':'1px'} solid ${healthStyle.border}">
+          <div style="display:flex;align-items:${isInvalid?'flex-start':'center'};gap:12px;flex-wrap:wrap">
+            <span style="font-size:${isInvalid?'28px':'20px'}">${healthStyle.icon}</span>
             <div style="flex:1">
-              <div style="font-size:${health.status==='invalid'?'15px':'13px'};font-weight:700;color:${healthStyle.color}">${health.label}</div>
-              ${health.sublabel ? `<div style="font-size:12px;color:var(--tax-muted);margin-top:3px">${health.sublabel}</div>` : ''}
-              ${health.status==='invalid' ? `
+              <div style="font-size:${isInvalid?'15px':'13px'};font-weight:700;color:${healthStyle.color}">${displayLabel}</div>
+              ${displaySublabel ? `<div style="font-size:12px;color:var(--tax-muted);margin-top:3px">${displaySublabel}</div>` : ''}
+              ${isInvalid ? `
               <div style="margin-top:8px;font-size:12px;color:#94a3b8;line-height:1.6">
                 Dessa siffror <strong style="color:#f87171">ska inte lämnas in</strong> förrän du har åtgärdat problemen under Granska.
-                Kostnadsbas saknas för ${health.k4Blockers} avyttringar — vinsten är troligen kraftigt överskattad.
+                Kostnadsbas saknas för ${ss ? ss.hardBlockerCount : (health ? health.k4Blockers : 0)} avyttringar — vinsten är troligen kraftigt överskattad.
               </div>` : ''}
-              ${health.details && health.details.length > 0 ? `
+              ${ss?.hasBacklog && !isInvalid ? `
+              <div style="margin-top:6px;font-size:11px;color:#475569">
+                ${ss.excludedCount} exkluderade rader ingår <strong>inte</strong> i K4-exporten — de blockerar inte inlämning men kan förbättra precisionen om de löses.
+                ${ss.reviewRecommendedCount > 0 ? `<span style="color:#60a5fa"> ${ss.reviewRecommendedCount} rekommenderas granskning.</span>` : ''}
+              </div>` : ''}
+              ${health?.details?.length > 0 && isInvalid ? `
               <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
                 ${health.details.map(d => `<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,0,0,.2);color:var(--tax-muted)">${d}</span>`).join('')}
               </div>` : ''}
             </div>
-            ${health.status !== 'ok' ? `
-            <button class="tax-btn tax-btn-sm" style="color:${healthStyle.color};border-color:${healthStyle.border};background:${health.status==='invalid'?'rgba(239,68,68,.15)':'transparent'};white-space:nowrap;font-weight:600" onclick="TaxUI.navigate('review')">
+            ${!isReady ? `
+            <button class="tax-btn tax-btn-sm" style="color:${healthStyle.color};border-color:${healthStyle.border};background:${isInvalid?'rgba(239,68,68,.15)':'transparent'};white-space:nowrap;font-weight:600" onclick="TaxUI.navigate('review')">
               Åtgärda →
             </button>` : ''}
           </div>
@@ -3412,8 +3539,8 @@ const TaxUI = (() => {
           <input id="tax-user-pnr" class="tax-input" type="text" placeholder="Personnummer (YYYYMMDD-XXXX)" value="${S.userPnr || ''}" onchange="TaxUI.setUserInfo('pnr', this.value)" style="width:220px;height:30px;font-size:12px">
         </div>
 
-        <div class="tax-report-hero" style="${health?.canFile===false?'border-color:rgba(239,68,68,.3)':''}">
-          ${health?.canFile===false ? `<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 12px;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.2);margin:-1px -1px 0;border-radius:12px 12px 0 0">
+        <div class="tax-report-hero" style="${(ss ? !ss.canFile : health?.canFile===false)?'border-color:rgba(239,68,68,.3)':''}">
+          ${(ss ? !ss.canFile : health?.canFile===false) ? `<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 12px;background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.2);margin:-1px -1px 0;border-radius:12px 12px 0 0">
             <span style="font-size:12px">🚫</span>
             <span style="font-size:11px;font-weight:700;color:#f87171;letter-spacing:.06em;text-transform:uppercase">UTKAST — EJ REDO FÖR INLÄMNING</span>
           </div>` : ''}
@@ -3657,16 +3784,22 @@ const TaxUI = (() => {
         </div>`;
         })()}
 
-        <!-- Confidence score widget -->
-        ${(() => {
-          const criticalCount = excManual.length + excMissing.length + excBlocked.length + excSanity.length;
-          const reviewCount   = excTransfer.length + excOpenBal.length + excAirdropCand.length + excSpamCand.length;
-          const infoCount     = excEstimated.length + excUnknownId.length + excNoise.length;
-          const totalAll      = k4RowCount + criticalCount + reviewCount;
-          if (totalAll === 0) return '';
-          const score = Math.round((k4RowCount / totalAll) * 100);
+        <!-- Confidence score widget — reads from computeStatusSummary (single source of truth) -->
+        ${ss ? (() => {
+          const score      = ss.taxConfidencePct;
           const scoreColor = score >= 90 ? '#4ade80' : score >= 70 ? '#fbbf24' : '#f87171';
-          const scoreLabel = score >= 90 ? 'Hög — rapporten är tillförlitlig' : score >= 70 ? 'Medel — åtgärda blockerare' : 'Låg — åtgärd krävs';
+          const scoreLabel = score >= 90 ? 'Hög — rapporten är tillförlitlig'
+            : score >= 70 ? 'Medel — åtgärda blockerare' : 'Låg — åtgärd krävs';
+          const hardCount  = ss.hardBlockerCount;
+          const revCount   = ss.reviewRecommendedCount;
+          const infoCount  = ss.informationalCount;
+          const autoCount  = ss.autoResolvableCount;
+          // ── Status model clarity note ──
+          // hardBlockerCount: rows that prevent the current K4 export from being valid
+          // reviewRecommendedCount: excluded rows that do NOT block the export (optional fix)
+          // informationalCount: already handled rows worth monitoring
+          const totalDenominator = ss.verifiedRows + hardCount + revCount;
+          if (totalDenominator === 0) return '';
           return `
         <div style="margin-bottom:14px;padding:12px 16px;border-radius:10px;background:rgba(15,23,42,.4);border:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:16px;flex-wrap:wrap">
           <div>
@@ -3677,22 +3810,26 @@ const TaxUI = (() => {
           <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;min-width:220px">
             <div style="padding:6px 10px;border-radius:6px;background:rgba(74,222,128,.07);border:1px solid rgba(74,222,128,.15)">
               <div style="font-size:9px;color:#4ade80;font-weight:600;margin-bottom:2px">✓ VERIFIERADE</div>
-              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${k4RowCount}</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${ss.verifiedRows}</div>
               <div style="font-size:9px;color:#475569">K4-klara avyttringar</div>
             </div>
-            <div style="padding:6px 10px;border-radius:6px;background:${criticalCount > 0 ? 'rgba(239,68,68,.07)' : 'rgba(74,222,128,.04)'};border:1px solid ${criticalCount > 0 ? 'rgba(239,68,68,.2)' : 'rgba(74,222,128,.1)'}">
-              <div style="font-size:9px;color:${criticalCount > 0 ? '#f87171' : '#4ade80'};font-weight:600;margin-bottom:2px">${criticalCount > 0 ? '⛔ KRÄVER ÅTGÄRD' : '✓ INGA BLOCKERARE'}</div>
-              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${criticalCount}</div>
-              <div style="font-size:9px;color:#475569">K4-blockerare</div>
+            <div style="padding:6px 10px;border-radius:6px;background:${hardCount > 0 ? 'rgba(239,68,68,.07)' : 'rgba(74,222,128,.04)'};border:1px solid ${hardCount > 0 ? 'rgba(239,68,68,.2)' : 'rgba(74,222,128,.1)'}">
+              <div style="font-size:9px;color:${hardCount > 0 ? '#f87171' : '#4ade80'};font-weight:600;margin-bottom:2px">${hardCount > 0 ? '⛔ HÅRDA BLOCKERARE' : '✓ INGA BLOCKERARE'}</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${hardCount}</div>
+              <div style="font-size:9px;color:#475569">blockerar aktuell export</div>
             </div>
-            <div style="padding:6px 10px;border-radius:6px;background:rgba(251,191,36,.05);border:1px solid rgba(251,191,36,.15)">
-              <div style="font-size:9px;color:#fbbf24;font-weight:600;margin-bottom:2px">~ UPPSKATTADE</div>
-              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${infoCount}</div>
-              <div style="font-size:9px;color:#475569">uppskattade priser</div>
+            <div style="padding:6px 10px;border-radius:6px;background:rgba(96,165,250,.05);border:1px solid rgba(96,165,250,.15)">
+              <div style="font-size:9px;color:#60a5fa;font-weight:600;margin-bottom:2px">🟡 VALFRI GRANSKNING</div>
+              <div style="font-size:16px;font-weight:700;color:#e2e8f0">${revCount}</div>
+              <div style="font-size:9px;color:#475569">exkl. rader — blockerar ej</div>
             </div>
           </div>
+          ${autoCount > 0 ? `
+          <div style="width:100%;margin-top:4px;font-size:11px;color:#60a5fa;padding:6px 10px;background:rgba(96,165,250,.06);border-radius:6px;border:1px solid rgba(96,165,250,.15)">
+            ✨ ${autoCount} rad${autoCount !== 1 ? 'er' : ''} kan lösas automatiskt — klicka "Auto-lös säkra" under Granska
+          </div>` : ''}
         </div>`;
-        })()}
+        })() : ''}
 
         <!-- Excluded from K4 panel — three-tier severity architecture -->
         ${(() => {
@@ -5393,6 +5530,11 @@ const TaxUI = (() => {
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances, setPortFilter,
     openAssetAudit, closeAssetAudit,
+    // Per-asset provenance view toggle
+    toggleProvenanceAll() {
+      S.provenanceShowAll = !S.provenanceShowAll;
+      render();
+    },
     // expose for inline onclick patterns
     filterTxns, sortTxnsArr: txns => sortTxnsArr(txns),
     filterTxsByAsset,

@@ -615,6 +615,9 @@ const TaxEngine = (() => {
       rawTradeCurrency: (raw.rawTradeCurrency || '').toUpperCase() || null,
       // Solana swap metadata
       solanaSwapType: raw.solanaSwapType || null,
+      // Solana outflow classification (set by classifySolOutflow in Case F)
+      solOutflowType:       raw.solOutflowType       || null,
+      solOutflowConfidence: raw.solOutflowConfidence || null,
       // Reconstruction debug metadata (set by normalizeSolanaTx)
       _reconstruction: raw._reconstruction || null,
     };
@@ -2783,6 +2786,13 @@ const TaxEngine = (() => {
     unknown_contract:     { label: 'Unknown contract',            icon: '🤖', why: 'Interaction with an unrecognised smart contract — could be anything from an airdrop claim to a DeFi protocol.', fix: 'Investigate on a blockchain explorer and classify manually.' },
     outlier:              { label: 'Outlier / sanity check',      icon: '📊', why: 'This transaction has an unusually large gain/loss or an extreme price vs market value.', fix: 'Verify the SEK price is correct at the transaction date.' },
     split_trade:          { label: 'Possible split trade',        icon: '🔀', why: 'Multiple transactions near the same time may represent a single trade reported as separate rows.', fix: 'Check if these should be merged into one trade.' },
+    // SOL outflow classification review types (Solana Case F plumbing)
+    sol_taxable_send:       { label: 'SOL external send',           icon: '➡️', priority: 'high', isK4Blocker: true,
+      why: 'A SOL transfer above the operational threshold was detected. Under Swedish tax law, sending crypto is a disposal event (gift, donation, or withdrawal to exchange). Cost basis uses the average method.',
+      fix: 'If this was a transfer to your own wallet, add the destination as an account so it can be matched as a non-taxable internal transfer. Otherwise classify as sell/donation and verify the SEK value.' },
+    unclassified_sol_outflow: { label: 'Unclassified SOL outflow',  icon: '🔎', priority: 'low', isK4Blocker: false,
+      why: 'A small SOL outflow could not be classified as a fee, rent deposit, or known protocol interaction. This has been treated as a non-taxable inventory reduction. Verify it is not an external send.',
+      fix: 'Check the transaction on Solscan. If it is a transfer to another wallet you own, no action needed. If it is a send to an external address, reclassify as a sell/disposal.' },
   };
 
   function getReviewIssues(txns, taxResult) {
@@ -5399,6 +5409,162 @@ const TaxEngine = (() => {
     };
   }
 
+  // ── classifySolOutflow ────────────────────────────────────────────────────
+  // Pre-tax classifier for pure SOL outflows (Case F of normalizeSolanaTx).
+  //
+  // Solana's account model generates many small SOL outflows that are purely
+  // blockchain plumbing and have ZERO economic significance:
+  //   • Network fees (lamports burned by the protocol, already deducted before
+  //     nativeTransfers are even reported by Helius)
+  //   • Rent deposits for new ATA (token account) creation (~0.002 SOL each)
+  //   • SOL paid into a DEX on the same tx where a token was received
+  //     (already handled by Case A — but guarding here as belt+suspenders)
+  //   • Tiny operational sends to known protocol programs
+  //
+  // Without this classifier, all of these flow into Case F → CAT.SEND →
+  // recordDisposal → potential K4 rows or "missing history" review items.
+  //
+  // Returns: { type, blocker, review, confidence, reason }
+  //   type:       one of the SOL_OUTFLOW_TYPES enum values (string)
+  //   blocker:    true  → pass through to SEND/recordDisposal (taxable candidate)
+  //               false → use TRANSFER_OUT (non-taxable inventory reduction)
+  //   review:     true  → put in review queue even if non-blocking
+  //   confidence: 'high' | 'medium' | 'low'
+  //   reason:     human-readable one-liner for Varför? panel
+  //
+  // Thresholds (conservative — prefer false-negative over false-positive):
+  //   FEE_THRESHOLD         0.005 SOL  (~25 SEK at 5 000 kr/SOL) — fee noise
+  //   RENT_THRESHOLD        0.05  SOL  (~250 SEK) — ATA lifecycle / rent
+  //   OPERATIONAL_THRESHOLD 0.5   SOL  (~2 500 SEK) — app / protocol send
+  //
+  // Anything above OPERATIONAL_THRESHOLD is treated as a potential real
+  // economic send and must go through the normal SEND → recordDisposal path.
+  //
+  function classifySolOutflow(tx, netSol, feeSol, dex) {
+    const amt = Math.abs(netSol);
+
+    const FEE_THRESHOLD         = 0.005;
+    const RENT_THRESHOLD        = 0.05;
+    const OPERATIONAL_THRESHOLD = 0.5;
+
+    // ── 1. Pure fee noise ──────────────────────────────────────────────────
+    // If net SOL outflow ≈ feeSol (i.e. the user paid a fee and nothing else
+    // moved), OR the absolute amount is below the fee threshold, skip entirely.
+    // Note: Helius nativeTransfers usually do NOT include the fee deduction from
+    // the fee-payer's balance unless it was an explicit transfer — so this case
+    // catches residual tiny flows that look like fee artefacts.
+    if (amt <= FEE_THRESHOLD) {
+      return {
+        type: 'fee', blocker: false, review: false, confidence: 'high',
+        reason: `SOL outflow ${amt.toFixed(6)} SOL ≤ fee threshold — network noise, skipped`,
+      };
+    }
+
+    // ── 2. DEX swap funding ────────────────────────────────────────────────
+    // A SOL outflow on a known-DEX transaction with no token flows is unusual
+    // (Case A handles SOL→token properly), but can appear when the tx involves
+    // only protocol-internal accounts that Helius doesn't surface as wallet
+    // tokenTransfers.  Treat as non-taxable swap overhead.
+    if (dex) {
+      return {
+        type: 'swap_funding', blocker: false, review: false, confidence: 'medium',
+        reason: `SOL outflow ${amt.toFixed(6)} SOL on ${dex} tx without token receive — likely swap gas/routing, non-taxable`,
+      };
+    }
+
+    // ── 3. Rent deposit: token-account lifecycle signals ──────────────────
+    // Helius marks explicit ATA creation txs as ACCOUNT_CREATION (Guard 2 in
+    // normalizeSolanaTx already skips those).  But some multi-purpose txs
+    // (e.g. first-time swap to a new token) bundle ATA creation as an inner
+    // instruction alongside the swap.  When Helius accountData shows a positive
+    // native-balance change on a non-fee-payer account, that's the rent deposit.
+    const feePayerAddr = tx.feePayer || '';
+    const hasAtaRentSignal =
+      (tx.accountData || []).some(a =>
+        a.nativeBalanceChange > 0 &&
+        a.account !== feePayerAddr &&
+        Math.abs(a.nativeBalanceChange / 1e9) <= RENT_THRESHOLD
+      );
+
+    if (hasAtaRentSignal && amt <= RENT_THRESHOLD) {
+      return {
+        type: 'rent_deposit', blocker: false, review: false, confidence: 'high',
+        reason: `SOL outflow ${amt.toFixed(6)} SOL ≤ rent threshold with ATA creation signal — rent deposit, non-taxable`,
+      };
+    }
+
+    // ── 4. Generic small amounts with account-lifecycle tx type ───────────
+    // Even without the accountData signal, a small outflow on a tx whose
+    // Helius type suggests account management is very likely rent.
+    const ACCOUNT_LIFECYCLE_TYPES = new Set([
+      'ACCOUNT_DATA', 'CREATE_ACCOUNT', 'CLOSE_ACCOUNT',
+      'ACCOUNT_CREATION', 'FREEZE_ACCOUNT', 'THAW_ACCOUNT',
+      'INIT_MINT', 'MINT_TO',
+    ]);
+    if (ACCOUNT_LIFECYCLE_TYPES.has(tx.type) && amt <= RENT_THRESHOLD) {
+      return {
+        type: 'rent_deposit', blocker: false, review: false, confidence: 'high',
+        reason: `SOL outflow ${amt.toFixed(6)} SOL on ${tx.type} tx — rent deposit, non-taxable`,
+      };
+    }
+
+    // ── 5. Known Solana protocol program interactions ──────────────────────
+    // If any inner instruction targets a well-known protocol program, the SOL
+    // likely went there as an operational deposit (staking deposit, vault lock,
+    // program initialization fee, etc.) rather than an external send.
+    const KNOWN_PROTOCOL_PROGRAMS = new Set([
+      'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB', // Jupiter v4
+      'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
+      '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
+      'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK', // Raydium CAMM
+      'srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX',  // Serum DEX v3
+      'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',  // Orca Whirlpool
+      'MERLuDFBMmsHnsBPZw2sDQZHvXFMwp8EdjudcU2HKky',  // Mercurial stable
+      'So11111111111111111111111111111111111111112',    // WSOL program
+      'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  // SPL Token
+      'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe8bv',  // Associated Token
+    ]);
+    const hasKnownProgram = (tx.instructions || []).some(
+      i => i.programId && KNOWN_PROTOCOL_PROGRAMS.has(i.programId)
+    );
+
+    if (hasKnownProgram && amt <= OPERATIONAL_THRESHOLD) {
+      return {
+        type: 'app_operational_send', blocker: false, review: false, confidence: 'medium',
+        reason: `SOL outflow ${amt.toFixed(6)} SOL to known protocol program — app-operational, non-taxable`,
+      };
+    }
+
+    // ── 6. Unclassified small: below rent threshold, no signal ────────────
+    // Still very likely noise (second SOL ATA creation, program fee, etc.)
+    // Route as TRANSFER_OUT with a review flag so the user can spot anomalies.
+    if (amt <= RENT_THRESHOLD) {
+      return {
+        type: 'unclassified_sol_outflow', blocker: false, review: true, confidence: 'low',
+        reason: `Small SOL outflow ${amt.toFixed(6)} SOL — unclear purpose, likely rent/fee (review optional)`,
+      };
+    }
+
+    // ── 7. Medium unclassified: between rent and operational threshold ─────
+    // Larger than typical rent but smaller than a real transfer.  Flag for
+    // review but still don't block K4 — route as TRANSFER_OUT with review.
+    if (amt <= OPERATIONAL_THRESHOLD) {
+      return {
+        type: 'unclassified_sol_outflow', blocker: false, review: true, confidence: 'low',
+        reason: `SOL outflow ${amt.toFixed(6)} SOL — unclassified medium amount, verify manually`,
+      };
+    }
+
+    // ── 8. Large send: taxable disposal candidate ─────────────────────────
+    // Above OPERATIONAL_THRESHOLD: this is large enough to be a real external
+    // send (gift, withdrawal to exchange, bridging).  Must go through SEND →
+    // recordDisposal.  Under Swedish tax law, sending crypto is a disposal.
+    return {
+      type: 'taxable_disposal_candidate', blocker: true, review: true, confidence: 'high',
+      reason: `SOL send ${amt.toFixed(6)} SOL — external transfer or taxable disposal`,
+    };
+  }
+
   // ── normalizeSolanaTx ────────────────────────────────────────
   // Converts a Helius Enhanced Transaction into ONE canonical economic
   // event by computing net wallet-level flows and classifying the shape.
@@ -5636,14 +5802,58 @@ const TaxEngine = (() => {
       }
 
       // Case F: Pure SOL transfer (no token activity)
+      // Run the outflow classifier first — many small SOL outflows are blockchain
+      // plumbing (fees, rent deposits, swap funding) and must NOT become K4 rows.
       if (Math.abs(netSol) > DUST && tokenIn.length === 0 && tokenOut.length === 0) {
         const isOut = netSol < 0;
+
+        if (isOut) {
+          const outClass = classifySolOutflow(tx, netSol, feeSol, dex);
+
+          // Pure fee noise: skip entirely (no record needed)
+          if (outClass.type === 'fee') return null;
+
+          // Non-blocking: rent deposit, swap funding, app-operational, or small
+          // unclassified send.  Use TRANSFER_OUT so holdings are reduced but NO
+          // K4 row or "missing history" review item is generated.
+          if (!outClass.blocker) {
+            return normalizeTransaction({
+              txHash: sig, date: ts,
+              category: CAT.TRANSFER_OUT,  // non-taxable — inventory reduction only
+              assetSymbol: 'SOL', amount: Math.abs(netSol),
+              feeSEK,
+              needsReview: outClass.review || false,
+              reviewReason: outClass.review ? outClass.type : undefined,
+              notes: outClass.reason,
+              // Store classification on the row for the Varför? panel
+              solOutflowType:       outClass.type,
+              solOutflowConfidence: outClass.confidence,
+              _reconstruction: recon,
+            }, accountId, 'solana_wallet');
+          }
+
+          // Taxable disposal candidate (> OPERATIONAL_THRESHOLD): fall through
+          // to the normal SEND path so it can reach recordDisposal.
+          return normalizeTransaction({
+            txHash: sig, date: ts,
+            category: CAT.SEND,
+            assetSymbol: 'SOL', amount: Math.abs(netSol),
+            feeSEK, needsReview: true,
+            reviewReason: 'sol_taxable_send',
+            notes: outClass.reason,
+            solOutflowType:       outClass.type,
+            solOutflowConfidence: outClass.confidence,
+            _reconstruction: recon,
+          }, accountId, 'solana_wallet');
+        }
+
+        // SOL received: unchanged path
         return normalizeTransaction({
           txHash: sig, date: ts,
-          category: isOut ? CAT.SEND : CAT.RECEIVE,
+          category: CAT.RECEIVE,
           assetSymbol: 'SOL', amount: Math.abs(netSol),
           feeSEK, needsReview: false,
-          notes: `SOL ${isOut ? 'sent' : 'received'}`,
+          notes: 'SOL received',
           _reconstruction: recon,
         }, accountId, 'solana_wallet');
       }

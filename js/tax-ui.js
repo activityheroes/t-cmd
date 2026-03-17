@@ -1417,6 +1417,22 @@ const TaxUI = (() => {
       }
     }
 
+    // ── SOL outflow classification (Solana Case F)
+    if (d.solOutflowType) {
+      const solConfIcon = d.solOutflowConfidence === 'high' ? '✅'
+        : d.solOutflowConfidence === 'medium' ? '🔍'
+        : '⚠';
+      const solTypeLabel = {
+        fee:                      'Nätverksavgift',
+        rent_deposit:             'Hyresdepåposition (ATA)',
+        swap_funding:             'Swapfinansiering (DEX-routing)',
+        app_operational_send:     'Appoperativt SOL-utflöde',
+        unclassified_sol_outflow: 'Oklassificerat SOL-utflöde',
+        taxable_disposal_candidate: 'Potentiellt skattepliktigt SOL-utflöde',
+      }[d.solOutflowType] || d.solOutflowType;
+      lines.push(`${solConfIcon} SOL-klassificering: ${solTypeLabel}`);
+    }
+
     // ── Transaction-level over-allocation warning
     if (d.txProceedsOverallocated) {
       lines.push(`🔴 INTÄKTS-DUBLETT: Samma tx-utdata tilldelad ${d.txRowCount || 2} rader — exkluderad från K4`);

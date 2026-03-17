@@ -1289,18 +1289,18 @@ const TaxEngine = (() => {
   }
 
   // ── GeckoTerminal — DEX OHLCV for on-chain tokens not in CoinGecko ──
-  // GeckoTerminal's direct API blocks browser requests from github.io with CORS.
-  // We route it through corsproxy.io (open, privacy-preserving proxy — only the
-  // token mint address is sent, no user data).  Falls back to null on any failure.
+  // GeckoTerminal's direct API blocks browser requests from github.io (CORS/401).
+  // We route it through allorigins.win (open CORS proxy — only the token mint
+  // address is sent, no user data).  Falls back to null on any failure.
   const GT_NETWORK_MAP = {
     solana: 'solana', eth: 'eth', base: 'base',
     arbitrum: 'arbitrum', optimism: 'optimism',
     polygon_pos: 'polygon_pos', avax: 'avax', bsc: 'bsc',
   };
 
-  // CORS proxy prefix — routes GeckoTerminal requests through a free proxy that
-  // adds the missing Access-Control-Allow-Origin header.
-  const GT_CORS_PROXY = 'https://corsproxy.io/?url=';
+  // CORS proxy fallback for GeckoTerminal — corsproxy.io returns 403 from github.io.
+  // allorigins.win is more permissive for cross-origin read-only requests.
+  const GT_CORS_PROXY = 'https://api.allorigins.win/raw?url=';
 
   // Fetch OHLCV for a token by contract/mint address for a given year.
   // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
@@ -1331,37 +1331,26 @@ const TaxEngine = (() => {
   // ── Cache key for GeckoTerminal data (separate namespace) ────
   function gtCacheKey(address, dateStr) { return `gt:${address}:${dateStr}`; }
 
-  // ── CoinCap v2 — free, no API key, CORS-friendly ─────────────
-  // Replaces CoinGecko which now requires a paid API key for all requests.
-  // CoinCap uses the same asset slug format for most major coins.
-  // IDs that differ from CoinGecko are translated in COINCAP_ID_MAP below.
-  const COINCAP_ID_MAP = {
-    'binancecoin':     'binance-coin',
-    'avalanche-2':     'avalanche',
-    'matic-network':   'polygon',
-    'injective-protocol': 'injective',
-    'pyth-network':    'pyth-network',  // same
-    'dogwifhat':       'dogwifhat',     // same (may not be in CoinCap)
-    'the-open-network': 'toncoin',
-  };
-
-  // Fetch one year of daily USD prices from CoinCap v2 history endpoint.
-  // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
-  async function fetchCoinCapYear(cgId, year) {
-    const capId = COINCAP_ID_MAP[cgId] || cgId;
-    const start = Date.UTC(year, 0, 1);          // ms
-    const end   = Date.UTC(year, 11, 31, 23, 59, 59);
+  // ── CryptoCompare — free daily OHLCV (no API key, CORS-friendly) ─────
+  // Replaces CoinCap (api.coincap.io) which is offline (ERR_NAME_NOT_RESOLVED).
+  // CryptoCompare accepts ticker symbols directly — no ID translation map needed.
+  // Free tier: up to 100 req/s with no key; gracefully returns null on any failure.
+  async function fetchCryptoCompareYear(symbol, year) {
+    const toTs = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
     try {
-      const url = `https://api.coincap.io/v2/assets/${capId}/history?interval=d1&start=${start}&end=${end}`;
+      const url = `https://min-api.cryptocompare.com/data/v2/histoday` +
+        `?fsym=${encodeURIComponent(symbol)}&tsym=USD&limit=365&toTs=${toTs}`;
       const r = await fetchWithTimeout(url, 12000);
       if (!r || !r.ok) return null;
-      const data = await r.json();
+      const json = await r.json();
+      const rows = json?.Data?.Data;
+      if (!Array.isArray(rows) || !rows.length) return null;
       const map = new Map();
-      // data.data = [{ priceUsd: "50000.0", time: 1635724800000, date: "..." }]
-      for (const point of (data.data || [])) {
-        const d = new Date(point.time).toISOString().slice(0, 10);
-        const p = parseFloat(point.priceUsd);
-        if (p > 0) map.set(d, p);
+      for (const row of rows) {
+        if (row.time && row.close > 0) {
+          const d = new Date(row.time * 1000).toISOString().slice(0, 10);
+          map.set(d, row.close);
+        }
       }
       return map.size > 0 ? map : null;
     } catch { return null; }
@@ -2296,7 +2285,7 @@ const TaxEngine = (() => {
     // Collect ALL years with taxable transactions
     // (FX needed for every year that has stablecoins, not just years with unknown coins)
     const allTaxableYears = new Set();
-    const neededPairs     = new Map(); // "ccId|year" → { ccId, year }
+    const neededPairs     = new Map(); // "ccId|year" → { ccId, sym, year }
     const MAX_PAIRS       = 80;
 
     for (const t of txns) {
@@ -2307,14 +2296,15 @@ const TaxEngine = (() => {
       const year = parseInt(dateStr.slice(0, 4));
       if (!isNaN(year)) allTaxableYears.add(year);
 
-      // Queue CoinGecko fetch for non-stable, unpriced, known-ID tokens
+      // Queue CryptoCompare fetch for non-stable, unpriced, known-ID tokens
       if (t.priceSEKPerUnit > 0) continue;
       if (STABLES.has((t.assetSymbol || '').toUpperCase())) continue;
-      const ccId = CC_IDS[(t.assetSymbol || '').toUpperCase()];
+      const sym  = (t.assetSymbol || '').toUpperCase();
+      const ccId = CC_IDS[sym];
       if (!ccId) continue;
       if (cache[cacheKey(ccId, dateStr)] !== undefined) continue;
       const pairKey = `${ccId}|${year}`;
-      if (!neededPairs.has(pairKey)) neededPairs.set(pairKey, { ccId, year });
+      if (!neededPairs.has(pairKey)) neededPairs.set(pairKey, { ccId, sym, year });
       if (neededPairs.size >= MAX_PAIRS) break;
     }
     // Also collect years from all categories that carry economic value:
@@ -2349,10 +2339,10 @@ const TaxEngine = (() => {
       });
     }
 
-    // ── B: Fetch CoinGecko price history per (coin × year) ─
+    // ── B: Fetch CryptoCompare price history per (coin × year) ─
     const updatedCache = { ...cache };
-    for (const [, { ccId, year }] of neededPairs) {
-      const priceMap = await fetchCoinCapYear(ccId, year);
+    for (const [, { ccId, sym, year }] of neededPairs) {
+      const priceMap = await fetchCryptoCompareYear(sym, year);
       const fxMap    = fxByYear.get(year);
       if (priceMap) {
         for (const [date, usdPrice] of priceMap) {
@@ -2365,7 +2355,7 @@ const TaxEngine = (() => {
       if (onProgress) onProgress({
         step: 'price',
         pct: 60 + Math.round((stepsDone / totalSteps) * 25),
-        msg: `Fetching prices (${ccId} ${year})…`,
+        msg: `Fetching prices (${sym} ${year})…`,
       });
     }
 
@@ -6755,27 +6745,8 @@ const TaxEngine = (() => {
       } catch { /* ignore individual batch failures */ }
     }
 
-    // ── Pump.fun fallback for mints still unresolved after DexScreener ───────
-    const pumpNeeded = mintsNeeded.filter(m => !cache[m.toUpperCase()]).slice(0, 30);
-    for (const mint of pumpNeeded) {
-      try {
-        const url = `https://frontend-api.pump.fun/coins/${mint}`;
-        const r = await fetchWithTimeout(url, 6000);
-        if (!r?.ok) continue;
-        const d = await r.json();
-        if (!d) continue;
-        const sym = (d.symbol || mint.slice(0, 8)).trim();
-        const entry = {
-          symbol:      sym,
-          name:        (d.name || sym).trim(),
-          isPumpFun:   true,
-          priceUsd:    d.usd_market_cap && d.total_supply ? (d.usd_market_cap / d.total_supply) : null,
-          _ts: now,
-        };
-        cache[mint.toUpperCase()]             = entry;
-        cache[mint.slice(0, 8).toUpperCase()] = entry;
-      } catch { /* ignore */ }
-    }
+    // Pump.fun direct API removed — CORS-blocked from github.io.
+    // DexScreener batch (above) already covers pump.fun tokens via pair lookup.
 
     // ── Path 2: resolve by 8-char symbol (legacy / fallback) ─────────────────
     const symNeeded = [...new Set(symbols)].filter(s => {

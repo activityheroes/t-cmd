@@ -1417,6 +1417,25 @@ const TaxUI = (() => {
       }
     }
 
+    // ── Tx-level classification gate (Step 3a)
+    // Show what classifySolanaTransaction() decided about the entire tx
+    if (d._reconstruction?.txType && d._reconstruction.txType !== 'unknown') {
+      const txTypeLabels = {
+        swap:              '🔄 Swap-transaktion',
+        rent_refund:       '🏦 Kontoåterbetalning (hyra)',
+        rent_deposit:      '🏦 Kontoinsättning (hyra)',
+        fee_only:          '💸 Enbart nätverksavgift',
+        internal_transfer: '↔️ Intern transfer',
+        external_send:     '➡️ Extern SOL-sändning',
+        token_receive:     '📥 Token mottagen',
+      };
+      const txLabel = txTypeLabels[d._reconstruction.txType] || d._reconstruction.txType;
+      const dispGate = d._reconstruction.txLevelDisposalPermitted === false
+        ? ' — avyttring blockerad (tx-nivå)'
+        : '';
+      lines.push(`${txLabel}${dispGate}`);
+    }
+
     // ── SOL outflow classification (Solana Case F)
     if (d.solOutflowType) {
       const solConfIcon = d.solOutflowConfidence === 'high' ? '✅'

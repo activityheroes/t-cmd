@@ -3923,13 +3923,32 @@ const TaxEngine = (() => {
     }
 
     // ── Transaction-level proceeds conservation check ─────────────────────────
-    // A single on-chain transaction produces exactly one stream of received assets.
-    // If the same txHash appears on multiple final disposal rows whose proceeds
-    // values are near-identical, the swap reconstruction has assigned the same
-    // received-value to two different out-legs — double-counting the proceeds.
-    // We also catch the case where the running total far exceeds the largest
-    // single-row proceeds (indicating multiple legs attributed the same output).
+    // Rule: totalProceedsAssigned ≤ txActualReceivedValue
+    //
+    // A single on-chain transaction produces exactly one stream of received
+    // assets.  We check three independent violation signals:
+    //
+    //   Signal 1 (duplicate proceeds): two rows from the same tx have near-
+    //   identical proceeds values — the reconstruction assigned the same
+    //   received-value to two different out-legs.
+    //
+    //   Signal 2 (excess total): sum of all rows far exceeds the largest single
+    //   row — multiple legs attributed the same output value.
+    //
+    //   Signal 3 (vs actual received — NEW):
+    //   For Solana txs we can compare the total assigned proceeds against the
+    //   actual SEK value of the token(s) received, read from the _reconstruction
+    //   stored on the imported transaction row.  If assigned > received * 1.2
+    //   (20% tolerance for price slippage), flag as overallocated.
     {
+      // Build txHash → imported-transaction map so we can look up _reconstruction
+      const txByHash = new Map();
+      for (const t of txns) {
+        if (t.txHash && !t.txHash.startsWith('manual_') && t._reconstruction) {
+          txByHash.set(t.txHash, t);
+        }
+      }
+
       const disposalsByTx = new Map();
       for (const d of disposals) {
         const key = d.txHash;
@@ -3950,8 +3969,7 @@ const TaxEngine = (() => {
         const totalAssigned = procValues.reduce((s, v) => s + v, 0);
         const maxSingle     = Math.max(...procValues);
 
-        // Signal 1: near-duplicate proceeds values (most reliable signal for the
-        // specific bug where the same received-amount is echoed to multiple rows)
+        // Signal 1: near-duplicate proceeds values
         let hasDuplicateProceeds = false;
         for (let i = 0; i < procValues.length && !hasDuplicateProceeds; i++) {
           for (let j = i + 1; j < procValues.length; j++) {
@@ -3965,14 +3983,39 @@ const TaxEngine = (() => {
         }
 
         // Signal 2: total far exceeds the largest individual row
-        // (any legitimate 2-asset sale produces two DIFFERENT amounts;
-        //  if total > 1.5 × max, we have at least two near-equal large rows)
         const hasExcessTotal = maxSingle > 1_000 && totalAssigned > maxSingle * 1.5;
 
-        if (hasDuplicateProceeds || hasExcessTotal) {
-          const txShort = txHash.slice(0, 16) + '…';
-          const reason  = `tx_proceeds_overallocated: ${txShort} `
+        // Signal 3: total exceeds actual received value (Solana-specific)
+        // For a Solana tx we know the exact token received from _reconstruction.
+        // txActualReceivedSEK = priceSEK of the boughtAsset × boughtAmount.
+        // If that can't be computed (unknown price), skip this signal.
+        let exceedsActualReceived = false;
+        let txActualReceivedSEK   = null;
+        const origTx = txByHash.get(txHash);
+        if (origTx?._reconstruction?.economicEvent) {
+          const evt = origTx._reconstruction.economicEvent;
+          // Only apply for swap shapes where we know what was received
+          if (evt.boughtAsset && evt.boughtAmount > 0) {
+            const recvDateStr = (origTx.date || '').slice(0, 10);
+            const recvPrice   = lookupCachedSEK(evt.boughtAsset, recvDateStr, _priceCache, null);
+            if (recvPrice > 0) {
+              txActualReceivedSEK = recvPrice * evt.boughtAmount;
+              // 20% tolerance: pricing slippage + time-of-day price differences
+              if (totalAssigned > txActualReceivedSEK * 1.2 && totalAssigned > 1_000) {
+                exceedsActualReceived = true;
+              }
+            }
+          }
+        }
+
+        if (hasDuplicateProceeds || hasExcessTotal || exceedsActualReceived) {
+          const txShort   = txHash.slice(0, 16) + '…';
+          const signalTag = hasDuplicateProceeds ? 'duplicate_proceeds'
+            : hasExcessTotal ? 'excess_total'
+            : 'exceeds_actual_received';
+          const reason  = `tx_proceeds_overallocated(${signalTag}): ${txShort} `
             + `total_assigned=${Math.round(totalAssigned)}kr `
+            + (txActualReceivedSEK ? `actual_received≈${Math.round(txActualReceivedSEK)}kr ` : '')
             + `max_single=${Math.round(maxSingle)}kr `
             + `(${finalRows.length} rader från samma tx — sannolikt dubbeltilldelning)`;
 
@@ -5409,50 +5452,247 @@ const TaxEngine = (() => {
     };
   }
 
+  // ════════════════════════════════════════════════════════════
+  // TX-LEVEL SOLANA CLASSIFIER
+  //
+  // Step 1: buildTxSummary — extract raw structural facts from
+  //         the Helius tx BEFORE computing net flows.
+  //
+  // Step 2: classifySolanaTransaction — derive one tx-level type
+  //         from those facts.
+  //
+  // CRITICAL RULE: once a tx is classified as anything other than
+  // 'external_send', EVERY row it produces is blocked from
+  // becoming a taxable disposal.  The classification runs at the
+  // top of normalizeSolanaTx so all Cases (A-H) inherit it.
+  // ════════════════════════════════════════════════════════════
+
+  // Known Solana DEX/swap program IDs — any instruction touching these
+  // means the tx is a swap, so all SOL movement is swap-funding, not disposal.
+  const SOLANA_SWAP_PROGRAMS = new Set([
+    'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB', // Jupiter v4
+    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
+    'JupiterDCA...', // placeholder — Helius tx.source catches this
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK', // Raydium CAMM
+    '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1', // Raydium AMM v5
+    'srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX',  // Serum DEX v3
+    '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin', // Serum DEX v2
+    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',  // Orca Whirlpool
+    'DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1', // Orca v1
+    'MERLuDFBMmsHnsBPZw2sDQZHvXFMwp8EdjudcU2HKky',  // Mercurial stable
+    'PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY',  // Phoenix DEX
+    'opnb2LAfJYbRMAHHvqjCwQxanZn7n7LS1urYWYev65x',  // OpenBook v2
+    'dRiftyHA39MWEi3m9aunc5MzRF1JYR46Rmjvi475WZGc',  // Drift Protocol
+    'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo',  // Meteora DLMM
+    'Eo7WjKq67rjJQDd1d83mYnsx2dm185HJSFnmJpVbcxjt9', // Meteora
+    'GFXsSL5sSaDfNFQUYsHekbWBW1TsFdjDYzACh62tEHxn',  // GooseFX
+    'CLMM9tUoggJu2wagPkkqs9eFG4BWhVBZWkP1qv3Sp7tR',  // Crema CLMM
+  ]);
+
+  // Helius tx.source values that indicate a swap — belt+suspenders over
+  // SOLANA_SWAP_PROGRAMS (Helius may not surface inner instructions).
+  const HELIUS_SWAP_SOURCES = new Set(Object.keys(HELIUS_DEX_MAP));
+
+  // ATA / token-account lifecycle program
+  const SPL_TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+  const ATA_PROGRAM       = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe8bv';
+
+  /**
+   * buildTxSummary — extract structural facts from the raw Helius tx.
+   *
+   * These are tx-level boolean flags derived directly from the Helius
+   * Enhanced Transaction shape — NOT from computed net wallet flows.
+   *
+   * @param {Object} tx     Raw Helius Enhanced Transaction
+   * @param {string} wallet Wallet address being imported
+   * @returns {TxSummary}   { hasSwap, hasTokenProgram, hasATA,
+   *                          hasCloseAccount, hasTokenMovement,
+   *                          rawSolOut, rawSolIn,
+   *                          rawTokenOut, rawTokenIn }
+   */
+  function buildTxSummary(tx, wallet) {
+    const instructions = tx.instructions || [];
+    const tokenXfers   = tx.tokenTransfers || [];
+    const nativeXfers  = tx.nativeTransfers || [];
+
+    // ── Swap detection (three independent signals) ──────────────────────
+    // Signal 1: Helius tx.source maps to a known DEX
+    const hasDexSource = HELIUS_SWAP_SOURCES.has(tx.source);
+
+    // Signal 2: tx.type is SWAP (Helius enriched type)
+    const hasSwapType  = tx.type === 'SWAP' || tx.type === 'TOKEN_SWAP';
+
+    // Signal 3: any inner instruction targets a known swap program
+    const hasSwapProgram = instructions.some(
+      i => i.programId && SOLANA_SWAP_PROGRAMS.has(i.programId)
+    );
+
+    const hasSwap = hasDexSource || hasSwapType || hasSwapProgram;
+
+    // ── Token program involvement ────────────────────────────────────────
+    const hasTokenProgram = instructions.some(
+      i => i.programId === SPL_TOKEN_PROGRAM
+    );
+
+    // ── ATA (associated token account) lifecycle ─────────────────────────
+    const hasATA = instructions.some(
+      i => i.programId === ATA_PROGRAM
+    );
+
+    // ── Close account instruction ─────────────────────────────────────────
+    // Helius surfaces this as tx.type or as an inner instruction opcode.
+    const hasCloseAccount =
+      tx.type === 'CLOSE_ACCOUNT' ||
+      tx.type === 'CLOSE_ACCOUNT_TX' ||
+      instructions.some(i =>
+        i.programId === SPL_TOKEN_PROGRAM &&
+        (i.data === 'A' || i.parsed?.type === 'closeAccount')   // base58 'A' = closeAccount opcode
+      );
+
+    // ── Raw token movement (ignoring net — any non-WSOL transfer counts) ─
+    const rawTokenOut = tokenXfers
+      .filter(t => t.fromUserAccount === wallet && t.mint !== WSOL_MINT)
+      .map(t => ({ mint: t.mint, amt: t.tokenAmount || 0 }));
+    const rawTokenIn  = tokenXfers
+      .filter(t => t.toUserAccount === wallet && t.mint !== WSOL_MINT)
+      .map(t => ({ mint: t.mint, amt: t.tokenAmount || 0 }));
+
+    const hasTokenMovement = rawTokenOut.length > 0 || rawTokenIn.length > 0;
+
+    // ── Raw SOL flows to/from the wallet ──────────────────────────────────
+    let rawSolOut = 0, rawSolIn = 0;
+    for (const n of nativeXfers) {
+      if (n.fromUserAccount === wallet) rawSolOut += (n.amount || 0);
+      if (n.toUserAccount   === wallet) rawSolIn  += (n.amount || 0);
+    }
+    rawSolOut /= 1e9;
+    rawSolIn  /= 1e9;
+
+    return {
+      hasSwap, hasTokenProgram, hasATA, hasCloseAccount,
+      hasTokenMovement, rawTokenOut, rawTokenIn,
+      rawSolOut, rawSolIn,
+    };
+  }
+
+  /**
+   * classifySolanaTransaction — tx-level classification gate.
+   *
+   * Returns a string label for the ENTIRE transaction.  This label
+   * propagates to every row produced from the tx and determines
+   * whether any of them can become a taxable disposal.
+   *
+   *   'swap'              — token exchange (SOL role = swap funding)
+   *   'rent_refund'       — token account close, small SOL returned
+   *   'rent_deposit'      — ATA creation, small SOL deposited
+   *   'fee_only'          — network fee only, nothing of value moved
+   *   'internal_transfer' — known to be between own wallets (future: matcher)
+   *   'external_send'     — SOL or tokens sent to an unowned address
+   *   'token_receive'     — tokens received (airdrop / bridge in)
+   *   'unknown'           — cannot determine tx purpose
+   *
+   * DISPOSAL GATE: only 'external_send' and 'unknown' can produce
+   * taxable disposals.  All other types → inventory reduction only.
+   *
+   * @param {TxSummary} txSum  Output of buildTxSummary()
+   * @param {number}    netSol Net SOL (positive = received, negative = sent)
+   * @returns {string}         Tx-level classification label
+   */
+  function classifySolanaTransaction(txSum, netSol) {
+    // ── 1. Swap: any DEX/swap signal → entire tx is a swap ───────────────
+    // SOL flowing out on a swap tx is swap-funding, NEVER a disposal.
+    if (txSum.hasSwap) return 'swap';
+
+    // ── 2. Token account close → rent refund ─────────────────────────────
+    // Closing an ATA returns the lamport reserve (~0.002 SOL) to the owner.
+    // The SOL received is not income; the token leaving is not a sale.
+    if (txSum.hasCloseAccount && txSum.rawSolIn > 0) return 'rent_refund';
+
+    // ── 3. ATA creation with small SOL out → rent deposit ────────────────
+    if (txSum.hasATA && netSol < 0 && Math.abs(netSol) < 0.05) return 'rent_deposit';
+
+    // ── 4. Fee-only: very small SOL out, no token movement ───────────────
+    if (netSol < 0 && Math.abs(netSol) < 0.01 && !txSum.hasTokenMovement) return 'fee_only';
+
+    // ── 5. Token movement present on the tx ──────────────────────────────
+    // If ANY token moved on this tx, any SOL outflow is routing/operational.
+    // (Real SOL→SOL sends don't involve token programs.)
+    if (txSum.hasTokenMovement) {
+      // Token received without sending anything (airdrop / bridge in)
+      if (txSum.rawTokenIn.length > 0 && txSum.rawTokenOut.length === 0 && netSol >= 0) {
+        return 'token_receive';
+      }
+      // Token sent (with or without SOL) — could be a send or a partial swap
+      return 'swap';  // conservative: treat any token-out as swap output
+    }
+
+    // ── 6. Token program involvement but no visible token movement ────────
+    // A tx that touched the SPL token program but had no net token flow to
+    // the wallet is almost always an internal protocol operation.
+    if (txSum.hasTokenProgram || txSum.hasATA) {
+      if (netSol < 0 && Math.abs(netSol) < 0.05) return 'rent_deposit';
+    }
+
+    // ── 7. Pure SOL in/out with nothing else ─────────────────────────────
+    if (netSol < 0 && !txSum.hasTokenMovement) return 'external_send';
+    if (netSol > 0 && !txSum.hasTokenMovement) return 'token_receive'; // SOL received
+
+    return 'unknown';
+  }
+
   // ── classifySolOutflow ────────────────────────────────────────────────────
-  // Pre-tax classifier for pure SOL outflows (Case F of normalizeSolanaTx).
+  // Fine-grained classifier for SOL outflows WITHIN Case F of normalizeSolanaTx.
   //
-  // Solana's account model generates many small SOL outflows that are purely
-  // blockchain plumbing and have ZERO economic significance:
-  //   • Network fees (lamports burned by the protocol, already deducted before
-  //     nativeTransfers are even reported by Helius)
-  //   • Rent deposits for new ATA (token account) creation (~0.002 SOL each)
-  //   • SOL paid into a DEX on the same tx where a token was received
-  //     (already handled by Case A — but guarding here as belt+suspenders)
-  //   • Tiny operational sends to known protocol programs
+  // This runs AFTER classifySolanaTransaction has already handled the most
+  // important tx-level gates (swap, ATA, fee-only).  By the time we reach
+  // classifySolOutflow, the tx is either 'external_send' or 'unknown'.
   //
-  // Without this classifier, all of these flow into Case F → CAT.SEND →
-  // recordDisposal → potential K4 rows or "missing history" review items.
+  // UPGRADE vs v30:
+  //   Point 5 — ≤ 0.5 SOL is NEVER disposal if tx has token movement,
+  //             swap activity, or ATA activity (txSummary used here).
+  //   Point 6 — Fail-closed for large SOL: require positive external-send
+  //             evidence before creating a taxable disposal candidate.
+  //             Without such evidence → unclassified (non-blocking review).
   //
   // Returns: { type, blocker, review, confidence, reason }
-  //   type:       one of the SOL_OUTFLOW_TYPES enum values (string)
-  //   blocker:    true  → pass through to SEND/recordDisposal (taxable candidate)
-  //               false → use TRANSFER_OUT (non-taxable inventory reduction)
-  //   review:     true  → put in review queue even if non-blocking
-  //   confidence: 'high' | 'medium' | 'low'
-  //   reason:     human-readable one-liner for Varför? panel
+  //   blocker: true  → SEND → recordDisposal (taxable)
+  //            false → TRANSFER_OUT (inventory reduction, no K4 row)
   //
-  // Thresholds (conservative — prefer false-negative over false-positive):
-  //   FEE_THRESHOLD         0.005 SOL  (~25 SEK at 5 000 kr/SOL) — fee noise
-  //   RENT_THRESHOLD        0.05  SOL  (~250 SEK) — ATA lifecycle / rent
-  //   OPERATIONAL_THRESHOLD 0.5   SOL  (~2 500 SEK) — app / protocol send
-  //
-  // Anything above OPERATIONAL_THRESHOLD is treated as a potential real
-  // economic send and must go through the normal SEND → recordDisposal path.
-  //
-  function classifySolOutflow(tx, netSol, feeSol, dex) {
+  function classifySolOutflow(tx, netSol, feeSol, dex, txSum) {
     const amt = Math.abs(netSol);
 
     const FEE_THRESHOLD         = 0.005;
     const RENT_THRESHOLD        = 0.05;
     const OPERATIONAL_THRESHOLD = 0.5;
 
-    // ── 1. Pure fee noise ──────────────────────────────────────────────────
-    // If net SOL outflow ≈ feeSol (i.e. the user paid a fee and nothing else
-    // moved), OR the absolute amount is below the fee threshold, skip entirely.
-    // Note: Helius nativeTransfers usually do NOT include the fee deduction from
-    // the fee-payer's balance unless it was an explicit transfer — so this case
-    // catches residual tiny flows that look like fee artefacts.
+    // ── POINT 5 & 6: Context gate (runs before amount thresholds) ─────────
+    //
+    // If the tx has token movement, swap activity, or ATA/token-program
+    // involvement, SOL CANNOT be a disposal regardless of amount.
+    // "SOL cannot be disposal if tx has token swap" (Point 3 spec).
+    if (txSum) {
+      if (txSum.hasSwap) {
+        return {
+          type: 'swap_funding', blocker: false, review: false, confidence: 'high',
+          reason: `SOL outflow ${amt.toFixed(6)} SOL — tx is a swap, SOL is swap funding not a disposal`,
+        };
+      }
+      if (txSum.hasTokenMovement) {
+        return {
+          type: 'swap_funding', blocker: false, review: false, confidence: 'high',
+          reason: `SOL outflow ${amt.toFixed(6)} SOL — tx has token movement, SOL is routing/operational`,
+        };
+      }
+      if ((txSum.hasATA || txSum.hasTokenProgram) && amt <= OPERATIONAL_THRESHOLD) {
+        return {
+          type: 'rent_deposit', blocker: false, review: false, confidence: 'medium',
+          reason: `SOL outflow ${amt.toFixed(6)} SOL — tx has ATA/token-program activity, likely rent deposit`,
+        };
+      }
+    }
+
+    // ── 1. Pure fee noise ─────────────────────────────────────────────────
     if (amt <= FEE_THRESHOLD) {
       return {
         type: 'fee', blocker: false, review: false, confidence: 'high',
@@ -5460,24 +5700,15 @@ const TaxEngine = (() => {
       };
     }
 
-    // ── 2. DEX swap funding ────────────────────────────────────────────────
-    // A SOL outflow on a known-DEX transaction with no token flows is unusual
-    // (Case A handles SOL→token properly), but can appear when the tx involves
-    // only protocol-internal accounts that Helius doesn't surface as wallet
-    // tokenTransfers.  Treat as non-taxable swap overhead.
+    // ── 2. DEX source without token flows (rare edge case) ────────────────
     if (dex) {
       return {
         type: 'swap_funding', blocker: false, review: false, confidence: 'medium',
-        reason: `SOL outflow ${amt.toFixed(6)} SOL on ${dex} tx without token receive — likely swap gas/routing, non-taxable`,
+        reason: `SOL outflow ${amt.toFixed(6)} SOL on ${dex} tx — likely swap gas/routing, non-taxable`,
       };
     }
 
-    // ── 3. Rent deposit: token-account lifecycle signals ──────────────────
-    // Helius marks explicit ATA creation txs as ACCOUNT_CREATION (Guard 2 in
-    // normalizeSolanaTx already skips those).  But some multi-purpose txs
-    // (e.g. first-time swap to a new token) bundle ATA creation as an inner
-    // instruction alongside the swap.  When Helius accountData shows a positive
-    // native-balance change on a non-fee-payer account, that's the rent deposit.
+    // ── 3. Rent deposit signals ────────────────────────────────────────────
     const feePayerAddr = tx.feePayer || '';
     const hasAtaRentSignal =
       (tx.accountData || []).some(a =>
@@ -5489,13 +5720,10 @@ const TaxEngine = (() => {
     if (hasAtaRentSignal && amt <= RENT_THRESHOLD) {
       return {
         type: 'rent_deposit', blocker: false, review: false, confidence: 'high',
-        reason: `SOL outflow ${amt.toFixed(6)} SOL ≤ rent threshold with ATA creation signal — rent deposit, non-taxable`,
+        reason: `SOL outflow ${amt.toFixed(6)} SOL with ATA rent signal — rent deposit, non-taxable`,
       };
     }
 
-    // ── 4. Generic small amounts with account-lifecycle tx type ───────────
-    // Even without the accountData signal, a small outflow on a tx whose
-    // Helius type suggests account management is very likely rent.
     const ACCOUNT_LIFECYCLE_TYPES = new Set([
       'ACCOUNT_DATA', 'CREATE_ACCOUNT', 'CLOSE_ACCOUNT',
       'ACCOUNT_CREATION', 'FREEZE_ACCOUNT', 'THAW_ACCOUNT',
@@ -5508,60 +5736,45 @@ const TaxEngine = (() => {
       };
     }
 
-    // ── 5. Known Solana protocol program interactions ──────────────────────
-    // If any inner instruction targets a well-known protocol program, the SOL
-    // likely went there as an operational deposit (staking deposit, vault lock,
-    // program initialization fee, etc.) rather than an external send.
-    const KNOWN_PROTOCOL_PROGRAMS = new Set([
-      'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB', // Jupiter v4
-      'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
-      '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
-      'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK', // Raydium CAMM
-      'srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX',  // Serum DEX v3
-      'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',  // Orca Whirlpool
-      'MERLuDFBMmsHnsBPZw2sDQZHvXFMwp8EdjudcU2HKky',  // Mercurial stable
-      'So11111111111111111111111111111111111111112',    // WSOL program
-      'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  // SPL Token
-      'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe8bv',  // Associated Token
-    ]);
-    const hasKnownProgram = (tx.instructions || []).some(
-      i => i.programId && KNOWN_PROTOCOL_PROGRAMS.has(i.programId)
+    // ── 4. Known protocol program ─────────────────────────────────────────
+    const hasKnownProgram = (tx.instructions || []).some(i =>
+      i.programId && (SOLANA_SWAP_PROGRAMS.has(i.programId) ||
+        i.programId === SPL_TOKEN_PROGRAM ||
+        i.programId === ATA_PROGRAM)
     );
-
     if (hasKnownProgram && amt <= OPERATIONAL_THRESHOLD) {
       return {
         type: 'app_operational_send', blocker: false, review: false, confidence: 'medium',
-        reason: `SOL outflow ${amt.toFixed(6)} SOL to known protocol program — app-operational, non-taxable`,
+        reason: `SOL outflow ${amt.toFixed(6)} SOL to known protocol — app-operational, non-taxable`,
       };
     }
 
-    // ── 6. Unclassified small: below rent threshold, no signal ────────────
-    // Still very likely noise (second SOL ATA creation, program fee, etc.)
-    // Route as TRANSFER_OUT with a review flag so the user can spot anomalies.
+    // ── 5 & 6. FAIL-CLOSED for large amounts ─────────────────────────────
+    // Point 6: > OPERATIONAL_THRESHOLD only becomes 'taxable_disposal_candidate'
+    // if ALL of the following hold:
+    //   a) no swap signal           (checked above via txSum.hasSwap)
+    //   b) no token movement        (checked above via txSum.hasTokenMovement)
+    //   c) no ATA/program activity  (checked above)
+    //   d) amount > threshold       (checked here)
+    // All smaller amounts → non-blocking review (never disposal without evidence).
     if (amt <= RENT_THRESHOLD) {
       return {
         type: 'unclassified_sol_outflow', blocker: false, review: true, confidence: 'low',
-        reason: `Small SOL outflow ${amt.toFixed(6)} SOL — unclear purpose, likely rent/fee (review optional)`,
+        reason: `Small SOL outflow ${amt.toFixed(6)} SOL — likely rent/fee, not taxable (review optional)`,
       };
     }
-
-    // ── 7. Medium unclassified: between rent and operational threshold ─────
-    // Larger than typical rent but smaller than a real transfer.  Flag for
-    // review but still don't block K4 — route as TRANSFER_OUT with review.
     if (amt <= OPERATIONAL_THRESHOLD) {
       return {
         type: 'unclassified_sol_outflow', blocker: false, review: true, confidence: 'low',
-        reason: `SOL outflow ${amt.toFixed(6)} SOL — unclassified medium amount, verify manually`,
+        reason: `SOL outflow ${amt.toFixed(6)} SOL — no swap/token context, verify manually`,
       };
     }
 
-    // ── 8. Large send: taxable disposal candidate ─────────────────────────
-    // Above OPERATIONAL_THRESHOLD: this is large enough to be a real external
-    // send (gift, withdrawal to exchange, bridging).  Must go through SEND →
-    // recordDisposal.  Under Swedish tax law, sending crypto is a disposal.
+    // Large amount with no swap/token/ATA context: genuine external send candidate.
+    // blocker=true → SEND → recordDisposal (Swedish law: sending crypto is taxable).
     return {
       type: 'taxable_disposal_candidate', blocker: true, review: true, confidence: 'high',
-      reason: `SOL send ${amt.toFixed(6)} SOL — external transfer or taxable disposal`,
+      reason: `SOL send ${amt.toFixed(6)} SOL — no protocol context, likely external transfer/disposal`,
     };
   }
 
@@ -5594,6 +5807,14 @@ const TaxEngine = (() => {
       const feeSol = (tx.fee || 0) / 1e9;
       const feeSEK = feeSol * SOL_FEE_PRICE_SEK;
       const dex    = HELIUS_DEX_MAP[tx.source] || null;
+
+      // ── Step 0: Tx-level summary (raw structural facts) ─────
+      // buildTxSummary inspects the raw Helius tx shape — program IDs,
+      // token transfer lists, account data — BEFORE net-flow computation.
+      // This gives classifySolanaTransaction the context it needs to
+      // apply the CRITICAL RULE: block all rows from becoming taxable
+      // disposals when the tx is anything other than a pure external send.
+      const txSum   = buildTxSummary(tx, walletAddr);
 
       // ── Step 1: Net SOL flow from nativeTransfers ───────────
       // Uses wallet address only — NEVER sums ATA accounts here,
@@ -5653,6 +5874,16 @@ const TaxEngine = (() => {
       const msym    = mint => mintToSym(mint) || mint?.slice(0, 8) || 'UNKNOWN';
       const biggest = list => list.reduce((a, b) => Math.abs(a[1]) >= Math.abs(b[1]) ? a : b);
 
+      // ── Step 3a: Tx-level classification gate ───────────────────────────
+      // CRITICAL RULE: classify the ENTIRE transaction first.
+      // If txType !== 'external_send' and !== 'unknown', ALL rows produced
+      // from this tx are blocked from becoming taxable disposals.
+      // This is stored on the recon object so it flows to every output row.
+      const txType = classifySolanaTransaction(txSum, netSol);
+      // Map tx-level type to disposal permission
+      const DISPOSAL_PERMITTED_TX_TYPES = new Set(['external_send', 'unknown']);
+      const txLevelDisposalPermitted = DISPOSAL_PERMITTED_TX_TYPES.has(txType);
+
       // ── Step 3b: Reconstruct the canonical economic event ───────────────────
       // This is the authoritative description of what the USER did.
       // All case logic below must be consistent with this reconstruction.
@@ -5668,6 +5899,7 @@ const TaxEngine = (() => {
         dex ? `DEX: ${dex}` : null,
         wsolCollapsed ? 'WSOL→SOL ✓' : null,
         extraLegs > 0 ? `${extraLegs} routing hop(s) collapsed` : null,
+        txType !== 'unknown' ? `tx-type: ${txType}` : null,
         evt.confidence === 'low' ? '⚠ low reconstruction confidence — review required' : null,
       ].filter(Boolean).join(' | ');
 
@@ -5677,6 +5909,13 @@ const TaxEngine = (() => {
         routeHopsIgnored : extraLegs,
         usedAccountData  : false,   // using nativeTransfers (safe path)
         economicSol      : netSol,
+        // ── Tx-level classification (Step 3a) ─────────────────────────────
+        txType,                             // e.g. 'swap', 'rent_deposit', 'external_send'
+        txLevelDisposalPermitted,           // false → block all rows from disposal
+        txHasSwap:          txSum.hasSwap,
+        txHasTokenMovement: txSum.hasTokenMovement,
+        txHasATA:           txSum.hasATA,
+        txHasCloseAccount:  txSum.hasCloseAccount,
         tokenNet         : Object.fromEntries(
           [...tokenIn, ...tokenOut].map(([m, v]) => [msym(m), +v.toFixed(9)])
         ),
@@ -5718,6 +5957,16 @@ const TaxEngine = (() => {
         const outSym      = msym(outMint);
         const solReceived = Math.abs(netSol);
 
+        // ── TX-LEVEL DISPOSAL GATE (Point 1 critical rule) ───────────────────
+        // If classifySolanaTransaction decided this is NOT an external send
+        // (e.g. it's a swap, rent_refund, or token_receive), downgrade to
+        // TRANSFER_OUT so no K4 row is generated for the token side.
+        // In practice Case B txs are almost always swaps (token→SOL) so
+        // txLevelDisposalPermitted will be false; the normal swap path still
+        // runs correctly since txType='swap' and evt.kind='token_to_sol'.
+        // We leave the swap cases (TRADE) alone here — the disposal gate
+        // only matters for degenerate shapes where Case B fires on a non-swap.
+
         // ── Token account close / rent refund heuristic ──────────────────────
         // When a Solana token account is closed, the lamport rent reserve
         // (~0.00203928 SOL) is returned to the owner.  This is NOT a sale of
@@ -5726,8 +5975,9 @@ const TaxEngine = (() => {
         //
         // Signal: tiny SOL received (≤ 0.0025 SOL ≈ 12 SEK at 5 000 kr/SOL)
         //   AND   the token going out is either spam / dust / has no market price.
+        // Upgrade: also catch via txSum.hasCloseAccount (tx-level signal)
         const SOL_RENT_MAX = 0.0025;
-        if (solReceived <= SOL_RENT_MAX) {
+        if (solReceived <= SOL_RENT_MAX || txSum.hasCloseAccount) {
           // Classify as a non-taxable token account cleanup:
           //   • Token side: SEND with isTokenAccountClose=true (proceeds → 0 in main loop)
           //   • SOL side:   tiny receive — below noise threshold, effectively ignored
@@ -5808,7 +6058,9 @@ const TaxEngine = (() => {
         const isOut = netSol < 0;
 
         if (isOut) {
-          const outClass = classifySolOutflow(tx, netSol, feeSol, dex);
+          // Pass txSum so classifySolOutflow can apply the context gate
+          // (Points 5 & 6: token/swap/ATA presence blocks disposal regardless of amount)
+          const outClass = classifySolOutflow(tx, netSol, feeSol, dex, txSum);
 
           // Pure fee noise: skip entirely (no record needed)
           if (outClass.type === 'fee') return null;
@@ -5891,6 +6143,23 @@ const TaxEngine = (() => {
             _reconstruction: recon,
           }, accountId, 'solana_wallet');
         }
+
+        // TX-LEVEL DISPOSAL GATE: if the tx has swap activity, this lone
+        // token-out is a routing leg that wasn't paired with a token-in
+        // (unusual shape from some DEX aggregators / partial fills).
+        // Route as TRANSFER_OUT (non-taxable) rather than an unmatched SEND.
+        if (!txLevelDisposalPermitted) {
+          return normalizeTransaction({
+            txHash: sig, date: ts, category: CAT.TRANSFER_OUT,
+            assetSymbol: outSym, amount: Math.abs(outAmt),
+            feeSEK, contractAddress: outMint,
+            needsReview: true, reviewReason: 'unresolved_solana_swap',
+            notes: mkNotes(`Unmatched token-out on ${txType} tx — treated as non-taxable routing leg`),
+            solOutflowType: 'swap_funding',
+            _reconstruction: recon,
+          }, accountId, 'solana_wallet');
+        }
+
         return normalizeTransaction({
           txHash: sig, date: ts, category: CAT.SEND,
           assetSymbol: outSym, amount: Math.abs(outAmt),

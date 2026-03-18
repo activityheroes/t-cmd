@@ -2447,13 +2447,20 @@ const TaxEngine = (() => {
       });
     }
 
-    // ── C: GeckoTerminal — on-chain DEX tokens with contract address ──
-    // This is the pricing layer for tokens like ROOT, DSYNC, NEURAL, and any
-    // obscure DEX token not indexed by CoinGecko. Uses the contract/mint address
-    // preserved in `contractAddress` to call GeckoTerminal's OHLCV API.
-    const gtNeeded = new Map(); // "address|chain|year" → { address, chain, year }
-    const MAX_GT = 30; // Limit to avoid rate-limiting (GT free tier: 30 req/min)
+    // ── C: GeckoTerminal — DISABLED (2026-03) ───────────────────
+    // GeckoTerminal's API now returns 401 Unauthorized and blocks
+    // CORS from GitHub Pages. The allorigins.win proxy fallback is
+    // also dead. CoinGecko Demo contract-address lookups (Step B½)
+    // now cover these tokens.
+    //
+    // Existing GeckoTerminal cache entries in localStorage are still
+    // read by priceOneTxn (Level 3) — only the network fetch is skipped.
+    // To re-enable: remove the `if (false)` guard below once
+    // GeckoTerminal provides a CORS-friendly or authenticated tier.
+    const gtNeeded = new Map(); // kept for reference / future reactivation
+    const MAX_GT = 30;
 
+    if (false) { // ← DISABLED: GeckoTerminal API unreachable from browser
     for (const t of txns) {
       if (t.isInternalTransfer) continue;
       if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
@@ -2481,8 +2488,6 @@ const TaxEngine = (() => {
           const fx = fxMap ? nearestMapValue(fxMap, date) : null;
           if (fx) {
             updatedCache[gtCacheKey(address, date)] = usdPrice * fx;
-            // Also cache under the canonical symbol key if we know it
-            // (set below after resolution — best effort)
           }
         }
       }
@@ -2492,6 +2497,7 @@ const TaxEngine = (() => {
         msg: `GeckoTerminal: pricing ${address.slice(0, 8)}… (${chain})`,
       });
     }
+    } // end DISABLED block
 
     savePriceCache(updatedCache);
 

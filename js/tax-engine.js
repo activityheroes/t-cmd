@@ -3416,6 +3416,38 @@ const TaxEngine = (() => {
       // Strip valuation fields from extraFields so they don't double-override
       const { valuationStatus: _vs, excludeFromK4: _ex, reviewReasons: _rr, ...restExtra } = extraFields;
 
+      // ── Explainable provenance fields ────────────────────────────────────
+      const sourceLabels = {
+        trade_exact: 'Handelsplats-exekveringspris',
+        swap_implied: 'Swap-implicerat (motpartens marknadsvärde)',
+        coingecko_demo: 'CoinGecko Demo API — historiskt dagspris',
+        market_api_coingecko: 'CryptoCompare — historiskt dagspris',
+        market_api_dex: 'GeckoTerminal DEX OHLCV',
+        pair_derived: 'Härledd från motpart i samma transaktion',
+        stable_historical_fx: 'Stablecoin × historisk USD/SEK-kurs',
+        stable_approx: 'Stablecoin × approximativ kurs',
+        manual: 'Manuellt inmatat pris',
+        swap_at_cost: 'Swap-at-cost (uppskattat, noll vinst/förlust)',
+        swap_received_market: 'Mottagen tillgångs marknadspris',
+        missing: 'Pris saknas',
+      };
+      const prSrc = restExtra.proceedsSource || t.priceSource || '';
+      const proceedsExplanation = sourceLabels[prSrc] || prSrc || 'Okänd';
+
+      const basisParts = [];
+      if (hasMissingHistory) {
+        basisParts.push('Anskaffningshistorik saknas — kostnadsbas ej beräknad');
+      } else if (STABLES.has(sym)) {
+        basisParts.push(`Stablecoin-peg: ${TaxEngine?.formatSEK?.(costBasis) || costBasis.toFixed(2)} SEK`);
+      } else {
+        const acqs = acquisitionMap[sym] || [];
+        const acqCount = acqs.filter(a => new Date(a.date) <= new Date(t.date)).length;
+        basisParts.push(`Genomsnittsmetoden: ${acqCount} anskaffning${acqCount !== 1 ? 'ar' : ''} sammanvägda`);
+        if (avg(sym) > 0) basisParts.push(`Snittpris: ${avg(sym).toFixed(2)} SEK/st`);
+      }
+      const basisExplanation = basisParts.join(' · ');
+      const sourceExplanation = sourceLabels[t.priceSource] || t.priceSource || 'Ej specificerad';
+
       return {
         date: t.date,
         assetSymbol: sym,
@@ -3435,6 +3467,10 @@ const TaxEngine = (() => {
         valuationStatus:   finalStatus,
         excludeFromK4:     finalExclude,
         reviewReasons:     finalReasons,
+        // Explainable provenance
+        proceedsExplanation,
+        basisExplanation,
+        sourceExplanation,
         ...restExtra,
       };
     }
@@ -4524,6 +4560,15 @@ const TaxEngine = (() => {
       ? Math.round((verifiedRows / scoreDenominator) * 100)
       : 100;
 
+    // ── 3b. Explainable confidence breakdown ──────────────────────────────
+    const confidenceExplanation = [
+      `${verifiedRows} verifierade avyttringar (täljare)`,
+      `${verifiedRows} verifierade + ${hardBlockerCount} hårda blockerare + ${reviewRecommendedCount} valfri granskning = ${scoreDenominator} (nämnare)`,
+      `Konfidens: ${verifiedRows}/${scoreDenominator} = ${taxConfidencePct}%`,
+      ...(informationalCount > 0 ? [`${informationalCount} informationsrader ingår inte i beräkningen`] : []),
+      ...(autoResolvableCount > 0 ? [`${autoResolvableCount} av de olösta kan auto-lösas`] : []),
+    ];
+
     // ── 4. Overall status ─────────────────────────────────────────────────
     // Status only reflects the K4 EXPORT quality, not the excluded backlog.
     // "ok" means the current export is trustworthy, NOT that everything is resolved.
@@ -4569,6 +4614,7 @@ const TaxEngine = (() => {
       autoResolvableCount,
       informationalCount,
       taxConfidencePct,
+      confidenceExplanation,
       // Arrays (for drill-down)
       hardBlockers,
       reviewRecommended,
@@ -4590,6 +4636,7 @@ const TaxEngine = (() => {
       verifiedRows: 0, excludedCount: 0, hardBlockerCount: 0,
       reviewRecommendedCount: 0, autoResolvableCount: 0, informationalCount: 0,
       taxConfidencePct: 100,
+      confidenceExplanation: ['Inga avyttringar — konfidens 100%'],
       hardBlockers: [], reviewRecommended: [], autoResolvable: [], informational: [],
       overallStatus: 'ok', reportLabel: 'Inga data', reportSublabel: '',
       canFile: false, hasBacklog: false,

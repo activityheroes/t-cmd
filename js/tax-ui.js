@@ -298,16 +298,23 @@ const TaxUI = (() => {
               <span>🔴</span>
               <div style="flex:1">
                 <strong style="color:#f87171">Beräkning troligen felaktig</strong>
-                <span style="color:#94a3b8;font-size:12px;margin-left:6px">${h.k4Blockers || issues} poster med okänd kostnadsbas — siffrorna nedan är inte tillförlitliga</span>
+                <span style="color:#94a3b8;font-size:12px;margin-left:6px">${h.k4Blockers} hårda blockerare med okänd kostnadsbas — siffrorna nedan är inte tillförlitliga</span>
               </div>
               <span class="tax-rb-link" style="color:#f87171">Åtgärda →</span>
             </div>`;
-          if (h?.status === 'needs_review' || h?.status === 'warnings') return `
+          if (h?.status === 'needs_review' || h?.status === 'warnings') {
+            const ss = h.statusSummary || {};
+            const parts = [];
+            if (ss.hardBlockerCount > 0)       parts.push(`⛔ ${ss.hardBlockerCount} hårda blockerare`);
+            if (ss.reviewRecommendedCount > 0)  parts.push(`🟡 ${ss.reviewRecommendedCount} valfri granskning`);
+            if (ss.autoResolvableCount > 0)     parts.push(`✨ ${ss.autoResolvableCount} auto-lösningsbara`);
+            return `
             <div class="tax-review-banner" onclick="TaxUI.navigate('review')">
               <span>🟡</span>
-              <span><strong>${issues} poster</strong> behöver granskning — ${h.k4Blockers} K4-blockerare kvar</span>
+              <span>${parts.join(' · ') || 'Granskning behövs'}</span>
               <span class="tax-rb-link">Åtgärda →</span>
             </div>`;
+          }
           if (issues > 0) return `
             <div class="tax-review-banner" onclick="TaxUI.navigate('review')">
               <span>⚠️</span>
@@ -3017,6 +3024,7 @@ const TaxUI = (() => {
           <span class="tax-page-subtitle">${nHardBlockers > 0 ? `⛔ ${nHardBlockers} hårda blockerare` : '✅ Inga hårda blockerare'}${nReviewRec > 0 ? ` · 🟡 ${nReviewRec} valfri granskning` : ''}${nInfo > 0 ? ` · 🔵 ${nInfo} info` : ''}${nAutoFix > 0 ? ` · ✨ ${nAutoFix} auto-lösningsbara` : ''}</span>
           ${issues.length > 0 ? `
             <div class="tax-page-actions" style="gap:8px">
+              ${nAutoFix > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(74,222,128,.15);color:#4ade80;border:1px solid rgba(74,222,128,.35);font-weight:700;padding:6px 16px" onclick="TaxUI.autoResolveAll()">⚡ Auto-lösa ${nAutoFix} säkra rader</button>` : ''}
               ${unknownAssetCount > 0 ? `<button class="tax-btn tax-btn-sm" id="btn-resolve-tokens" style="background:rgba(14,165,233,.12);color:#38bdf8;border:1px solid rgba(14,165,233,.25)" onclick="TaxUI.resolveUnknownTokens()">🔍 Slå upp ${unknownAssetCount} okända tokens</button>` : ''}
               ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-inferera ${canAutoInfer}</button>` : ''}
               <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Kör om pipeline</button>
@@ -3043,9 +3051,9 @@ const TaxUI = (() => {
         <div style="margin-bottom:12px;padding:10px 14px;border-radius:10px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:16px">⚠️</span>
           <div style="flex:1;font-size:12px;color:#fbbf24">
-            <strong>${swapAtCostTotal} swap</strong> saknade prisdata — deras försäljningspris uppskattades via <em>swap-at-cost</em>-metoden
-            (noll vinst/förlust per byte). Riktigt pris kan avvika.
-            <a href="#" style="color:#a78bfa;margin-left:4px" onclick="window.setReviewTab('blockers');return false">Granska K4-blockerare →</a>
+            <strong>${swapAtCostTotal} swap</strong> saknade prisdata — deras värde uppskattades via <em>swap-at-cost</em>-metoden
+            (noll vinst/förlust per byte). Riktigt värde kan avvika.
+            <a href="#" style="color:#a78bfa;margin-left:4px" onclick="window.setReviewTab('warnings');return false">Granska uppskattade swaps →</a>
           </div>
         </div>` : ''}
 
@@ -3199,10 +3207,10 @@ const TaxUI = (() => {
           <div style="text-align:center;padding:40px 20px;color:var(--tax-muted)">
             <div style="font-size:36px;margin-bottom:8px">✅</div>
             <div style="font-size:14px;font-weight:500;color:#e2e8f0">
-              ${activeTab === 'blockers' ? '✅ Inga hårda K4-blockerare — exporten är redo!' :
-                activeTab === 'warnings' ? '✅ Inga valfria granskningsposter!' :
-                activeTab === 'info' ? '✅ Inga informations-poster!' :
-                '✅ Inga undantag!'}
+              ${activeTab === 'blockers' ? '✅ Inga hårda blockerare — de verifierade K4-raderna kan exporteras' :
+                activeTab === 'warnings' ? '✅ Inga valfria granskningsposter' :
+                activeTab === 'info' ? '✅ Inga informationsposter' :
+                '✅ Inga undantag'}
             </div>
             <div style="font-size:12px;margin-top:4px">
               ${activeTab !== 'all' ? `<a href="#" style="color:#818cf8" onclick="window.setReviewTab('all');return false">Visa alla flikar →</a>` : 'Skatteberäkningarna är baserade på fullständig data.'}
@@ -3802,11 +3810,17 @@ const TaxUI = (() => {
           if (totalDenominator === 0) return '';
           return `
         <div style="margin-bottom:14px;padding:12px 16px;border-radius:10px;background:rgba(15,23,42,.4);border:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-          <div>
-            <div style="font-size:10px;color:#475569;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px">Skattekonfidens</div>
-            <div style="font-size:28px;font-weight:800;color:${scoreColor};line-height:1">${score}%</div>
-            <div style="font-size:10px;color:${scoreColor};margin-top:2px">${scoreLabel}</div>
-          </div>
+          <details style="cursor:pointer">
+            <summary style="list-style:none;display:flex;flex-direction:column">
+              <div style="font-size:10px;color:#475569;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px">Skattekonfidens</div>
+              <div style="font-size:28px;font-weight:800;color:${scoreColor};line-height:1">${score}%<span style="font-size:10px;color:#475569;margin-left:4px;font-weight:400">▾</span></div>
+              <div style="font-size:10px;color:${scoreColor};margin-top:2px">${scoreLabel}</div>
+            </summary>
+            <div style="margin-top:8px;padding:8px 10px;background:rgba(15,23,42,.6);border-radius:6px;border:1px solid rgba(255,255,255,.05)">
+              <div style="font-size:9px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">📊 Beräkning</div>
+              ${(ss.confidenceExplanation || []).map(line => `<div style="font-size:10px;color:#94a3b8;line-height:1.6;font-family:monospace">${line}</div>`).join('')}
+            </div>
+          </details>
           <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;min-width:220px">
             <div style="padding:6px 10px;border-radius:6px;background:rgba(74,222,128,.07);border:1px solid rgba(74,222,128,.15)">
               <div style="font-size:9px;color:#4ade80;font-weight:600;margin-bottom:2px">✓ VERIFIERADE</div>
@@ -3849,7 +3863,7 @@ const TaxUI = (() => {
                 <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
                 <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
                 <span style="color:#64748b;flex:1">${TaxEngine.formatCrypto(d.amountSold, 4)} avyttrat</span>
-                ${d.proceedsSEK != null ? `<span style="color:#94a3b8">Försäljningspris: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Pris: okänt</span>'}
+                ${d.proceedsSEK != null ? `<span style="color:#94a3b8">${d.excludeFromK4 ? 'Uppskattat värde' : 'Försäljningspris'}: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Pris: okänt</span>'}
                 ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: saknas</span>'}
                 ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
                 ${resConf ? `<span style="font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(15,23,42,.5);color:${confColor}" title="Återställningskonfidens">${resConf}</span>` : ''}
@@ -3956,7 +3970,7 @@ const TaxUI = (() => {
           </div>` : `
           <div style="margin-bottom:12px;padding:8px 12px;border-radius:8px;background:rgba(74,222,128,.05);border:1px solid rgba(74,222,128,.2);display:flex;align-items:center;gap:8px">
             <span style="font-size:14px">✅</span>
-            <span style="font-size:11px;color:#4ade80;font-weight:600">Inga K4-blockerare — rapporten är redo att deklareras</span>
+            <span style="font-size:11px;color:#4ade80;font-weight:600">Inga hårda blockerare — de verifierade K4-raderna kan exporteras</span>
           </div>`}
 
           <!-- ────── 🟡 TIER 2: REVIEW RECOMMENDED ────── -->
@@ -3967,7 +3981,7 @@ const TaxUI = (() => {
               <span style="font-size:12px;font-weight:700;color:#fbbf24">Granskning rekommenderas — inte fatalt</span>
               <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24">${reviewRows.length} rader</span>
               ${autoSolvable > 0 ? `
-              <button class="tax-btn tax-btn-xs" style="margin-left:auto;color:#4ade80;border-color:rgba(74,222,128,.3);background:rgba(74,222,128,.07);font-weight:600" onclick="TaxUI.autoResolveAll()" title="Lös spam + klassificera airdrops automatiskt">⚡ Auto-lösa ${autoSolvable} rader</button>` : ''}
+              <button class="tax-btn tax-btn-xs" style="margin-left:auto;color:#4ade80;border-color:rgba(74,222,128,.3);background:rgba(74,222,128,.07);font-weight:600" onclick="TaxUI.autoResolveAll()" title="Lös spam + klassificera airdrops automatiskt">⚡ Auto-lösa ${autoSolvable} rader (${excSpamCand.length} spam + ${excAirdropCand.length} airdrops)</button>` : ''}
             </div>
             <div style="font-size:10px;color:#64748b;margin-bottom:8px">
               Motorn har identifierat möjliga lösningar. Dessa blockerar <em>inte</em> din K4 men bör bekräftas för bästa resultat.
@@ -4044,10 +4058,21 @@ const TaxUI = (() => {
                     if (firstD) {
                       const evtMap = { trade:'Byte/swap', sell:'Försäljning', send:'Skickad',
                         transfer_out:'Transfer ut', bridge_out:'Bridge ut' };
-                      whyLines.push(`Händelsetyp: ${(firstD.eventType && evtMap[firstD.eventType]) || 'Avyttring'}`);
-                      if (firstD.proceedsSource) whyLines.push(`Intäktskälla: ${firstD.proceedsSource}`);
-                      else if (firstD.priceSource) whyLines.push(`Priskälla: ${firstD.priceSource}`);
-                      if (firstD.avgCostAtSale > 0) whyLines.push(`Avg.kostnad vid försäljning: ${TaxEngine.formatSEK(firstD.avgCostAtSale)}/st`);
+                      whyLines.push(`<strong>Händelsetyp:</strong> ${(firstD.eventType && evtMap[firstD.eventType]) || 'Avyttring'}`);
+                      // Proceeds source explanation
+                      if (firstD.proceedsExplanation) whyLines.push(`<strong>Intäktskälla:</strong> ${firstD.proceedsExplanation}`);
+                      else if (firstD.proceedsSource) whyLines.push(`<strong>Intäktskälla:</strong> ${firstD.proceedsSource}`);
+                      else if (firstD.priceSource) whyLines.push(`<strong>Priskälla:</strong> ${firstD.priceSource}`);
+                      // Basis explanation
+                      if (firstD.basisExplanation) whyLines.push(`<strong>Kostnadsbas:</strong> ${firstD.basisExplanation}`);
+                      else if (firstD.avgCostAtSale > 0) whyLines.push(`<strong>Snittpris vid försäljning:</strong> ${TaxEngine.formatSEK(firstD.avgCostAtSale)}/st`);
+                      // Price source explanation
+                      if (firstD.sourceExplanation) whyLines.push(`<strong>Priskälla:</strong> ${firstD.sourceExplanation}`);
+                      // Tx hash with explorer link
+                      if (firstD.txHash && !firstD.txHash.startsWith('manual_')) {
+                        const solLink = `https://solscan.io/tx/${firstD.txHash}`;
+                        whyLines.push(`<strong>Tx:</strong> <a href="${solLink}" target="_blank" rel="noopener" style="color:#818cf8">${firstD.txHash.slice(0,12)}…</a>`);
+                      }
                       whyLines.push(`${rowDisposals.length} avyttring${rowDisposals.length !== 1 ? 'ar' : ''} aggregerade`);
                       if (r.cost > 0 && r.proc > 0) {
                         const costPerUnit = r.cost / r.qty;
@@ -4820,8 +4845,11 @@ const TaxUI = (() => {
 
     TaxEngine.saveTransactions(txns);
     S.taxResult = null;
-    showTaxToast('⚡', 'Auto-löst!',
-      `${spamRows.length} spam + ${airdropRows.length} airdrops klassificerade.`,
+    const parts = [];
+    if (spamRows.length > 0) parts.push(`${spamRows.length} spam → exkluderade (0 kr)`);
+    if (airdropRows.length > 0) parts.push(`${airdropRows.length} airdrops → omklassificerade (FMV-kostnadsbas)`);
+    showTaxToast('✅', `${total} rader lösta!`,
+      parts.join(' \u00b7 '),
       'success');
     render();
   }

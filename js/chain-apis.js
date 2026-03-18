@@ -11,6 +11,7 @@ const ChainAPIs = (() => {
   const BE_BASE = 'https://public-api.birdeye.so';
   const HL_BASE = 'https://api.helius.xyz/v0';
   const HL_RPC = 'https://mainnet.helius-rpc.com';
+  const CG_BASE = 'https://api.coingecko.com/api/v3';
 
   // Birdeye chain identifiers
   const BE_CHAIN_MAP = {
@@ -57,6 +58,7 @@ const ChainAPIs = (() => {
       birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
       helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
       etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
+      coingecko: localStorage.getItem('tcmd_coingecko_key') || K.coingecko || '',
     };
   }
 
@@ -276,6 +278,122 @@ const ChainAPIs = (() => {
     return res?.result === 'ok';
   }
 
+  // ── CoinGecko Demo API ──────────────────────────────────────
+  function cgKey() { return getKeys().coingecko; }
+
+  function cgHeaders(key) {
+    return {
+      'accept': 'application/json',
+      'x-cg-demo-api-key': key || cgKey(),
+    };
+  }
+
+  /** Authenticated GET request to CoinGecko Demo API */
+  async function cgGet(path, overrideKey) {
+    const key = overrideKey || cgKey();
+    if (!key) return null;
+    return apiFetch(`${CG_BASE}${path}`, { headers: cgHeaders(key) }, 12000);
+  }
+
+  /**
+   * Test a CoinGecko Demo API key.
+   * Returns { valid, error?, usage? }
+   */
+  async function testCoinGeckoKey(key) {
+    if (!key) return { valid: false, error: 'No key provided' };
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(`${CG_BASE}/ping`, {
+        headers: cgHeaders(key),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (res.status === 401 || res.status === 403) {
+        return { valid: false, error: 'Invalid API key or insufficient permissions' };
+      }
+      if (res.status === 429) {
+        return { valid: true, error: 'Key is valid but rate-limited — try again later' };
+      }
+      if (!res.ok) {
+        return { valid: false, error: `HTTP ${res.status}: ${res.statusText}` };
+      }
+
+      const data = await res.json();
+      // Extract rate-limit headers if available
+      const remaining = res.headers.get('x-ratelimit-remaining');
+      const limit = res.headers.get('x-ratelimit-limit');
+      const usage = remaining != null ? { remaining: parseInt(remaining), limit: parseInt(limit) } : null;
+
+      return {
+        valid: data?.gecko_says != null,
+        usage,
+      };
+    } catch (e) {
+      if (e.name === 'AbortError') return { valid: false, error: 'Request timed out' };
+      return { valid: false, error: e.message || 'Network error' };
+    }
+  }
+
+  /**
+   * Historical price by CoinGecko coin ID for a specific date.
+   * @param {string} coinId — e.g. 'bitcoin', 'solana'
+   * @param {string} dateStr — 'YYYY-MM-DD'
+   * @returns {{ priceUSD: number, date: string } | null}
+   */
+  async function cgHistoricalPrice(coinId, dateStr) {
+    if (!coinId || !dateStr) return null;
+    // CoinGecko /coins/{id}/history expects dd-mm-yyyy
+    const [y, m, d] = dateStr.split('-');
+    const cgDate = `${d}-${m}-${y}`;
+    const data = await cgGet(`/coins/${coinId}/history?date=${cgDate}&localization=false`);
+    const usd = data?.market_data?.current_price?.usd;
+    return usd > 0 ? { priceUSD: usd, date: dateStr } : null;
+  }
+
+  /**
+   * Historical price by contract address using CoinGecko's /coins/{platform}/contract/{address}/market_chart/range.
+   * @param {string} platform — 'solana', 'ethereum', 'base', 'binance-smart-chain'
+   * @param {string} contractAddress — token mint/contract address
+   * @param {string} dateStr — 'YYYY-MM-DD'
+   * @returns {{ priceUSD: number, date: string, timestampReturned: string } | null}
+   */
+  async function cgHistoricalByContract(platform, contractAddress, dateStr) {
+    if (!platform || !contractAddress || !dateStr) return null;
+    // Request a 48h window around the target date to ensure we get data
+    const targetTs = Math.floor(new Date(dateStr + 'T12:00:00Z').getTime() / 1000);
+    const from = targetTs - 86400;
+    const to = targetTs + 86400;
+    const data = await cgGet(
+      `/coins/${platform}/contract/${contractAddress}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`
+    );
+    const prices = data?.prices;
+    if (!Array.isArray(prices) || !prices.length) return null;
+    // Find closest data point to target
+    let best = prices[0], bestDist = Math.abs(prices[0][0] / 1000 - targetTs);
+    for (const p of prices) {
+      const dist = Math.abs(p[0] / 1000 - targetTs);
+      if (dist < bestDist) { best = p; bestDist = dist; }
+    }
+    if (!best || best[1] <= 0) return null;
+    return {
+      priceUSD: best[1],
+      date: dateStr,
+      timestampReturned: new Date(best[0]).toISOString(),
+    };
+  }
+
+  /**
+   * Batch current prices for multiple coin IDs.
+   * @param {string[]} coinIds — e.g. ['bitcoin','solana']
+   * @returns {Object} — { bitcoin: { usd: 65000 }, ... } or null
+   */
+  async function cgSimplePrice(coinIds) {
+    if (!coinIds?.length) return null;
+    return cgGet(`/simple/price?ids=${coinIds.join(',')}&vs_currencies=usd`);
+  }
+
   return {
     // Config
     getKeys, setKey, loadKeys,
@@ -285,9 +403,11 @@ const ChainAPIs = (() => {
     beTokenSecurity, beTokenOverview, beTopHolders, beTrades, bePriceHistory,
     // Helius
     heliusTxns, heliusTxn, heliusTokenMeta, heliusRPC, getSolanaTokenCreator,
+    // CoinGecko Demo
+    cgGet, cgHistoricalPrice, cgHistoricalByContract, cgSimplePrice,
     // Helpers
     isBurnAddress, isLockerContract, isSafeLP,
     // Key testing
-    testBirdeyeKey, testHeliusKey
+    testBirdeyeKey, testHeliusKey, testCoinGeckoKey,
   };
 })();

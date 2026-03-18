@@ -444,6 +444,7 @@ const SupabaseDB = (() => {
                     helius:    localStorage.getItem(`tcmd_${userId}_helius_key`)    || K.helius    || '',
                     birdeye:   localStorage.getItem(`tcmd_${userId}_birdeye_key`)   || K.birdeye   || '',
                     etherscan: localStorage.getItem(`tcmd_${userId}_etherscan_key`) || K.etherscan || '',
+                    coingecko: localStorage.getItem(`tcmd_${userId}_coingecko_key`) || K.coingecko || '',
                 };
             }
             try {
@@ -454,12 +455,14 @@ const SupabaseDB = (() => {
                     helius:    keys.helius    || K.helius    || '',
                     birdeye:   keys.birdeye   || K.birdeye   || '',
                     etherscan: keys.etherscan || K.etherscan || '',
+                    coingecko: keys.coingecko || K.coingecko || '',
                 };
             } catch {
                 return {
                     helius:    localStorage.getItem(`tcmd_${userId}_helius_key`)    || K.helius    || '',
                     birdeye:   localStorage.getItem(`tcmd_${userId}_birdeye_key`)   || K.birdeye   || '',
                     etherscan: localStorage.getItem(`tcmd_${userId}_etherscan_key`) || K.etherscan || '',
+                    coingecko: localStorage.getItem(`tcmd_${userId}_coingecko_key`) || K.coingecko || '',
                 };
             }
         },

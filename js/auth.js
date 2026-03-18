@@ -673,14 +673,16 @@ async function renderAdminPanel() {
         </div>
 
         <div class="admin-section" style="margin-top:20px;">
-            <div class="admin-section-title">🔑 API Keys — Rug Checker</div>
+            <div class="admin-section-title">🔑 API Keys</div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-                Keys are stored securely in Supabase (per-admin). Required for rug checker, cluster detector, wallet imports, and tax imports.
+                Keys are stored securely in Supabase (per-admin). Required for rug checker, cluster detector, wallet imports, tax imports, and historical pricing.
                 Get keys: <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
                 &nbsp;·&nbsp;
                 <a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
                 &nbsp;·&nbsp;
                 <a href="https://etherscan.io/myapikey" target="_blank" style="color:var(--accent-cyan);">Etherscan →</a>
+                &nbsp;·&nbsp;
+                <a href="https://www.coingecko.com/en/api/pricing" target="_blank" style="color:var(--accent-cyan);">CoinGecko →</a>
             </div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <!-- Birdeye key -->
@@ -691,6 +693,7 @@ async function renderAdminPanel() {
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('birdeye')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                     <button onclick="adminTestKey('birdeye')" id="birdeye-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="birdeye-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
                 </div>
                 <!-- Helius key -->
                 <div style="display:flex;align-items:center;gap:8px;">
@@ -700,14 +703,27 @@ async function renderAdminPanel() {
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('helius')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                     <button onclick="adminTestKey('helius')" id="helius-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="helius-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
                 </div>
-                <!-- Etherscan key (MetaMask / EVM wallet import) -->
+                <!-- Etherscan key -->
                 <div style="display:flex;align-items:center;gap:8px;">
                     <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦊 Etherscan</label>
                     <input id="admin-etherscan-key" type="password" placeholder="Paste Etherscan API key (MetaMask / EVM / Phantom ETH)…"
                         value="${ChainAPIs.getKeys().etherscan || ''}"
                         style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
                     <button onclick="adminSaveKey('etherscan')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('etherscan')" id="etherscan-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="etherscan-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
+                </div>
+                <!-- CoinGecko Demo key -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🦎 CoinGecko</label>
+                    <input id="admin-coingecko-key" type="password" placeholder="Paste CoinGecko Demo API key…"
+                        value="${ChainAPIs.getKeys().coingecko || ''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('coingecko')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('coingecko')" id="coingecko-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="coingecko-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
                 </div>
                 <div id="admin-key-status" style="font-size:11px;color:var(--text-muted);min-height:16px;"></div>
             </div>
@@ -1028,18 +1044,47 @@ window.adminSaveKey = function (name) {
 
 window.adminTestKey = async function (name) {
   const btn = document.getElementById(`${name}-test-btn`);
-  const status = document.getElementById('admin-key-status');
+  const status = document.getElementById(`${name}-key-status`) || document.getElementById('admin-key-status');
   if (!btn || typeof ChainAPIs === 'undefined') return;
   const key = document.getElementById(`admin-${name}-key`)?.value?.trim();
   if (!key) { if (status) { status.textContent = `No ${name} key entered`; status.style.color = '#f59e0b'; } return; }
   btn.textContent = 'Testing…'; btn.disabled = true;
   try {
-    const ok = name === 'birdeye'
-      ? await ChainAPIs.testBirdeyeKey(key)
-      : await ChainAPIs.testHeliusKey(key);
-    if (status) {
-      status.textContent = ok ? `✓ ${name} key is valid!` : `✗ ${name} key invalid or quota exceeded`;
-      status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+    if (name === 'coingecko') {
+      const result = await ChainAPIs.testCoinGeckoKey(key);
+      if (status) {
+        if (result.valid) {
+          let msg = `✓ CoinGecko key is valid!`;
+          if (result.usage) msg += ` (${result.usage.remaining}/${result.usage.limit} remaining)`;
+          if (result.error) msg += ` ⚠️ ${result.error}`;
+          status.textContent = msg;
+          status.style.color = result.error ? '#f59e0b' : 'var(--accent-green)';
+        } else {
+          status.textContent = `✗ ${result.error || 'CoinGecko key invalid'}`;
+          status.style.color = '#ef4444';
+        }
+      }
+    } else if (name === 'etherscan') {
+      // Etherscan test: call their API status endpoint
+      try {
+        const r = await fetch(`https://api.etherscan.io/api?module=account&action=balance&address=0x0000000000000000000000000000000000000000&tag=latest&apikey=${key}`);
+        const data = await r.json();
+        const ok = data?.status === '1' || data?.message === 'OK';
+        if (status) {
+          status.textContent = ok ? '✓ Etherscan key is valid!' : '✗ Etherscan key invalid or quota exceeded';
+          status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+        }
+      } catch {
+        if (status) { status.textContent = 'Error testing Etherscan key'; status.style.color = '#ef4444'; }
+      }
+    } else {
+      const ok = name === 'birdeye'
+        ? await ChainAPIs.testBirdeyeKey(key)
+        : await ChainAPIs.testHeliusKey(key);
+      if (status) {
+        status.textContent = ok ? `✓ ${name} key is valid!` : `✗ ${name} key invalid or quota exceeded`;
+        status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+      }
     }
   } catch (e) {
     if (status) { status.textContent = `Error testing ${name} key`; status.style.color = '#ef4444'; }

@@ -1406,7 +1406,8 @@ const TaxEngine = (() => {
   const PS = {
     TRADE_EXACT:      'trade_exact',         // Exchange execution price (most reliable)
     SWAP_IMPLIED:     'swap_implied',         // Derived from the other swap leg
-    MARKET_API:       'market_api_coingecko', // CoinGecko historical daily price
+    MARKET_API:       'market_api_coingecko', // CryptoCompare historical daily price
+    CG_DEMO:          'coingecko_demo',       // CoinGecko Demo API — authenticated historical
     DEX_MARKET:       'market_api_dex',       // GeckoTerminal on-chain DEX OHLCV
     PAIR_DERIVED:     'pair_derived',         // Inferred from priced counterpart in same tx
     STABLE_HIST_FX:   'stable_historical_fx', // Stablecoin × historical USD/SEK FX rate
@@ -1423,7 +1424,8 @@ const TaxEngine = (() => {
   const TRUSTED_K4_PRICE_SOURCES = new Set([
     PS.TRADE_EXACT,       // most reliable — direct from exchange
     PS.SWAP_IMPLIED,      // Level-2 pricing chain: market price of received leg
-    PS.MARKET_API,        // CoinGecko historical daily
+    PS.MARKET_API,        // CryptoCompare historical daily
+    PS.CG_DEMO,           // CoinGecko Demo API — authenticated historical
     PS.DEX_MARKET,        // GeckoTerminal DEX OHLCV
     PS.STABLE_HIST_FX,    // stablecoin × verified historical FX
     PS.STABLE_APPROX,     // stablecoin × hardcoded FX (very high confidence)
@@ -1786,10 +1788,15 @@ const TaxEngine = (() => {
             notes: `${t.notes ? t.notes + ' | ' : ''}PRISFEL: marknadspris ger ${Math.round(cachedTotal / 1e6)}M SEK — troligen felaktig API-data`,
           };
         }
+        // Determine source: check if this cache entry came from CoinGecko Demo
+        const srcMetaKey = `_src:${cacheKey(CC_IDS[sym] || sym, date)}` ;
+        const srcFromGT  = `_src:${gtCacheKey(t.contractAddress, date)}`;
+        const isCGDemo   = cache[srcMetaKey] === 'coingecko_demo' || cache[srcFromGT] === 'coingecko_demo';
         return {
           ...t,
           priceSEKPerUnit: cached, costBasisSEK: cached * amt,
-          priceSource: PS.MARKET_API, priceConfidence: 'high',
+          priceSource: isCGDemo ? PS.CG_DEMO : PS.MARKET_API,
+          priceConfidence: 'high',
           needsReview: false, reviewReason: null,
         };
       }
@@ -1969,7 +1976,7 @@ const TaxEngine = (() => {
   function propagateSameDayPrices(txns) {
     const SRC_PRIORITY = {
       [PS.TRADE_EXACT]: 5, [PS.STABLE_HIST_FX]: 4, [PS.STABLE_APPROX]: 4,
-      [PS.MARKET_API]: 3, [PS.DEX_MARKET]: 3,
+      [PS.CG_DEMO]: 3, [PS.MARKET_API]: 3, [PS.DEX_MARKET]: 3,
       [PS.SWAP_IMPLIED]: 2, [PS.PAIR_DERIVED]: 2, [PS.BACK_DERIVED]: 1,
     };
     // Build best-price-per-day map
@@ -2339,8 +2346,89 @@ const TaxEngine = (() => {
       });
     }
 
-    // ── B: Fetch CryptoCompare price history per (coin × year) ─
+    // Working copy of the price cache — all pricing steps write to this
     const updatedCache = { ...cache };
+
+    // ── B½: CoinGecko Demo — authenticated historical prices ──
+    // Uses the stored CoinGecko Demo API key to fetch daily prices.
+    // Priority: coin_id lookups for known tokens, contract-address
+    // lookups for on-chain tokens with a mint address.
+    // Runs BEFORE CryptoCompare so CG Demo prices take precedence.
+    const cgRequests = [];
+    const MAX_CG = 40; // Limit to stay within Demo tier rate limits
+
+    if (typeof CoinGeckoPricing !== 'undefined' && CoinGeckoPricing.isConfigured()) {
+      for (const t of txns) {
+        if (cgRequests.length >= MAX_CG) break;
+        if (t.isInternalTransfer) continue;
+        if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
+        if (t.priceSEKPerUnit > 0) continue;
+        if (STABLES.has((t.assetSymbol || '').toUpperCase())) continue;
+
+        const sym     = (t.assetSymbol || '').toUpperCase();
+        const dateStr = (t.date || '').slice(0, 10);
+        if (!dateStr) continue;
+
+        // Already cached from CryptoCompare or earlier run?
+        const ccId = CC_IDS[sym];
+        if (ccId && updatedCache[cacheKey(ccId, dateStr)] !== undefined) continue;
+
+        // Prepare request
+        const req = { dateStr };
+        if (ccId) {
+          req.coinId = ccId;      // known CoinGecko ID → coin_id lookup
+        }
+        if (t.contractAddress) {
+          req.contractAddress = t.contractAddress;
+          req.platform = t.chain || chainFromSource(t.source) || 'solana';
+        }
+        // Skip if we have neither ID nor contract
+        if (!req.coinId && !req.contractAddress) continue;
+
+        // Dedup by coinId+date or contract+date
+        const dedup = `${req.coinId || req.contractAddress}|${dateStr}`;
+        if (cgRequests.find(r => `${r.coinId || r.contractAddress}|${r.dateStr}` === dedup)) continue;
+
+        cgRequests.push(req);
+      }
+
+      if (cgRequests.length > 0) {
+        const cgResults = await CoinGeckoPricing.fetchBatch(cgRequests, (p) => {
+          if (onProgress) onProgress({
+            step: 'price',
+            pct: 60 + Math.round((p.done / p.total) * 10),
+            msg: p.msg,
+          });
+        });
+
+        // Write CG results into the price cache
+        for (const [key, pr] of cgResults) {
+          const [id, dateStr] = key.split('|');
+          const fxMap = fxByYear.get(parseInt(dateStr.slice(0, 4)));
+          const fx = fxMap ? nearestMapValue(fxMap, dateStr) : null;
+          if (fx && pr.priceUSD > 0) {
+            const sekPrice = pr.priceUSD * fx;
+            // Store under CoinGecko ID key
+            if (CC_IDS[id] || Object.values(CC_IDS).includes(id)) {
+              updatedCache[cacheKey(id, dateStr)] = sekPrice;
+              // Also store with source metadata for audit trail
+              updatedCache[`_src:${cacheKey(id, dateStr)}`] = 'coingecko_demo';
+            }
+            // Store under contract address key (for contract lookups)
+            if (id.length > 20) { // contract addresses are long
+              updatedCache[gtCacheKey(id, dateStr)] = sekPrice;
+              updatedCache[`_src:${gtCacheKey(id, dateStr)}`] = 'coingecko_demo';
+            }
+          }
+        }
+
+        savePriceCache(updatedCache);
+        console.log(`[TaxEngine] CoinGecko Demo: ${cgResults.size} prices fetched from ${cgRequests.length} requests`);
+      }
+    }
+
+    // ── B: Fetch CryptoCompare price history per (coin × year) ─
+    // Falls back to CryptoCompare for anything CoinGecko Demo didn't cover
     for (const [, { ccId, sym, year }] of neededPairs) {
       const priceMap = await fetchCryptoCompareYear(sym, year);
       const fxMap    = fxByYear.get(year);
@@ -7633,6 +7721,11 @@ const TaxEngine = (() => {
         resolutionCandidateType: resType || null,
         resolutionConfidence:    resolutionConf,
         resolutionNote,
+        // ── Pricing provenance ────────────────────────────────────
+        firstSeenAt:       firstInbound?.date || null,
+        classification:    likelyClassification,
+        pricingMode:       determinePricingMode(txs),
+        pricingConfidence: determinePricingConfidence(txs),
       });
     }
 
@@ -7643,6 +7736,27 @@ const TaxEngine = (() => {
     });
 
     return result;
+  }
+
+  // ── Pricing provenance helpers ──────────────────────────────
+  function determinePricingMode(txs) {
+    const sources = new Set(txs.map(t => t.priceSource).filter(Boolean));
+    if (sources.has(PS.TRADE_EXACT)) return 'tx_implied';
+    if (sources.has(PS.SWAP_IMPLIED)) return 'tx_implied';
+    if (sources.has(PS.CG_DEMO)) return 'coingecko_demo';
+    if (sources.has(PS.MARKET_API)) return 'cryptocompare';
+    if (sources.has(PS.DEX_MARKET)) return 'dex_pair';
+    if (sources.has(PS.MANUAL)) return 'manual';
+    return 'unknown';
+  }
+
+  function determinePricingConfidence(txs) {
+    const pricedTxs = txs.filter(t => t.priceSEKPerUnit > 0 && t.priceSource !== PS.MISSING);
+    if (pricedTxs.length === 0) return 'low';
+    const ratio = pricedTxs.length / Math.max(txs.length, 1);
+    if (ratio >= 0.8) return 'high';
+    if (ratio >= 0.4) return 'medium';
+    return 'low';
   }
 
 })();

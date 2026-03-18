@@ -281,18 +281,21 @@ const ChainAPIs = (() => {
   // ── CoinGecko Demo API ──────────────────────────────────────
   function cgKey() { return getKeys().coingecko; }
 
-  function cgHeaders(key) {
-    return {
-      'accept': 'application/json',
-      'x-cg-demo-api-key': key || cgKey(),
-    };
+  /**
+   * Build a CoinGecko URL with the API key as a query parameter.
+   * Using a query param avoids CORS preflight (custom headers trigger OPTIONS).
+   */
+  function cgUrl(path, key) {
+    const k = key || cgKey();
+    const sep = path.includes('?') ? '&' : '?';
+    return `${CG_BASE}${path}${sep}x_cg_demo_api_key=${encodeURIComponent(k)}`;
   }
 
   /** Authenticated GET request to CoinGecko Demo API */
   async function cgGet(path, overrideKey) {
     const key = overrideKey || cgKey();
     if (!key) return null;
-    return apiFetch(`${CG_BASE}${path}`, { headers: cgHeaders(key) }, 12000);
+    return apiFetch(cgUrl(path, key), { headers: { 'accept': 'application/json' } }, 12000);
   }
 
   /**
@@ -304,8 +307,8 @@ const ChainAPIs = (() => {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(`${CG_BASE}/ping`, {
-        headers: cgHeaders(key),
+      const res = await fetch(cgUrl('/ping', key), {
+        headers: { 'accept': 'application/json' },
         signal: controller.signal,
       });
       clearTimeout(timer);

@@ -2869,6 +2869,80 @@ const TaxUI = (() => {
       </div>`;
   }
 
+  // ── Enhanced row for unknown_acquisition with impact labels and guided resolver ──
+  function renderAcquisitionRow(issue) {
+    const { txn, resolutionType, resolutionConfidence, resolutionNote, impactLevel, autoResolvable, proceedsSEK } = issue;
+    const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(txn.assetSymbol) : { symbol: txn.assetSymbol, name: '' };
+    const displaySym  = td.symbol || txn.assetSymbol || '?';
+    const displayName = td.name || txn.assetName || '';
+    const acct        = TaxEngine.getAccounts().find(a => a.id === txn.accountId);
+    const acctLabel   = acct ? (acct.label || acct.type || acct.id.slice(-6)) : '?';
+    const metaEntry   = TaxEngine.getTokenMeta ? TaxEngine.getTokenMeta(txn.contractAddress || txn.assetSymbol) : null;
+    const tokenImage  = txn.imageUrl || metaEntry?.imageUrl || null;
+    const richName    = metaEntry?.name || displayName;
+
+    // Impact badge
+    const IMPACT = {
+      high:   { label: '🔴 Hög påverkan',  color: '#f87171', bg: 'rgba(239,68,68,.12)', tip: `${Math.round(proceedsSEK || 0)} kr — påverkar skatten merkbart` },
+      medium: { label: '🟡 Medel',          color: '#fbbf24', bg: 'rgba(251,191,36,.1)',  tip: `${Math.round(proceedsSEK || 0)} kr` },
+      low:    { label: '🟢 Låg påverkan',   color: '#4ade80', bg: 'rgba(34,197,94,.08)',  tip: `${Math.round(proceedsSEK || 0)} kr — liten skatteeffekt` },
+    };
+    const impact = IMPACT[impactLevel] || IMPACT.low;
+
+    // Best-guess badge
+    const GUESS = {
+      spam_candidate:              { badge: '🗑️ Troligen spam',             color: '#4ade80' },
+      airdrop_candidate:           { badge: '🪂 Troligen airdrop',          color: '#818cf8' },
+      internal_transfer_candidate: { badge: '↔️ Troligen intern transfer',   color: '#60a5fa' },
+      opening_balance_candidate:   { badge: '📅 Troligen öppningssaldo',    color: '#fbbf24' },
+      manual_review_required:      { badge: '🔍 Okänd källa',              color: '#f87171' },
+    };
+    const guess = GUESS[resolutionType] || GUESS.manual_review_required;
+
+    // Confidence
+    const CONF = { high: { l: 'hög', c: '#4ade80' }, medium: { l: 'medel', c: '#fbbf24' }, low: { l: 'låg', c: '#f87171' } };
+    const conf = CONF[resolutionConfidence] || CONF.low;
+
+    const guidedId = `guided_${txn.id}`;
+
+    return `
+    <div class="tax-review-item" style="flex-direction:column;align-items:stretch">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <div class="tax-ri-left" style="flex:1;min-width:0">
+          ${renderTokenBadge(displaySym, richName !== displaySym ? richName : null, tokenImage, txn.contractAddress, 'sm')}
+          <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
+          <span class="tax-muted" style="font-size:11px">${fmtDateShort(txn.date)}</span>
+          ${explorerIconLink(txn.source, txn.txHash)}
+          <span class="tax-badge" style="font-size:10px;opacity:.6">${acctLabel}</span>
+          <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:${impact.bg};color:${impact.color}" title="${impact.tip}">${impact.label}</span>
+          <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(15,23,42,.6);color:${guess.color}">${guess.badge}</span>
+          <span style="font-size:9px;color:${conf.c}">${conf.l} konf.</span>
+          ${autoResolvable ? '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(99,102,241,.12);color:#818cf8">✨ auto</span>' : ''}
+        </div>
+        <div class="tax-ri-right" style="display:flex;gap:4px">
+          <button class="tax-btn tax-btn-xs" style="color:#818cf8;font-size:10px"
+                  onclick="(function(){var p=document.getElementById('${guidedId}');if(p)p.style.display=p.style.display==='none'?'flex':'none'})()">🧭 Lös</button>
+          <button class="tax-btn tax-btn-xs" style="color:#94a3b8" onclick="TaxUI.editTx('${txn.id}')" title="Redigera">✏️</button>
+          <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.markReviewed('${txn.id}')">OK</button>
+        </div>
+      </div>
+      ${resolutionNote ? `<div style="margin-top:4px;font-size:11px;color:#64748b;line-height:1.5;padding:4px 8px;background:rgba(0,0,0,.15);border-radius:5px">${resolutionNote}</div>` : ''}
+      <div id="${guidedId}" style="display:none;margin-top:6px;padding:8px 10px;border-radius:8px;background:rgba(99,102,241,.04);border:1px solid rgba(99,102,241,.12);flex-direction:column;gap:6px">
+        <div style="font-size:11px;font-weight:600;color:#818cf8;margin-bottom:2px">Var kom denna tillgång ifrån?</div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          <button class="tax-btn tax-btn-xs" style="background:rgba(96,165,250,.1);color:#60a5fa;border:1px solid rgba(96,165,250,.2)"
+                  onclick="TaxUI.openAddAccountModal()">↔️ Annan plånbok jag äger</button>
+          <button class="tax-btn tax-btn-xs" style="background:rgba(96,165,250,.1);color:#60a5fa;border:1px solid rgba(96,165,250,.2)"
+                  onclick="TaxUI.navigate('import')">🏦 Köptes på en börs</button>
+          <button class="tax-btn tax-btn-xs" style="background:rgba(129,140,248,.1);color:#818cf8;border:1px solid rgba(129,140,248,.2)"
+                  onclick="TaxUI.markSpam('${txn.id}')">🪂 Airdrop / spam</button>
+          <button class="tax-btn tax-btn-xs" style="background:rgba(148,163,184,.08);color:#94a3b8;border:1px solid rgba(148,163,184,.15)"
+                  onclick="TaxUI.editTx('${txn.id}')">❓ Osäker — visa mer</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   function renderReviewRow(issue) {
     const { txn, isK4Blocker: itemK4 } = issue;
     const td = TaxEngine.resolveTokenDisplay ? TaxEngine.resolveTokenDisplay(txn.assetSymbol) : { symbol: txn.assetSymbol, name: '' };
@@ -3089,6 +3163,21 @@ const TaxUI = (() => {
             <div style="font-size:12px;font-weight:700;color:#64748b;letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">Nästa steg</div>
             <div style="display:grid;gap:6px">
               ${stepRow(1, 'Åtgärda saknad köphistorik',  missingHistory, 'unknown_acquisition', 'blockers')}
+              ${missingHistory > 0 ? (() => {
+                const acqIssues = issues.filter(i => i.reason === 'unknown_acquisition');
+                const autoN  = acqIssues.filter(i => i.autoResolvable).length;
+                const xferN  = acqIssues.filter(i => i.resolutionType === 'internal_transfer_candidate').length;
+                const openN  = acqIssues.filter(i => i.resolutionType === 'opening_balance_candidate').length;
+                const manN   = acqIssues.filter(i => i.resolutionType === 'manual_review_required').length;
+                const parts  = [];
+                if (autoN  > 0) parts.push(`${autoN} auto-lösbar`);
+                if (xferN  > 0) parts.push(`${xferN} intern transfer`);
+                if (openN  > 0) parts.push(`${openN} öppningssaldo`);
+                if (manN   > 0) parts.push(`${manN} manuell`);
+                return parts.length > 0
+                  ? `<div style="margin:-4px 0 4px 38px;font-size:10px;color:#64748b">${parts.join(' · ')}</div>`
+                  : '';
+              })() : ''}
               ${stepRow(2, 'Åtgärda saknade priser',      missingPrice,   'missing_sek_price',   'blockers')}
               ${stepRow(3, 'Omatchade överföringar',       unmatchedXfer,  'unmatched_transfer',  'warnings')}
               ${stepRow(4, 'Okända tokens',                unknownToken,   'unknown_asset',       'warnings')}
@@ -3276,13 +3365,56 @@ const TaxUI = (() => {
                   <span style="color:var(--tax-muted);font-size:12px;margin-left:8px">${isCollapsed ? '▶' : '▼'}</span>
                 </div>
                 ${isCollapsed ? '' : `
+                ${reason === 'unknown_acquisition' ? `
+                <div style="margin-bottom:10px;padding:12px 14px;border-radius:10px;background:rgba(99,102,241,.06);border:1px solid rgba(99,102,241,.15)">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+                    <span style="font-size:16px">🧭</span>
+                    <span style="font-size:13px;font-weight:600;color:#818cf8">Hjälp mig hitta saknade anskaffningar</span>
+                    ${items.some(i => i.autoResolvable) ? `
+                    <button class="tax-btn tax-btn-sm" style="background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.25);font-weight:600;margin-left:auto"
+                            onclick="TaxUI.autoFixEasyCases()">
+                      ✨ Auto-fix ${items.filter(i => i.autoResolvable).length} enkla fall först
+                    </button>` : ''}
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(96,165,250,.1);color:#60a5fa;border:1px solid rgba(96,165,250,.2)"
+                            onclick="TaxUI.openAddAccountModal()">📥 Importera plånbok</button>
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(96,165,250,.1);color:#60a5fa;border:1px solid rgba(96,165,250,.2)"
+                            onclick="TaxUI.navigate('import')">📄 Importera börs-CSV</button>
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(129,140,248,.1);color:#818cf8;border:1px solid rgba(129,140,248,.2)"
+                            onclick="TaxUI.bulkMarkSpam('unknown_acquisition')">🪂 Klassificera airdrops</button>
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.2)"
+                            onclick="TaxUI.navigate('import')">📅 Skapa öppningssaldon</button>
+                  </div>
+                </div>` : ''}
                 <div class="tax-review-fix-tip">
                   💡 ${meta.fix}
                   ${reason === 'duplicate' ? `<button class="tax-btn tax-btn-xs" style="margin-left:8px;background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.2)" onclick="TaxUI.deleteDuplicates()">🗑 Delete all duplicates</button>` : ''}
                   <span style="display:inline-flex;gap:6px;margin-left:8px">${extraBulk}${bulkActions}</span>
                 </div>
                 <div class="tax-review-items">
-                  ${subGroups && subGroups.length > 1
+                  ${subGroups && subGroups.length > 0 && reason === 'unknown_acquisition'
+                    ? subGroups.map(sg => {
+                        const highImpact = sg.items.filter(i => i.impactLevel === 'high').length;
+                        const medImpact  = sg.items.filter(i => i.impactLevel === 'medium').length;
+                        const lowImpact  = sg.items.filter(i => i.impactLevel === 'low').length;
+                        const autoCount  = sg.items.filter(i => i.autoResolvable).length;
+                        return `
+                        <div style="padding:8px 12px 4px;background:rgba(15,23,42,.5);border-bottom:1px solid rgba(148,163,184,.08);border-left:3px solid ${sg.color || '#64748b'}">
+                          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span style="font-size:12px;font-weight:600;color:${sg.color || '#e2e8f0'}">${sg.label}</span>
+                            <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,.3);color:#94a3b8">${sg.items.length} rad${sg.items.length !== 1 ? 'er' : ''}</span>
+                            ${autoCount > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(99,102,241,.12);color:#818cf8">✨ ${autoCount} auto-lösbar${autoCount !== 1 ? 'a' : ''}</span>` : ''}
+                            ${highImpact > 0 ? `<span style="font-size:10px;color:#f87171">🔴 ${highImpact} hög</span>` : ''}
+                            ${medImpact > 0 ? `<span style="font-size:10px;color:#fbbf24">🟡 ${medImpact} medel</span>` : ''}
+                            ${lowImpact > 0 ? `<span style="font-size:10px;color:#4ade80">🟢 ${lowImpact} låg</span>` : ''}
+                          </div>
+                          ${sg.tip ? `<div style="font-size:10px;color:#64748b;margin-top:2px;margin-bottom:2px">${sg.tip}</div>` : ''}
+                        </div>
+                        ${sg.items.map(issue => renderAcquisitionRow(issue)).join('')}
+                      `;
+                      }).join('')
+                    : subGroups && subGroups.length > 1
                     ? subGroups.map(sg => `
                         <div style="padding:6px 12px 4px;background:rgba(148,163,184,.04);border-bottom:1px solid rgba(148,163,184,.08)">
                           <span style="font-size:11px;font-weight:600;color:#64748b">${sg.label}</span>
@@ -3291,7 +3423,7 @@ const TaxUI = (() => {
                         </div>
                         ${sg.items.map(issue => renderReviewRow(issue)).join('')}
                       `).join('')
-                    : items.map(issue => renderReviewRow(issue)).join('')
+                    : items.map(issue => reason === 'unknown_acquisition' ? renderAcquisitionRow(issue) : renderReviewRow(issue)).join('')
                   }
                 </div>`}
               </div>`;
@@ -3334,6 +3466,27 @@ const TaxUI = (() => {
         const ai = SUB_ORDER.indexOf(a), bi = SUB_ORDER.indexOf(b);
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
       }).map(([key, items]) => ({ key, ...BLOCK_REASON_LABELS[key], items }));
+    }
+    // For unknown_acquisition, build sub-groups by resolutionType
+    const RESOLUTION_LABELS = {
+      spam_candidate:              { label: '🗑️ Troligen spam',            color: '#4ade80', tip: 'Auto-lösbar — exkluderas med 0 kr kostnadsbas.' },
+      airdrop_candidate:           { label: '🪂 Troligen airdrop',         color: '#818cf8', tip: 'Kan omklassificeras — kostnadsbas = FMV vid mottagning.' },
+      internal_transfer_candidate: { label: '↔️ Troligen intern transfer',  color: '#60a5fa', tip: 'Importera källplånboken — motorn matchar automatiskt.' },
+      opening_balance_candidate:   { label: '📅 Troligen öppningssaldo',   color: '#fbbf24', tip: 'Tillgången ägdes före importen — skapa manuell anskaffning.' },
+      manual_review_required:      { label: '🔍 Manuell granskning',      color: '#f87171', tip: 'Motorn kunde inte identifiera källa automatiskt.' },
+    };
+    const RES_ORDER = ['spam_candidate','airdrop_candidate','internal_transfer_candidate','opening_balance_candidate','manual_review_required'];
+    if (groups.unknown_acquisition) {
+      const subMap = {};
+      for (const issue of groups.unknown_acquisition.items) {
+        const key = issue.resolutionType || 'manual_review_required';
+        if (!subMap[key]) subMap[key] = [];
+        subMap[key].push(issue);
+      }
+      groups.unknown_acquisition.subGroups = Object.entries(subMap).sort(([a],[b]) => {
+        const ai = RES_ORDER.indexOf(a), bi = RES_ORDER.indexOf(b);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      }).map(([key, items]) => ({ key, ...(RESOLUTION_LABELS[key] || { label: key, color: '#94a3b8', tip: '' }), items }));
     }
     // Return in priority order
     const ORDER = [
@@ -4854,6 +5007,31 @@ const TaxUI = (() => {
     render();
   }
 
+  /**
+   * Auto-fix easy cases: uses the engine's autoFixEasyCases to resolve
+   * spam and high-confidence airdrop rows from the review issue list.
+   */
+  function autoFixEasyCases() {
+    const txns = TaxEngine.getTransactions();
+    const result = S.taxResult || getOrComputeTaxResult();
+    if (!TaxEngine.autoFixEasyCases) {
+      showTaxToast('ℹ️', 'Ej tillgänglig', 'autoFixEasyCases stöds inte i denna version.', 'info');
+      return;
+    }
+    const out = TaxEngine.autoFixEasyCases(txns, result);
+    if (out.resolved === 0) {
+      showTaxToast('ℹ️', 'Inga enkla fall', 'Alla auto-lösbara rader har redan hanterats.', 'info');
+      return;
+    }
+    TaxEngine.saveTransactions(txns);
+    S.taxResult = null;
+    const parts = [];
+    if (out.spamCount > 0) parts.push(`${out.spamCount} spam → exkluderade`);
+    if (out.airdropCount > 0) parts.push(`${out.airdropCount} airdrops → omklassificerade`);
+    showTaxToast('✨', `${out.resolved} enkla fall lösta!`, parts.join(' · '), 'success');
+    render();
+  }
+
   // Toggle a review group's collapsed state
   function toggleReviewGroup(reason) {
     if (!S.collapsedGroups) S.collapsedGroups = new Set(['received_not_sold']);
@@ -5544,7 +5722,7 @@ const TaxUI = (() => {
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
     bulkAutoInfer, resolveUnknownTokens, toggleReviewGroup,
-    bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances, autoResolveAll,
+    bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances, autoResolveAll, autoFixEasyCases,
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,

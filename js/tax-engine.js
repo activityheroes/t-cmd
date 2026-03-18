@@ -2853,14 +2853,16 @@ const TaxEngine = (() => {
       bulkActions: ['confirm_spam', 'override_price'] },
     unknown_asset:        { label: 'Unknown token',               icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
     unmatched_transfer:   { label: 'Unmatched transfer',          icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
-    negative_balance:     { label: 'Incomplete buy history',      icon: '⚠️', priority: 'high', isK4Blocker: true,
-      why: 'More units were sold than recorded as acquired — some import history is missing. Cost basis has been partially reconstructed from available data.',
-      fix: 'Import the full transaction history for this asset from all sources (exchange CSVs, other wallets, other chains). If the asset moved between your own wallets, make sure both sides are imported.',
-      bulkActions: ['enter_price', 'mark_zero_cost', 'import_account'] },
-    unknown_acquisition:  { label: 'Unknown acquisition source',  icon: '🔍', priority: 'critical', isK4Blocker: true,
-      why: 'This disposal has no matching acquisition in any imported source. The asset may have been purchased on an unconnected exchange, received from an unimported wallet, or held before this wallet was tracked. Cost basis is set to 0 until resolved.',
-      fix: 'Add the exchange or wallet where this was originally acquired — the engine will automatically match the deposit and remove this issue. Alternatively, enter the acquisition price manually.',
-      bulkActions: ['import_account', 'enter_price', 'mark_zero_cost', 'mark_spam'] },
+    negative_balance:     { label: 'Saknad köphistorik',           icon: '⚠️', priority: 'high', isK4Blocker: true,
+      why: 'Vi hittade en avyttring men inte det tidigare köpet i importerad historik. Det beror oftast på att tillgången kom från en annan plånbok, börs, airdrop, eller ägdes redan innan importen.',
+      fix: 'Använd den guidade hjälpen nedan — motorn föreslår den mest troliga förklaringen och nästa steg för varje rad.',
+      bulkActions: ['import_account', 'enter_price', 'mark_zero_cost'],
+      subGroupByResolution: true },
+    unknown_acquisition:  { label: 'Saknad köphistorik',            icon: '🔍', priority: 'critical', isK4Blocker: true,
+      why: 'Vi hittade en avyttring men inte det tidigare köpet i importerad historik. Det beror oftast på att tillgången kom från en annan plånbok, börs, airdrop, eller ägdes redan innan importen.',
+      fix: 'Använd den guidade hjälpen nedan — motorn föreslår den mest troliga förklaringen och nästa steg för varje rad.',
+      bulkActions: ['import_account', 'enter_price', 'mark_zero_cost', 'mark_spam'],
+      subGroupByResolution: true },
     duplicate:            { label: 'Possible duplicate',          icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one copy.' },
     unclassified:         { label: 'Unclassified',                icon: '🏷️', why: 'Could not determine what type of transaction this is.', fix: 'Select the correct category manually.' },
     ambiguous_swap:       { label: 'Incomplete swap',             icon: '↔️', why: 'Only one side of a swap was found — missing received asset or amount.', fix: 'Enter the received asset and amount on this transaction.' },
@@ -3014,12 +3016,24 @@ const TaxEngine = (() => {
 
     // ── Pass 2b: Unknown acquisition from taxResult disposals ──
     // These are disposals where inventory went negative (sold > ever acquired)
+    // Copy resolution fields so the UI can sub-group and show guided actions.
     if (taxResult?.disposals) {
       for (const d of taxResult.disposals) {
         if (flaggedIds.has(d.id) || !d.unknownAcquisition) continue;
         const t = txById.get(d.id);
         if (!t || t.userReviewed) continue;
-        issues.push({ txnId: d.id, txn: t, reason: 'unknown_acquisition', meta: REVIEW_DESCRIPTIONS.unknown_acquisition });
+        issues.push({
+          txnId: d.id, txn: t,
+          reason: 'unknown_acquisition',
+          meta: REVIEW_DESCRIPTIONS.unknown_acquisition,
+          // Resolution fields from resolveUnknownAcquisitions pipeline
+          resolutionType:       d.resolutionType       || 'manual_review_required',
+          resolutionConfidence: d.resolutionConfidence  || 'low',
+          resolutionNote:       d.resolutionNote        || '',
+          impactLevel:          d.impactLevel           || 'low',
+          autoResolvable:       d.autoResolvable        || false,
+          proceedsSEK:          d.proceedsSEK           || 0,
+        });
         flaggedIds.add(d.id);
       }
     }
@@ -4449,6 +4463,57 @@ const TaxEngine = (() => {
         ? `Inga anskaffningar importerade för ${sym}. Importera köphistorik från börsen eller plånboken där tokenen ursprungligen anskaffades.`
         : `Anskaffningshistorik finns (${acqCount} transaktioner) men täcker inte denna avyttring. Kontrollera om fler transaktioner saknas.`;
     }
+
+    // ── Final pass: Compute impactLevel on every classified disposal ──
+    for (const d of disposals) {
+      if (d.valuationStatus !== 'missing_history') continue;
+      const proc = d.proceedsSEK || 0;
+      d.impactLevel = proc >= 500 ? 'high' : proc >= 50 ? 'medium' : 'low';
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // AUTO-FIX EASY CASES
+  //
+  // Resolves all auto-resolvable missing-history disposals in one
+  // pass. Spam → excluded with 0 cost (no tax impact). High-conf
+  // airdrops → excluded with FMV cost basis at receipt date.
+  // Returns { resolved, spamCount, airdropCount, details[] }.
+  // ════════════════════════════════════════════════════════════
+  function autoFixEasyCases(txns, taxResult) {
+    if (!txns || !taxResult?.disposals) return { resolved: 0, spamCount: 0, airdropCount: 0, details: [] };
+    const details = [];
+    let spamCount = 0, airdropCount = 0;
+
+    for (const d of taxResult.disposals) {
+      if (d.valuationStatus !== 'missing_history') continue;
+      if (!d.autoResolvable) continue;
+
+      const t = txns.find(tx => tx.id === d.id);
+      if (!t) continue;
+
+      if (d.resolutionType === RT.SPAM) {
+        t.category = CAT.SPAM || 'spam';
+        t.excludeFromK4 = true;
+        t.userReviewed = true;
+        t.notes = (t.notes || '') + ' [auto-fix: spam]';
+        spamCount++;
+        details.push(`${d.assetSymbol}: spam → exkluderad (0 kr)`);
+      } else if (d.resolutionType === RT.AIRDROP && d.resolutionConfidence === 'high') {
+        t.category = CAT.AIRDROP;
+        t.userReviewed = true;
+        t.notes = (t.notes || '') + ' [auto-fix: airdrop]';
+        airdropCount++;
+        details.push(`${d.assetSymbol}: airdrop → omklassificerad`);
+      }
+    }
+
+    return {
+      resolved: spamCount + airdropCount,
+      spamCount,
+      airdropCount,
+      details,
+    };
   }
 
   // ════════════════════════════════════════════════════════════
@@ -7637,11 +7702,11 @@ const TaxEngine = (() => {
     computeTaxYear, computeReportHealth, computeStatusSummary,
     buildAssetProvenance,
     querySuspiciousZeroCost, queryEstimatedHighProceedsDisposals,
-    resolveUnknownAcquisitions, RT,  // recovery pipeline + resolution type constants
+    resolveUnknownAcquisitions, RT, autoFixEasyCases,  // recovery pipeline + resolution type constants
     // K4 export
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review
-    getReviewIssues, isTaxableCategory,
+    getReviewIssues, isTaxableCategory, REVIEW_DESCRIPTIONS,
     // CSV parsers
     parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
     parseRevolutCSV, parseMEXCCSV, parseSolscanCSV,

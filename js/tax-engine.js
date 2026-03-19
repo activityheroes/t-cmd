@@ -1320,15 +1320,8 @@ const TaxEngine = (() => {
         + `${sep}limit=365&before_timestamp=${beforeTs}&currency=usd${keyParam}`;
       console.debug(`[CG Onchain] OHLCV: ${gtNetwork}/${address.slice(0, 8)}… year=${year}`);
       const r = await fetchWithTimeout(url, 12000);
-      if (!r || !r.ok) {
-        // Fallback: try token endpoint (some CG versions use /tokens/ not /pools/)
-        const url2 = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/tokens/${address}/ohlcv/day`
-          + `${sep}limit=365&before_timestamp=${beforeTs}&currency=usd${keyParam}`;
-        const r2 = await fetchWithTimeout(url2, 12000);
-        if (!r2 || !r2.ok) return null;
-        const json2 = await r2.json();
-        return parseOnchainOHLCV(json2);
-      }
+      // Note: /tokens/ endpoint always returns 401 with CG Demo key — pools only.
+      if (!r || !r.ok) return null;
       const json = await r.json();
       return parseOnchainOHLCV(json);
     } catch { return null; }
@@ -2512,55 +2505,16 @@ const TaxEngine = (() => {
 
     savePriceCache(updatedCache);
 
-    // ── D: Birdeye — Solana meme coins not indexed by GeckoTerminal ──────────
-    // For on-chain Solana tokens that GeckoTerminal couldn't price (no OHLCV
-    // found), try Birdeye's free public historical price API.
-    // Birdeye covers virtually all SPL tokens including pump.fun launches.
-    const birdeyeNeeded = new Map(); // "address|year" → { address, year }
-    const MAX_BIRDEYE = 25;
-    const nameCache2 = (() => { try { return JSON.parse(localStorage.getItem('tcmd_token_names') || '{}'); } catch { return {}; } })();
-    for (const t of txns) {
-      if (t.isInternalTransfer) continue;
-      if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
-      if (t.priceSEKPerUnit > 0 || t.coinGeckoId) continue;
-      if (!t.contractAddress) continue;
-      const network = GT_NETWORK_MAP[t.chain] || GT_NETWORK_MAP[chainFromSource(t.source)];
-      if (network !== 'solana') continue; // Birdeye is Solana-only
-      // Only attempt if GT didn't price this token
-      const dateStr = (t.date || '').slice(0, 10);
-      if (updatedCache[gtCacheKey(t.contractAddress, dateStr)]) continue;
-      const year = parseInt(dateStr.slice(0, 4));
-      if (isNaN(year)) continue;
-      const key = `${t.contractAddress}|${year}`;
-      if (!birdeyeNeeded.has(key)) {
-        birdeyeNeeded.set(key, { address: t.contractAddress, year });
-        if (birdeyeNeeded.size >= MAX_BIRDEYE) break;
-      }
-    }
-    for (const [, { address, year }] of birdeyeNeeded) {
-      try {
-        const timeFrom = Math.floor(Date.UTC(year, 0, 1) / 1000);
-        const timeTo   = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
-        const url = `https://public-api.birdeye.so/public/history_price?address=${address}&address_type=token&type=1D&time_from=${timeFrom}&time_to=${timeTo}`;
-        const r = await fetchWithTimeout(url, 10000);
-        if (!r?.ok) continue;
-        const json = await r.json();
-        const items = json?.data?.items || [];
-        if (!items.length) continue;
-        const fxMap = fxByYear.get(year);
-        for (const item of items) {
-          const d = new Date(item.unixTime * 1000).toISOString().slice(0, 10);
-          const usdPrice = parseFloat(item.value);
-          if (!usdPrice || isNaN(usdPrice) || usdPrice <= 0) continue;
-          const fx = fxMap ? nearestMapValue(fxMap, d) : null;
-          if (fx) {
-            updatedCache[gtCacheKey(address, d)] = usdPrice * fx;
-          }
-        }
-        if (onProgress) onProgress({ step: 'price', pct: 90, msg: `Birdeye: pricing ${address.slice(0, 8)}…` });
-      } catch { /* ignore */ }
-    }
-    if (birdeyeNeeded.size > 0) savePriceCache(updatedCache);
+    // ── D: DexScreener pair-implied — Solana meme coins not priced by CG Onchain ─
+    // Birdeye's /public/ endpoint was removed (now requires paid API key).
+    // DexScreener doesn't offer historical OHLCV, so for tokens that still have
+    // no price after CG Onchain, the only browser-safe fallback is swap-implied
+    // pricing (already handled in priceOneTxn Level 2). These tokens end up as
+    // missing_sek_price and appear in the Review page for manual resolution.
+    //
+    // Skip the Birdeye step entirely — it generates console 404s with no benefit.
+    //
+    // Future: add a server-side pricing proxy that calls Birdeye with an API key.
 
     // ── E: Apply full pricing chain (all passes) ───────────
     if (onProgress) onProgress({ step: 'price', pct: 97, msg: 'Applying pricing chain…' });

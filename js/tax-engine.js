@@ -33,6 +33,31 @@ const TaxEngine = (() => {
   // Approx SEK per USD / EUR  (used when CoinGecko is unavailable for stablecoins)
   const STABLE_SEK = { USD: 10.4, EUR: 11.2 };
 
+  // ── Canonical stablecoin rules — symbol → anchor currency ────
+  // Drives resolveStablecoinPrice(). Extended by mint/contract matching in the future.
+  const STABLECOIN_RULES = [
+    { symbol: 'USDC',  anchor: 'USD' },
+    { symbol: 'USDT',  anchor: 'USD' },
+    { symbol: 'BUSD',  anchor: 'USD' },
+    { symbol: 'DAI',   anchor: 'USD' },
+    { symbol: 'PYUSD', anchor: 'USD' },
+    { symbol: 'FDUSD', anchor: 'USD' },
+    { symbol: 'USDP',  anchor: 'USD' },
+    { symbol: 'TUSD',  anchor: 'USD' },
+    { symbol: 'USDS',  anchor: 'USD' },
+    { symbol: 'USDE',  anchor: 'USD' },
+    { symbol: 'GUSD',  anchor: 'USD' },
+    { symbol: 'FRAX',  anchor: 'USD' },
+    { symbol: 'LUSD',  anchor: 'USD' },
+    { symbol: 'CRVUSD',anchor: 'USD' },
+    { symbol: 'EURC',  anchor: 'EUR' },
+    { symbol: 'EUROC', anchor: 'EUR' },
+    { symbol: 'EURT',  anchor: 'EUR' },
+    { symbol: 'EURS',  anchor: 'EUR' },
+    { symbol: 'AGEUR', anchor: 'EUR' },
+    { symbol: 'EURA',  anchor: 'EUR' },
+  ];
+
   // ── Swap-trust validation thresholds ─────────────────────────────────────────
   // Tune these constants; do NOT hard-code the numbers inline.
   //
@@ -625,6 +650,18 @@ const TaxEngine = (() => {
       solOutflowConfidence: raw.solOutflowConfidence || null,
       // Reconstruction debug metadata (set by normalizeSolanaTx)
       _reconstruction: raw._reconstruction || null,
+      // ── Price / source resolution status (set by pricing pipeline) ────────
+      // priceStatus:  how the SEK price was resolved
+      //   'resolved_stable_fx' | 'resolved_stable_approx' | 'resolved_market_api'
+      //   | 'resolved_tx_implied' | 'resolved_trade_exact' | 'missing_price'
+      // sourceStatus: where the tokens came from (provenance)
+      //   'verified_source' | 'unknown_source' | 'exchange_buy_candidate'
+      //   | 'internal_transfer_candidate' | 'opening_balance_candidate'
+      //   | 'airdrop_candidate'
+      priceStatus:  raw.priceStatus  || null,
+      sourceStatus: raw.sourceStatus || null,
+      // Stablecoin depeg flag (set by resolveStablecoinPrice)
+      depegWarning: raw.depegWarning || false,
     };
   }
 
@@ -1625,6 +1662,96 @@ const TaxEngine = (() => {
     return fxMap ? nearestMapValue(fxMap, dateStr, 7) : null;
   }
 
+  // ── Stablecoin price resolver ─────────────────────────────────────────────
+  // Dedicated path for supported stablecoins: peg × historical FX → SEK.
+  // Called before the generic token pricing ladder so USDC/USDT never hit
+  // market APIs and are never left in the "missing_sek_price" bucket.
+  //
+  // Returns a StablecoinResolutionResult:
+  //   { resolved, sekPrice, anchorPrice, anchorCurrency, fxRate,
+  //     source, confidence, reason, depegWarning, metadata }
+  //
+  function resolveStablecoinPrice(sym, date, fxByYear, marketPriceUSD) {
+    sym = (sym || '').toUpperCase();
+    const stableRule = STABLECOIN_RULES.find(r => r.symbol === sym);
+
+    if (!stableRule) {
+      return {
+        resolved: false, source: 'unresolved', confidence: 'low',
+        reason: 'not_supported_stablecoin',
+        metadata: { assetSymbol: sym, txDate: date || '' },
+      };
+    }
+
+    const anchorCurrency = stableRule.anchor;       // 'USD' or 'EUR'
+    const anchorPrice    = 1.0;                     // stablecoin peg assumption
+
+    // Historical USD/SEK FX rate for the transaction date
+    const usdSEKRate = historicalFX(date, fxByYear);
+
+    // Convert anchor → SEK (EUR stablecoins use EUR/SEK ≈ USD/SEK × 1.08)
+    const toSEK = (usdSEK) =>
+      anchorCurrency === 'EUR'
+        ? usdSEK * (STABLE_SEK.EUR / STABLE_SEK.USD)
+        : usdSEK;
+
+    if (!usdSEKRate) {
+      // No historical FX — fall back to hardcoded approximate rate
+      const approxRate = anchorCurrency === 'EUR' ? STABLE_SEK.EUR : STABLE_SEK.USD;
+      return {
+        resolved: true,
+        sekPrice: approxRate,
+        anchorPrice,
+        anchorCurrency,
+        fxRate: approxRate,
+        source: 'stable_approx',
+        confidence: 'medium',
+        reason: 'fx_rate_unavailable_used_approx',
+        depegWarning: false,
+        metadata: {
+          assetSymbol: sym, txDate: date || '',
+          stablecoinRuleMatched: `${sym}->${anchorCurrency}`,
+        },
+      };
+    }
+
+    const fxRate  = usdSEKRate;
+    const sekPrice = toSEK(fxRate) * anchorPrice;
+
+    // ── Depeg protection: compare against market price if available ──
+    let depegWarning = false;
+    let confidence   = 'high';
+    if (marketPriceUSD != null && marketPriceUSD > 0) {
+      const deviation = Math.abs(marketPriceUSD - 1.0) / 1.0;
+      if (deviation > 0.03) {
+        depegWarning = true;
+        confidence   = 'medium';
+      }
+    }
+
+    return {
+      resolved: true,
+      sekPrice,
+      anchorPrice,
+      anchorCurrency,
+      fxRate,
+      source: 'stable_historical_fx',
+      confidence,
+      depegWarning,
+      metadata: {
+        assetSymbol: sym,
+        txDate: date || '',
+        fxDateUsed: (date || '').slice(0, 10),
+        stablecoinRuleMatched: `${sym}->${anchorCurrency}`,
+      },
+    };
+  }
+
+  // Convenience: is this symbol a stablecoin we can price via STABLECOIN_RULES?
+  function isSupportedStablecoin(sym) {
+    return STABLECOIN_RULES.some(r => r.symbol === (sym || '').toUpperCase());
+  }
+
   // Price one transaction through the full fallback chain.
   // Returns an updated transaction object with price metadata set.
   // Helper: get SEK value for a symbol+amount using any available source
@@ -1813,32 +1940,36 @@ const TaxEngine = (() => {
       }
     }
 
-    // ── Level 5: Stablecoin × historical USD/SEK FX ───────
+    // ── Level 5: Stablecoin × historical USD/SEK FX ──────────────────
+    // Handled via resolveStablecoinPrice() so logic is shared with the
+    // review-bucket router and depeg detection.
     if (STABLES.has(sym)) {
-      const EUR_STABLES = new Set(['EUROC', 'EURC', 'EURT', 'EURS']);
-      const isEUR = EUR_STABLES.has(sym);
-      const usdSEK = historicalFX(date, fxByYear);
-      if (usdSEK) {
-        const price = isEUR ? usdSEK * (STABLE_SEK.EUR / STABLE_SEK.USD) : usdSEK;
-        return {
-          ...t,
-          priceSEKPerUnit: price, costBasisSEK: price * amt,
-          priceSource: PS.STABLE_HIST_FX, priceConfidence: 'high',
-          needsReview: false, reviewReason: null,
-        };
-      }
-      // Level 6 fallback: hardcoded rate
-      const approx = stableSEKPrice(sym);
+      // Pass any already-known market price for depeg check (may be null)
+      const marketUSD = lookupCachedSEK(sym, date, cache, null)
+        ? (lookupCachedSEK(sym, date, cache, null) / (historicalFX(date, fxByYear) || STABLE_SEK.USD))
+        : null;
+      const stableResult = resolveStablecoinPrice(sym, date, fxByYear, marketUSD);
+      const price = stableResult.sekPrice;
+      const ps    = stableResult.source === 'stable_historical_fx' ? PS.STABLE_HIST_FX : PS.STABLE_APPROX;
+      const pc    = stableResult.confidence;
       return {
         ...t,
-        priceSEKPerUnit: approx, costBasisSEK: approx * amt,
-        priceSource: PS.STABLE_APPROX, priceConfidence: 'medium',
-        needsReview: false, reviewReason: null,
+        priceSEKPerUnit: price,
+        costBasisSEK:    price * amt,
+        priceSource:     ps,
+        priceConfidence: pc,
+        needsReview:     false,
+        reviewReason:    null,
+        // ── priceStatus / sourceStatus ──
+        priceStatus:     stableResult.source === 'stable_historical_fx'
+                           ? 'resolved_stable_fx'
+                           : 'resolved_stable_approx',
+        depegWarning:    stableResult.depegWarning || false,
       };
     }
 
     // Mark for cross-transaction derivation passes
-    return { ...t, priceSource: PS.MISSING, priceConfidence: null };
+    return { ...t, priceSource: PS.MISSING, priceConfidence: null, priceStatus: 'missing_price' };
   }
 
   // Pass 2: Cross-transaction derivation
@@ -2828,6 +2959,11 @@ const TaxEngine = (() => {
       fix: 'Använd den guidade hjälpen nedan — motorn föreslår den mest troliga förklaringen och nästa steg för varje rad.',
       bulkActions: ['import_account', 'enter_price', 'mark_zero_cost', 'mark_spam'],
       subGroupByResolution: true },
+    // Stablecoin: price resolved via peg+FX but acquisition source is unknown
+    stable_source_unknown: { label: 'Stablecoin — källa okänd',     icon: '🪙', priority: 'medium', isK4Blocker: false,
+      why: 'Priset är löst via stablecoin-peg + historisk valutakurs (USD/SEK). Anskaffningskällan är dock okänd — kom detta från en börs, öppningssaldo, airdrop eller intern överföring?',
+      fix: 'Välj källa: Börsinköp (t.ex. Revolut), Intern överföring, Öppningssaldo, eller Airdrop/belöning.',
+      bulkActions: ['mark_exchange_buy', 'mark_internal_transfer', 'mark_opening_balance', 'mark_airdrop'] },
     duplicate:            { label: 'Possible duplicate',          icon: '📋', why: 'Very similar transaction found from another source. May double-count gains/losses.', fix: 'Review and delete one copy.' },
     unclassified:         { label: 'Unclassified',                icon: '🏷️', why: 'Could not determine what type of transaction this is.', fix: 'Select the correct category manually.' },
     ambiguous_swap:       { label: 'Incomplete swap',             icon: '↔️', why: 'Only one side of a swap was found — missing received asset or amount.', fix: 'Enter the received asset and amount on this transaction.' },
@@ -2901,6 +3037,24 @@ const TaxEngine = (() => {
             meta: REVIEW_DESCRIPTIONS.received_not_sold, priority: 'low', isK4Blocker: false });
           flaggedIds.add(t.id); continue;
         }
+
+        // Group E: Stablecoin with no price — ROUTE TO PROVENANCE BUCKET, NOT missing_sek_price
+        // Price is always resolvable via peg+FX; the real question is acquisition source.
+        const symCheck = (t.assetSymbol || '').toUpperCase();
+        if (isSupportedStablecoin(symCheck)) {
+          // The pricing pipeline should have resolved this, but if it somehow didn't
+          // (e.g. non-taxable RECEIVE that was skipped), the problem is provenance not price.
+          issues.push({
+            txnId: t.id, txn: t,
+            reason: 'stable_source_unknown',
+            meta: REVIEW_DESCRIPTIONS.stable_source_unknown,
+            priority: 'medium',
+            isK4Blocker: false,
+            stableAnchor: STABLECOIN_RULES.find(r => r.symbol === symCheck)?.anchor || 'USD',
+          });
+          flaggedIds.add(t.id); continue;
+        }
+
         // Group D: true unknown — K4 blocker (disposals) or high-priority acquisition
         const isDisposal = [CAT.SELL, CAT.TRADE, CAT.NFT_SALE].includes(t.category);
         // Determine WHY this transaction is still unpriced, and the best fix
@@ -2940,6 +3094,22 @@ const TaxEngine = (() => {
           issues.push({ txnId: t.id, txn: t, reason: 'unknown_asset', meta: REVIEW_DESCRIPTIONS.unknown_asset });
           flaggedIds.add(t.id); continue;
         }
+      }
+
+      // 2b. Stablecoin RECEIVE with resolved price but unknown source
+      // Don't show as generic unmatched_transfer — guide user to the provenance action.
+      if (t.category === CAT.RECEIVE && isSupportedStablecoin((t.assetSymbol||'').toUpperCase())
+          && !t.matchedTxId && !t.isInternalTransfer && t.priceSEKPerUnit > 0) {
+        const symSt = (t.assetSymbol || '').toUpperCase();
+        issues.push({
+          txnId: t.id, txn: t,
+          reason: 'stable_source_unknown',
+          meta: REVIEW_DESCRIPTIONS.stable_source_unknown,
+          priority: 'medium', isK4Blocker: false,
+          stableAnchor: STABLECOIN_RULES.find(r => r.symbol === symSt)?.anchor || 'USD',
+          priceStatus: t.priceStatus || 'resolved_stable_fx',
+        });
+        flaggedIds.add(t.id); continue;
       }
 
       // 3. Unmatched external transfer (SEND/RECEIVE not paired, potentially taxable)

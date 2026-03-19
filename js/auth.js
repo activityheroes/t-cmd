@@ -676,13 +676,14 @@ async function renderAdminPanel() {
             <div class="admin-section-title">🔑 API Keys</div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
                 Keys are stored securely in Supabase (per-admin). Required for rug checker, cluster detector, wallet imports, tax imports, and historical pricing.
-                Get keys: <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
-                &nbsp;·&nbsp;
-                <a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
-                &nbsp;·&nbsp;
-                <a href="https://etherscan.io/myapikey" target="_blank" style="color:var(--accent-cyan);">Etherscan →</a>
-                &nbsp;·&nbsp;
-                <a href="https://www.coingecko.com/en/api/pricing" target="_blank" style="color:var(--accent-cyan);">CoinGecko →</a>
+                Get keys:
+                <a href="https://birdeye.so/developer" target="_blank" style="color:var(--accent-cyan);">Birdeye →</a>
+                &nbsp;·&nbsp;<a href="https://dev.helius.xyz" target="_blank" style="color:var(--accent-cyan);">Helius →</a>
+                &nbsp;·&nbsp;<a href="https://etherscan.io/myapikey" target="_blank" style="color:var(--accent-cyan);">Etherscan →</a>
+                &nbsp;·&nbsp;<a href="https://www.coingecko.com/en/api/pricing" target="_blank" style="color:var(--accent-cyan);">CoinGecko →</a>
+                &nbsp;·&nbsp;<a href="https://basescan.org/myapikey" target="_blank" style="color:var(--accent-cyan);">Basescan →</a>
+                &nbsp;·&nbsp;<a href="https://arbiscan.io/myapikey" target="_blank" style="color:var(--accent-cyan);">Arbiscan →</a>
+                &nbsp;·&nbsp;<a href="https://monadexplorer.com" target="_blank" style="color:var(--accent-cyan);">Monadscan →</a>
             </div>
             <div style="display:flex;flex-direction:column;gap:10px;">
                 <!-- Birdeye key -->
@@ -724,6 +725,36 @@ async function renderAdminPanel() {
                     <button onclick="adminSaveKey('coingecko')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
                     <button onclick="adminTestKey('coingecko')" id="coingecko-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
                     <span id="coingecko-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
+                </div>
+                <!-- Basescan key (Base / L2) -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🔵 Basescan</label>
+                    <input id="admin-basescan-key" type="password" placeholder="Paste Basescan API key (Base network)…"
+                        value="${ChainAPIs.getKeys().basescan || ''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('basescan')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('basescan')" id="basescan-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="basescan-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
+                </div>
+                <!-- Arbiscan key (Arbitrum) -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🔷 Arbiscan</label>
+                    <input id="admin-arbiscan-key" type="password" placeholder="Paste Arbiscan API key (Arbitrum)…"
+                        value="${ChainAPIs.getKeys().arbiscan || ''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('arbiscan')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('arbiscan')" id="arbiscan-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="arbiscan-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
+                </div>
+                <!-- Monadscan key (Monad) -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🟣 Monadscan</label>
+                    <input id="admin-monadscan-key" type="password" placeholder="Paste Monadscan API key (Monad)…"
+                        value="${ChainAPIs.getKeys().monadscan || ''}"
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('monadscan')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('monadscan')" id="monadscan-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="monadscan-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
                 </div>
                 <div id="admin-key-status" style="font-size:11px;color:var(--text-muted);min-height:16px;"></div>
             </div>
@@ -1076,6 +1107,15 @@ window.adminTestKey = async function (name) {
         }
       } catch {
         if (status) { status.textContent = 'Error testing Etherscan key'; status.style.color = '#ef4444'; }
+      }
+    } else if (name === 'basescan' || name === 'arbiscan' || name === 'monadscan') {
+      const testFn = name === 'basescan' ? ChainAPIs.testBasescanKey
+                   : name === 'arbiscan' ? ChainAPIs.testArbiscanKey
+                   : ChainAPIs.testMonadscanKey;
+      const result = await testFn(key);
+      if (status) {
+        status.textContent = result.ok ? `✓ ${name} key is valid!` : `✗ ${result.error || name + ' key invalid'}`;
+        status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
       }
     } else {
       const ok = name === 'birdeye'

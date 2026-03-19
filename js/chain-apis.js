@@ -55,10 +55,13 @@ const ChainAPIs = (() => {
     if (_keysCache) return { ..._keysCache };
     const K = window.TCMD_KEYS || {};
     return {
-      birdeye: localStorage.getItem('tcmd_birdeye_key') || K.birdeye || '',
-      helius: localStorage.getItem('tcmd_helius_key') || K.helius || '',
+      birdeye:   localStorage.getItem('tcmd_birdeye_key')   || K.birdeye   || '',
+      helius:    localStorage.getItem('tcmd_helius_key')    || K.helius    || '',
       etherscan: localStorage.getItem('tcmd_etherscan_key') || K.etherscan || '',
       coingecko: localStorage.getItem('tcmd_coingecko_key') || K.coingecko || '',
+      basescan:  localStorage.getItem('tcmd_basescan_key')  || K.basescan  || '',
+      arbiscan:  localStorage.getItem('tcmd_arbiscan_key')  || K.arbiscan  || '',
+      monadscan: localStorage.getItem('tcmd_monadscan_key') || K.monadscan || '',
     };
   }
 
@@ -357,6 +360,45 @@ const ChainAPIs = (() => {
     }
   }
 
+  // ── EVM explorer key test helpers ────────────────────────────
+  // Each test makes a lightweight authenticated request and returns { ok, error? }
+
+  async function testEtherscanCompatKey(apiUrl, key, name) {
+    try {
+      const r = await fetch(
+        `${apiUrl}?module=account&action=balance` +
+        `&address=0x0000000000000000000000000000000000000000&tag=latest&apikey=${key}`
+      );
+      const data = await r.json();
+      const ok = data?.status === '1' || data?.message === 'OK';
+      return ok ? { ok: true } : { ok: false, error: `${name} key invalid or quota exceeded` };
+    } catch (e) {
+      return { ok: false, error: `Error testing ${name} key: ${e.message}` };
+    }
+  }
+
+  async function testBasescanKey(key) {
+    return testEtherscanCompatKey('https://api.basescan.org/api', key, 'Basescan');
+  }
+
+  async function testArbiscanKey(key) {
+    return testEtherscanCompatKey('https://api.arbiscan.io/api', key, 'Arbiscan');
+  }
+
+  async function testMonadscanKey(key) {
+    // Monadscan (testnet only as of 2026) — test via their status endpoint
+    try {
+      const r = await fetch(
+        `https://api.monadexplorer.com/api?module=account&action=balance` +
+        `&address=0x0000000000000000000000000000000000000000&tag=latest&apikey=${key}`
+      );
+      const ok = r.ok || r.status === 200;
+      return ok ? { ok: true } : { ok: false, error: `Monadscan key invalid or quota exceeded` };
+    } catch (e) {
+      return { ok: false, error: `Error testing Monadscan key: ${e.message}` };
+    }
+  }
+
   /**
    * Historical price by CoinGecko coin ID for a specific date.
    * @param {string} coinId — e.g. 'bitcoin', 'solana'
@@ -430,5 +472,6 @@ const ChainAPIs = (() => {
     isBurnAddress, isLockerContract, isSafeLP,
     // Key testing
     testBirdeyeKey, testHeliusKey, testCoinGeckoKey,
+    testBasescanKey, testArbiscanKey, testMonadscanKey,
   };
 })();

@@ -3047,6 +3047,9 @@ const TaxUI = (() => {
           ${txn.isDuplicate ? `<span class="tax-badge" style="background:rgba(239,68,68,.1);color:#f87171;font-size:10px">DUP</span>` : ''}
           ${confidenceBadge(txn)}
           ${blockInfo ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(148,163,184,.08);color:#64748b;border:1px solid rgba(148,163,184,.15)" title="${blockInfo.tip}">${blockInfo.label}</span>` : ''}
+          ${txn.priceStatus === 'resolved_stable_fx' ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(52,211,153,.08);color:#34d399;border:1px solid rgba(52,211,153,.18)" title="Pris löst automatiskt via stablecoin-peg + historisk USD/SEK">🪙 stablecoin-peg</span>` : ''}
+          ${txn.priceStatus === 'resolved_stable_approx' ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(251,191,36,.08);color:#fbbf24;border:1px solid rgba(251,191,36,.18)" title="Pris löst via ungefärlig kurs — historisk FX ej tillgänglig">🪙 stablecoin (approx)</span>` : ''}
+          ${txn.depegWarning ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.2)" title="Marknadsdata tyder på avvikelse från 1:1-peggen vid detta datum">⚠️ depeg?</span>` : ''}
           ${hasRecon ? `<button class="tax-btn tax-btn-xs" style="color:#818cf8;font-size:10px;padding:1px 6px" onclick="(function(){var p=document.getElementById('${panelId}');if(p)p.style.display=p.style.display==='none'?'block':'none'})()">◎ rekonstruktion</button>` : ''}
         </div>
         <div class="tax-ri-right">
@@ -3095,7 +3098,7 @@ const TaxUI = (() => {
     //
     // NOTE: this is the SAME model used by Reports. Both pages read from ss.
     const HARD_BLOCKER_REASONS = new Set(['missing_sek_price','unknown_acquisition','negative_balance','ambiguous_swap','unclassified']);
-    const REVIEW_REASONS       = new Set(['duplicate','unmatched_transfer','outlier','split_trade','bridge_review','unknown_asset','unsupported_defi','unknown_contract','special_transaction']);
+    const REVIEW_REASONS       = new Set(['duplicate','unmatched_transfer','outlier','split_trade','bridge_review','unknown_asset','unsupported_defi','unknown_contract','special_transaction','stable_source_unknown']);
     const INFO_REASONS         = new Set(['received_not_sold','spam_token']);
 
     // For the review QUEUE (transaction-level issues from getReviewIssues):
@@ -3395,13 +3398,17 @@ const TaxUI = (() => {
               // Per-group bulk action buttons
               const bulkActions = (meta.bulkActions || []).map(action => {
                 switch (action) {
-                  case 'mark_spam':       return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkSpam('${reason}')">🚫 Mark all spam</button>`;
-                  case 'enter_price':     return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkShowPriceSearch('${reason}')">💰 Batch price lookup</button>`;
-                  case 'mark_zero_cost':  return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkZeroCost('${reason}')">0️⃣ Set zero cost</button>`;
-                  case 'mark_income':     return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkReclassify('${reason}','income')">💼 Reclassify as income</button>`;
-                  case 'ignore_received': return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Ignore all</button>`;
-                  case 'confirm_spam':    return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Confirm spam</button>`;
-                  case 'import_account': return `<button class="tax-btn tax-btn-xs" style="background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.2)" onclick="TaxUI.openAddAccountModal()">➕ Lägg till konto</button>`;
+                  case 'mark_spam':              return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkSpam('${reason}')">🚫 Mark all spam</button>`;
+                  case 'enter_price':            return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkShowPriceSearch('${reason}')">💰 Batch price lookup</button>`;
+                  case 'mark_zero_cost':         return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkZeroCost('${reason}')">0️⃣ Set zero cost</button>`;
+                  case 'mark_income':            return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkReclassify('${reason}','income')">💼 Reclassify as income</button>`;
+                  case 'ignore_received':        return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Ignore all</button>`;
+                  case 'confirm_spam':           return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.bulkMarkReviewed('${reason}')">✓ Confirm spam</button>`;
+                  case 'import_account':         return `<button class="tax-btn tax-btn-xs" style="background:rgba(16,185,129,.12);color:#34d399;border:1px solid rgba(16,185,129,.2)" onclick="TaxUI.openAddAccountModal()">➕ Lägg till konto</button>`;
+                  case 'mark_exchange_buy':      return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.bulkReclassify('${reason}','buy')">🏦 Börsinköp</button>`;
+                  case 'mark_internal_transfer': return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.bulkReclassify('${reason}','transfer_in')">↔ Intern överföring</button>`;
+                  case 'mark_opening_balance':   return `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.bulkReclassify('${reason}','opening_balance')">📅 Öppningssaldo</button>`;
+                  case 'mark_airdrop':           return `<button class="tax-btn tax-btn-xs" style="background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.2)" onclick="TaxUI.bulkReclassify('${reason}','airdrop')">🪂 Airdrop/belöning</button>`;
                   default: return '';
                 }
               }).join('');
@@ -3447,6 +3454,28 @@ const TaxUI = (() => {
                             onclick="TaxUI.bulkMarkSpam('unknown_acquisition')">🪂 Klassificera airdrops</button>
                     <button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.2)"
                             onclick="TaxUI.navigate('import')">📅 Skapa öppningssaldon</button>
+                  </div>
+                </div>` : ''}
+                ${reason === 'stable_source_unknown' ? `
+                <div style="margin-bottom:10px;padding:12px 14px;border-radius:10px;background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.12)">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <span style="font-size:16px">🪙</span>
+                    <div>
+                      <div style="font-size:13px;font-weight:600;color:#818cf8">Pris löst — anskaffningskällan saknas</div>
+                      <div style="font-size:11px;color:var(--tax-muted);margin-top:2px">
+                        Priset är automatiskt löst via stablecoin-peg + historisk USD/SEK. Välj hur dessa tokens anskaffades:
+                      </div>
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)"
+                            onclick="TaxUI.bulkReclassify('stable_source_unknown','buy')">🏦 Börsinköp (t.ex. Revolut)</button>
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)"
+                            onclick="TaxUI.bulkReclassify('stable_source_unknown','transfer_in')">↔ Intern överföring</button>
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)"
+                            onclick="TaxUI.bulkReclassify('stable_source_unknown','opening_balance')">📅 Öppningssaldo</button>
+                    <button class="tax-btn tax-btn-xs" style="background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.2)"
+                            onclick="TaxUI.bulkReclassify('stable_source_unknown','airdrop')">🪂 Airdrop/belöning</button>
                   </div>
                 </div>` : ''}
                 <div class="tax-review-fix-tip">
@@ -3649,6 +3678,7 @@ const TaxUI = (() => {
     const ORDER = [
       'unknown_acquisition','negative_balance','missing_sek_price','unknown_asset',
       'duplicate','ambiguous_swap','unmatched_transfer','outlier','split_trade',
+      'stable_source_unknown',  // stablecoin with price resolved but source unknown
       'unknown_contract','unsupported_defi','special_transaction','bridge_review',
       'unclassified','received_not_sold','spam_token',
     ];

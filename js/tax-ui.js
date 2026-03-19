@@ -2000,10 +2000,15 @@ const TaxUI = (() => {
     },
     revolut: {
       icon: '🟤', name: 'Revolut', steps: [
-        '1. Öppna Revolut-appen', '2. Gå till Account → Statement',
-        '3. Välj "Excel" eller "CSV" → välj hela perioden',
-        '4. Ladda ned och ladda upp nedan',
-      ], warning: 'Exportera kryptotransaktioner under Crypto-fliken separat om tillgängligt.'
+        '📊 Trading Account Statement (rekommenderas):',
+        '1. Öppna Revolut → Wealth → Crypto',
+        '2. Tryck ⋮ → Statements → Trading account statement',
+        '3. Välj hela skatteåret → Export CSV',
+        '— eller —',
+        '📄 Kontoutdrag (standardexport):',
+        '1. Öppna Revolut-appen → Account → Statement',
+        '2. Välj "CSV" → välj hela perioden → Export',
+      ], warning: 'Båda formaten stöds. Trading Account Statement ger bäst skattedata med köp + sälj per lot.'
     },
     mexc: {
       icon: '🟩', name: 'MEXC', steps: [

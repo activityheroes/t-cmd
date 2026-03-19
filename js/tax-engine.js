@@ -5408,15 +5408,31 @@ const TaxEngine = (() => {
     return out;
   }
 
-  // Revolut exports a CSV with columns:
-  // Type, Product, Started Date, Completed Date, Description,
-  // Amount, Currency, Fiat amount, Fiat amount (inc. fees), Fee, Base currency, State, Balance
+  // Revolut exports two distinct CSV formats:
+  //
+  // FORMAT A — Standard app export (account statement):
+  //   Type, Product, Started Date, Completed Date, Description,
+  //   Amount, Currency, Fiat amount, Fiat amount (inc. fees), Fee, Base currency, State, Balance
+  //
+  // FORMAT B — Trading Account Statement (gain/loss report):
+  //   Date acquired, Date sold, Symbol, Quantity, Cost basis,
+  //   Gross proceeds, Gross PnL, Fees, Net PnL, Currency
+  //   Each row = one disposed lot. We generate a BUY + SELL pair per row
+  //   so the engine's genomsnittsmetoden can track cost basis correctly.
+  //
   function parseRevolutCSV(text, accountId) {
     const rows = parseCSV(text);
+    if (!rows.length) return [];
+
+    // Detect format by checking for Trading Statement column
+    const isTradingStatement = 'Date acquired' in rows[0] && 'Date sold' in rows[0];
+    if (isTradingStatement) return _parseRevolutTradingStatement(rows, accountId);
+
+    // ── Format A: Standard Revolut CSV ──────────────────────────────────────
     const out = [];
     for (const r of rows) {
       const state = (r['State'] || '').toUpperCase();
-      if (state !== 'COMPLETED') continue; // skip pending/failed
+      if (state !== 'COMPLETED') continue;
       const type = (r['Type'] || '').toUpperCase();
       const sym = (r['Currency'] || '').toUpperCase();
       const amount = Math.abs(parseFloat(r['Amount'] || 0));
@@ -5426,9 +5442,8 @@ const TaxEngine = (() => {
       const fee = Math.abs(parseFloat(r['Fee'] || 0));
       const baseCcy = (r['Base currency'] || '').toUpperCase();
       const fiatSEK = (baseCcy === 'SEK' || baseCcy === '') ? fiat : 0;
-      const isStable = STABLES.has(sym);
       let txType = 'receive';
-      if (type === 'EXCHANGE') txType = amount > 0 ? 'trade' : 'trade';
+      if (type === 'EXCHANGE') txType = 'trade';
       else if (type === 'TRANSFER' && parseFloat(r['Amount'] || 0) < 0) txType = 'send';
       else if (type === 'TRANSFER') txType = 'receive';
       else if (type === 'CARD_PAYMENT' || type === 'PAYMENT') txType = 'sell';
@@ -5445,6 +5460,71 @@ const TaxEngine = (() => {
         notes: `Revolut ${r['Type'] || ''} — ${r['Description'] || ''}`.trim(),
       }, accountId, 'revolut_csv'));
     }
+    return out;
+  }
+
+  // ── Format B parser ──────────────────────────────────────────────────────
+  // Each row = one disposed lot from Revolut's FIFO matching.
+  // We emit a BUY at dateAcquired + SELL at dateSold so the engine sees
+  // both sides. Financial fields are always in USD (Currency column).
+  // Fees are charged on the sell side.
+  function _parseRevolutTradingStatement(rows, accountId) {
+    const out = [];
+    let idx = 0;
+
+    for (const r of rows) {
+      idx++;
+      const sym      = (r['Symbol'] || '').toUpperCase().trim();
+      const qty      = parseFloat(r['Quantity'] || 0);
+      const dateAcq  = (r['Date acquired'] || '').trim();
+      const dateSold = (r['Date sold'] || '').trim();
+
+      if (!sym || qty === 0 || !dateAcq || !dateSold) continue;
+
+      const costBasisUSD     = parseFloat(r['Cost basis'] || 0);
+      const grossProceedsUSD = parseFloat(r['Gross proceeds'] || 0);
+      const feeUSD           = parseFloat(r['Fees'] || 0);
+      const quoteCcy         = (r['Currency'] || 'USD').toUpperCase();
+
+      const buyPrice  = costBasisUSD  > 0 && qty > 0 ? costBasisUSD  / qty : 0;
+      const sellPrice = grossProceedsUSD > 0 && qty > 0 ? grossProceedsUSD / qty : 0;
+
+      // Use idx in txHash so duplicate dates+quantities don't collide
+      // (Revolut splits one purchase into multiple FIFO lots)
+
+      // BUY — establishes the acquisition for genomsnittsmetoden
+      out.push(normalizeTransaction({
+        txHash:          `rev_buy_${sym}_${dateAcq.replace(/[^0-9]/g,'')}_${idx}`,
+        date:            dateAcq,
+        type:            'buy',
+        assetSymbol:     sym,
+        amount:          qty,
+        inAsset:         quoteCcy,
+        inAmount:        costBasisUSD,
+        rawTradePrice:   buyPrice,
+        rawTradeCurrency: quoteCcy,
+        feeSEK:          0,          // fees charged on sell side
+        needsReview:     false,
+        notes: `Revolut buy ${qty} ${sym} @ ${buyPrice.toFixed(4)} ${quoteCcy} (trading statement lot ${idx})`,
+      }, accountId, 'revolut_csv'));
+
+      // SELL — disposal event; triggers gain/loss calculation
+      out.push(normalizeTransaction({
+        txHash:          `rev_sell_${sym}_${dateSold.replace(/[^0-9]/g,'')}_${idx}`,
+        date:            dateSold,
+        type:            'sell',
+        assetSymbol:     sym,
+        amount:          qty,
+        inAsset:         quoteCcy,
+        inAmount:        grossProceedsUSD,
+        rawTradePrice:   sellPrice,
+        rawTradeCurrency: quoteCcy,
+        feeSEK:          feeUSD,     // USD amount; pipeline converts via FX
+        needsReview:     false,
+        notes: `Revolut sell ${qty} ${sym} @ ${sellPrice.toFixed(4)} ${quoteCcy} (trading statement lot ${idx})`,
+      }, accountId, 'revolut_csv'));
+    }
+
     return out;
   }
 

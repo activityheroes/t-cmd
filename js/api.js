@@ -156,7 +156,12 @@ const API = (() => {
             );
         },
         async search(query) {
-            return fetchJSON(`${DEXSCREENER}/dex/search?q=${encodeURIComponent(query)}`).then(r => r.pairs || []);
+            const q = String(query || '').trim();
+            if (!q || q.length < 2 || ['1:1','undefined','null','nan'].includes(q.toLowerCase()) || /^\d+:\d+$/.test(q)) {
+              console.warn(`[DexScreener/API] Skipped invalid search: "${query}"`);
+              return [];
+            }
+            return fetchJSON(`${DEXSCREENER}/dex/search?q=${encodeURIComponent(q)}`).then(r => r.pairs || []);
         }
     };
 

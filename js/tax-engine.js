@@ -1288,19 +1288,16 @@ const TaxEngine = (() => {
     }
   }
 
-  // ── GeckoTerminal — DEX OHLCV for on-chain tokens not in CoinGecko ──
-  // GeckoTerminal's direct API blocks browser requests from github.io (CORS/401).
-  // We route it through allorigins.win (open CORS proxy — only the token mint
-  // address is sent, no user data).  Falls back to null on any failure.
+  // ── CoinGecko Onchain OHLCV — DEX pool data for on-chain tokens ────────
+  // Uses CoinGecko's /onchain endpoint (powered by GeckoTerminal data) with
+  // the Demo API key as a query param. No CORS issues. Falls back gracefully.
+  // This replaces the old direct GeckoTerminal API which is now CORS-blocked.
+  // Treated as discovery-quality source, not tax-critical primary pricing.
   const GT_NETWORK_MAP = {
     solana: 'solana', eth: 'eth', base: 'base',
     arbitrum: 'arbitrum', optimism: 'optimism',
     polygon_pos: 'polygon_pos', avax: 'avax', bsc: 'bsc',
   };
-
-  // CORS proxy fallback for GeckoTerminal — corsproxy.io returns 403 from github.io.
-  // allorigins.win is more permissive for cross-origin read-only requests.
-  const GT_CORS_PROXY = 'https://api.allorigins.win/raw?url=';
 
   // Fetch OHLCV for a token by contract/mint address for a given year.
   // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
@@ -1309,23 +1306,39 @@ const TaxEngine = (() => {
     if (!gtNetwork || !address) return null;
     try {
       const beforeTs = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
-      const directUrl = `https://api.geckoterminal.com/api/v2/networks/${gtNetwork}/tokens/${address}/ohlcv/day?limit=365&before_timestamp=${beforeTs}`;
-      // Try direct first (works in dev / if GT re-enables CORS), then proxy
-      let r = await fetchWithTimeout(directUrl, 8000);
+      // Use CoinGecko Onchain endpoint (authenticated via CG Demo key)
+      const cgKey = typeof ChainAPIs !== 'undefined' && ChainAPIs.getKeys
+        ? ChainAPIs.getKeys().coingecko : null;
+      const sep = '?';
+      const keyParam = cgKey ? `&x_cg_demo_api_key=${encodeURIComponent(cgKey)}` : '';
+      const url = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/pools/${address}/ohlcv/day`
+        + `${sep}limit=365&before_timestamp=${beforeTs}&currency=usd${keyParam}`;
+      console.debug(`[CG Onchain] OHLCV: ${gtNetwork}/${address.slice(0, 8)}… year=${year}`);
+      const r = await fetchWithTimeout(url, 12000);
       if (!r || !r.ok) {
-        r = await fetchWithTimeout(GT_CORS_PROXY + encodeURIComponent(directUrl), 12000);
+        // Fallback: try token endpoint (some CG versions use /tokens/ not /pools/)
+        const url2 = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/tokens/${address}/ohlcv/day`
+          + `${sep}limit=365&before_timestamp=${beforeTs}&currency=usd${keyParam}`;
+        const r2 = await fetchWithTimeout(url2, 12000);
+        if (!r2 || !r2.ok) return null;
+        const json2 = await r2.json();
+        return parseOnchainOHLCV(json2);
       }
-      if (!r || !r.ok) return null;
       const json = await r.json();
-      const ohlcv = json?.data?.attributes?.ohlcv_list;
-      if (!Array.isArray(ohlcv) || !ohlcv.length) return null;
-      const map = new Map();
-      for (const [ts, , , , close] of ohlcv) {
-        const d = new Date(ts * 1000).toISOString().slice(0, 10);
-        if (typeof close === 'number' && close > 0) map.set(d, close);
-      }
-      return map.size > 0 ? map : null;
+      return parseOnchainOHLCV(json);
     } catch { return null; }
+  }
+
+  function parseOnchainOHLCV(json) {
+    // CoinGecko onchain API returns  { data: { attributes: { ohlcv_list: [ [ts, o, h, l, c, v], ... ] } } }
+    const ohlcv = json?.data?.attributes?.ohlcv_list;
+    if (!Array.isArray(ohlcv) || !ohlcv.length) return null;
+    const map = new Map();
+    for (const [ts, , , , close] of ohlcv) {
+      const d = new Date(ts * 1000).toISOString().slice(0, 10);
+      if (typeof close === 'number' && close > 0) map.set(d, close);
+    }
+    return map.size > 0 ? map : null;
   }
 
   // ── Cache key for GeckoTerminal data (separate namespace) ────
@@ -2447,20 +2460,14 @@ const TaxEngine = (() => {
       });
     }
 
-    // ── C: GeckoTerminal — DISABLED (2026-03) ───────────────────
-    // GeckoTerminal's API now returns 401 Unauthorized and blocks
-    // CORS from GitHub Pages. The allorigins.win proxy fallback is
-    // also dead. CoinGecko Demo contract-address lookups (Step B½)
-    // now cover these tokens.
-    //
-    // Existing GeckoTerminal cache entries in localStorage are still
-    // read by priceOneTxn (Level 3) — only the network fetch is skipped.
-    // To re-enable: remove the `if (false)` guard below once
-    // GeckoTerminal provides a CORS-friendly or authenticated tier.
-    const gtNeeded = new Map(); // kept for reference / future reactivation
-    const MAX_GT = 30;
+    // ── C: CoinGecko Onchain OHLCV — DEX data for on-chain tokens ────────
+    // Uses CoinGecko's /onchain endpoint (powered by GeckoTerminal data)
+    // with the Demo API key. For tokens like ROOT, DSYNC, NEURAL and any
+    // obscure DEX token not indexed in CoinGecko's standard coin list.
+    // Discovery-quality source — not for final K4 without verification.
+    const gtNeeded = new Map(); // "address|chain|year" → { address, chain, year }
+    const MAX_GT = 30; // Limit to avoid rate-limiting
 
-    if (false) { // ← DISABLED: GeckoTerminal API unreachable from browser
     for (const t of txns) {
       if (t.isInternalTransfer) continue;
       if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
@@ -2494,10 +2501,9 @@ const TaxEngine = (() => {
       if (onProgress) onProgress({
         step: 'price',
         pct: 85 + Math.round(gtNeeded.size > 0 ? 5 : 0),
-        msg: `GeckoTerminal: pricing ${address.slice(0, 8)}… (${chain})`,
+        msg: `CG Onchain: pricing ${address.slice(0, 8)}… (${chain})`,
       });
     }
-    } // end DISABLED block
 
     savePriceCache(updatedCache);
 
@@ -6955,12 +6961,22 @@ const TaxEngine = (() => {
     // DexScreener batch (above) already covers pump.fun tokens via pair lookup.
 
     // ── Path 2: resolve by 8-char symbol (legacy / fallback) ─────────────────
+    // Guard: validate search query before sending (prevents q=1:1, undefined, etc.)
+    const INVALID_QUERIES = new Set(['1:1', 'undefined', 'null', 'nan', 'unknown', 'n/a', '0']);
     const symNeeded = [...new Set(symbols)].filter(s => {
       const upper = s.toUpperCase();
-      return !TOKEN_DISPLAY_NAMES[upper] && !MINT_PREFIX_TO_SYM[upper] && !cache[upper];
+      if (TOKEN_DISPLAY_NAMES[upper] || MINT_PREFIX_TO_SYM[upper] || cache[upper]) return false;
+      // Validate: skip placeholder-like, ratio, or numeric strings
+      const trimmed = s.trim();
+      if (!trimmed || trimmed.length < 2) return false;
+      if (INVALID_QUERIES.has(trimmed.toLowerCase())) return false;
+      if (/^\d+:\d+$/.test(trimmed)) return false;          // ratio like "1:1"
+      if (/^\d+(\.\d+)?$/.test(trimmed)) return false;      // pure number
+      return true;
     });
     for (const sym of symNeeded.slice(0, 20)) {
       try {
+        console.debug(`[DexScreener/Tax] Search query: q="${sym}"`);
         const url = `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(sym)}`;
         const r = await fetchWithTimeout(url, 8000);
         if (!r?.ok) continue;

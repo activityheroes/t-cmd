@@ -100,6 +100,19 @@ const ChainAPIs = (() => {
   }
 
   // ── DexScreener ──────────────────────────────────────────────
+  /** Validate a DexScreener search query before sending */
+  function isValidDexSearchQuery(q) {
+    if (!q) return false;
+    const s = String(q).trim();
+    if (!s || s.length < 2) return false;
+    if (['1:1', 'undefined', 'null', 'nan', 'unknown', 'n/a', '0'].includes(s.toLowerCase())) return false;
+    // Reject ratio-like patterns (e.g. "1:1", "2:3", "10:5")
+    if (/^\d+:\d+$/.test(s)) return false;
+    // Reject pure numeric strings (not valid token queries)
+    if (/^\d+(\.\d+)?$/.test(s)) return false;
+    return true;
+  }
+
   /** Get all pairs for a token address (any chain) */
   async function dsToken(address) {
     return apiFetch(`${DS_BASE}/latest/dex/tokens/${address}`);
@@ -110,8 +123,13 @@ const ChainAPIs = (() => {
     return apiFetch(`${DS_BASE}/latest/dex/pairs/${chain}/${pairAddress}`);
   }
 
-  /** Text search across DexScreener */
+  /** Text search across DexScreener — guarded + logged */
   async function dsSearch(query) {
+    if (!isValidDexSearchQuery(query)) {
+      console.warn(`[DexScreener] Skipped invalid search query: "${query}"`);
+      return null;
+    }
+    console.debug(`[DexScreener] Search: q="${query}"`);
     return apiFetch(`${DS_BASE}/latest/dex/search?q=${encodeURIComponent(query)}`);
   }
 
@@ -401,7 +419,7 @@ const ChainAPIs = (() => {
     // Config
     getKeys, setKey, loadKeys,
     // DexScreener
-    dsToken, dsPair, dsSearch, getMainPair,
+    dsToken, dsPair, dsSearch, getMainPair, isValidDexSearchQuery,
     // Birdeye
     beTokenSecurity, beTokenOverview, beTopHolders, beTrades, bePriceHistory,
     // Helius

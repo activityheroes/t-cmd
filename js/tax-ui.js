@@ -51,6 +51,12 @@ const TaxUI = (() => {
     collapsedGroups: new Set(['received_not_sold']),
     // Review page: active tab filter
     reviewTab: 'blockers',  // 'blockers' | 'warnings' | 'info' | 'all'
+    // Review page: multi-select state
+    reviewSelectedIds: new Set(),          // txn IDs selected via checkboxes
+    reviewAssetCollapsed: new Set(),       // keys "reason:subType:sym" — asset sub-headers collapsed by default
+    reviewGroupExpanded: new Set(),        // keys for sub-groups expanded beyond row limit
+    // Review page: pending "apply to similar" toast
+    pendingSimilarAction: null,            // { ids: Set, action: string, label: string }
   };
 
   let _pendingCSVText = null;
@@ -2827,20 +2833,42 @@ const TaxUI = (() => {
 
   // ── Suggested-action button for a single review row ─────────
   function suggestedActionBtn(issue) {
-    const { txn, suggestedAction, reason } = issue;
+    const { txn, suggestedAction, reason, resolutionType } = issue;
     if (reason === 'received_not_sold') {
-      return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.markReviewed('${txn.id}')" title="Ignore — this token was never sold, no K4 impact">Ignore</button>`;
+      return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.markReviewed('${txn.id}')" title="Ignore — this token was never sold, no K4 impact">Ignorera</button>`;
+    }
+    // Classify-first ordering: classification actions are primary, price entry is last resort
+    if (resolutionType === 'spam_candidate' || suggestedAction === 'mark_spam') {
+      return `<span style="display:inline-flex;gap:4px;flex-wrap:wrap">
+        <button class="tax-btn tax-btn-xs" style="background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.25);font-weight:600" onclick="TaxUI.markSpam('${txn.id}')" title="Spam/värdelös token — nollvärde">🗑 Spam</button>
+        <button class="tax-btn tax-btn-xs tax-btn-ghost" style="font-size:10px;opacity:.6" onclick="TaxUI.editTx('${txn.id}')" title="Ange pris manuellt">💰</button>
+      </span>`;
+    }
+    if (resolutionType === 'internal_transfer_candidate') {
+      return `<span style="display:inline-flex;gap:4px;flex-wrap:wrap">
+        <button class="tax-btn tax-btn-xs" style="background:rgba(96,165,250,.12);color:#60a5fa;border:1px solid rgba(96,165,250,.25);font-weight:600" onclick="TaxUI.openAddAccountModal()" title="Importera källplånbok">↔ Transfer</button>
+        <button class="tax-btn tax-btn-xs tax-btn-ghost" style="font-size:10px;opacity:.6" onclick="TaxUI.editTx('${txn.id}')" title="Ange pris manuellt">💰</button>
+      </span>`;
+    }
+    if (resolutionType === 'airdrop_candidate') {
+      return `<span style="display:inline-flex;gap:4px;flex-wrap:wrap">
+        <button class="tax-btn tax-btn-xs" style="background:rgba(129,140,248,.12);color:#818cf8;border:1px solid rgba(129,140,248,.25);font-weight:600" onclick="TaxUI.bulkClassifySelected('airdrop')" title="Klassificera som airdrop">🪂 Airdrop</button>
+        <button class="tax-btn tax-btn-xs tax-btn-ghost" style="font-size:10px;opacity:.6" onclick="TaxUI.editTx('${txn.id}')" title="Ange pris manuellt">💰</button>
+      </span>`;
+    }
+    if (resolutionType === 'opening_balance_candidate') {
+      return `<span style="display:inline-flex;gap:4px;flex-wrap:wrap">
+        <button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.25);font-weight:600" onclick="TaxUI.editTx('${txn.id}')" title="Skapa öppningssaldo">📅 Öppningssaldo</button>
+      </span>`;
     }
     switch (suggestedAction) {
       case 'rerun_pipeline':
-        return `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.triggerPipeline()" title="Has a priced swap partner — re-run pipeline to resolve">Re-run pipeline</button>`;
+        return `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.triggerPipeline()" title="Har prissatt swap-partner — kör om pipeline">Kör pipeline</button>`;
       case 'batch_price_lookup':
-        return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.bulkShowPriceSearch('missing_sek_price')" title="Known token — fetch historical price from API">Fetch price</button>`;
-      case 'mark_spam':
-        return `<button class="tax-btn tax-btn-xs" style="background:rgba(107,114,128,.1);color:#9ca3af;border:1px solid rgba(107,114,128,.2)" onclick="TaxUI.markSpam('${txn.id}')" title="Looks like spam or worthless token — set to zero value">Mark spam</button>`;
+        return `<button class="tax-btn tax-btn-xs" style="background:rgba(99,102,241,.12);color:#818cf8;border:1px solid rgba(99,102,241,.2)" onclick="TaxUI.bulkShowPriceSearch('missing_sek_price')" title="Känd token — hämta historiskt pris från API">Hämta pris</button>`;
       case 'enter_price':
       default:
-        return `<button class="tax-btn tax-btn-xs tax-btn-primary" onclick="TaxUI.editTx('${txn.id}')" title="Enter SEK price manually">Enter price</button>`;
+        return `<button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${txn.id}')" title="Ange SEK-pris manuellt" style="opacity:.8">💰 Ange pris</button>`;
     }
   }
 
@@ -2905,9 +2933,15 @@ const TaxUI = (() => {
 
     const guidedId = `guided_${txn.id}`;
 
+    const isSelectedAcq = S.reviewSelectedIds.has(txn.id);
     return `
-    <div class="tax-review-item" style="flex-direction:column;align-items:stretch">
+    <div class="tax-review-item" style="flex-direction:column;align-items:stretch;${isSelectedAcq ? 'background:rgba(99,102,241,.06);border-left:2px solid #818cf8;' : ''}">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <label style="flex-shrink:0;cursor:pointer;padding:0 6px 0 4px;align-self:flex-start;padding-top:2px">
+          <input type="checkbox" ${isSelectedAcq ? 'checked' : ''}
+            onchange="TaxUI.toggleSelectReview('${txn.id}',this.checked)"
+            style="width:14px;height:14px;accent-color:#818cf8;cursor:pointer">
+        </label>
         <div class="tax-ri-left" style="flex:1;min-width:0">
           ${renderTokenBadge(displaySym, richName !== displaySym ? richName : null, tokenImage, txn.contractAddress, 'sm')}
           <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
@@ -2988,9 +3022,15 @@ const TaxUI = (() => {
         <a href="${geckoUrl}" target="_blank" rel="noopener" class="tax-explorer-link tax-explorer-link--secondary" style="font-size:10px;white-space:nowrap">CoinGecko ↗</a>
       </div>` : '';
 
+    const isSelected = S.reviewSelectedIds.has(txn.id);
     return `
-    <div class="tax-review-item" style="flex-direction:column;align-items:stretch">
+    <div class="tax-review-item" style="flex-direction:column;align-items:stretch;${isSelected ? 'background:rgba(99,102,241,.06);border-left:2px solid #818cf8;' : ''}">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <label style="flex-shrink:0;cursor:pointer;padding:0 6px 0 4px;align-self:flex-start;padding-top:2px">
+          <input type="checkbox" ${isSelected ? 'checked' : ''}
+            onchange="TaxUI.toggleSelectReview('${txn.id}',this.checked)"
+            style="width:14px;height:14px;accent-color:#818cf8;cursor:pointer">
+        </label>
         <div class="tax-ri-left" style="flex:1;min-width:0">
           <span class="tax-asset-sym" title="${txn.assetSymbol || ''}">${renderTokenBadge(displaySym, richName !== displaySym ? richName : null, tokenImage, mintAddr, 'sm')}</span>
           <span class="tax-mono" style="font-size:12px">${TaxEngine.formatCrypto(txn.amount, 6)}</span>
@@ -3320,6 +3360,23 @@ const TaxUI = (() => {
             </div>`;
           })()}
 
+          ${(() => {
+            const n = S.reviewSelectedIds.size;
+            if (n === 0) return '';
+            const btn = (icon, label, type, color) =>
+              `<button onclick="TaxUI.bulkClassifySelected('${type}')" style="padding:5px 10px;border-radius:6px;border:1px solid ${color}33;background:${color}15;color:${color};font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap">${icon} ${label}</button>`;
+            return `<div style="position:sticky;top:48px;z-index:50;background:rgba(15,23,42,.97);backdrop-filter:blur(8px);border:1px solid rgba(99,102,241,.35);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;box-shadow:0 4px 24px rgba(0,0,0,.4)">
+              <span style="font-size:13px;font-weight:600;color:#818cf8;flex-shrink:0">${n} markerad${n !== 1 ? 'e' : ''}</span>
+              ${btn('↔', 'Intern transfer', 'internal_transfer', '#60a5fa')}
+              ${btn('🪂', 'Airdrop', 'airdrop', '#818cf8')}
+              ${btn('📅', 'Öppningssaldo', 'opening_balance', '#fbbf24')}
+              ${btn('🗑', 'Spam/uteslut', 'spam', '#4ade80')}
+              <span style="flex:1"></span>
+              <button onclick="TaxUI.bulkPriceSelected()" style="padding:5px 10px;border-radius:6px;border:1px solid rgba(251,191,36,.25);background:rgba(251,191,36,.08);color:#fbbf24;font-size:12px;cursor:pointer;white-space:nowrap">💰 Ange pris</button>
+              <button onclick="TaxUI.clearReviewSelection()" style="padding:5px 10px;border-radius:6px;border:1px solid rgba(148,163,184,.15);background:transparent;color:#64748b;font-size:12px;cursor:pointer;white-space:nowrap">✕ Avmarkera allt</button>
+            </div>`;
+          })()}
+
           <div class="tax-review-groups">
             ${groups.map(({ reason, meta, items, subGroups }) => {
               const isK4Critical = items.some(i => i.isK4Blocker) || ['negative_balance','unknown_acquisition'].includes(reason);
@@ -3393,38 +3450,102 @@ const TaxUI = (() => {
                   <span style="display:inline-flex;gap:6px;margin-left:8px">${extraBulk}${bulkActions}</span>
                 </div>
                 <div class="tax-review-items">
-                  ${subGroups && subGroups.length > 0 && reason === 'unknown_acquisition'
-                    ? subGroups.map(sg => {
+                  ${(() => {
+                    const isAssetGrouped = (reason === 'unknown_acquisition' || reason === 'missing_sek_price')
+                      && subGroups && subGroups.length > 0;
+
+                    // Helper: render rows with row-limit + expand button
+                    const renderRowsWithLimit = (sgItems, renderRow, groupKey) => {
+                      const ROW_LIMIT = 10;
+                      const isExpanded = S.reviewGroupExpanded.has(groupKey);
+                      const visible = isExpanded ? sgItems : sgItems.slice(0, ROW_LIMIT);
+                      const remaining = sgItems.length - visible.length;
+                      return visible.map(renderRow).join('')
+                        + (remaining > 0
+                          ? `<button onclick="TaxUI.expandReviewGroup(${JSON.stringify(groupKey)})"
+                              style="width:100%;padding:8px;margin:4px 0;background:rgba(99,102,241,.06);border:1px dashed rgba(99,102,241,.2);border-radius:6px;color:#818cf8;font-size:12px;cursor:pointer;text-align:center">
+                              Visa ${remaining} fler →
+                            </button>`
+                          : '');
+                    };
+
+                    if (isAssetGrouped) {
+                      return subGroups.map(sg => {
                         const highImpact = sg.items.filter(i => i.impactLevel === 'high').length;
                         const medImpact  = sg.items.filter(i => i.impactLevel === 'medium').length;
                         const lowImpact  = sg.items.filter(i => i.impactLevel === 'low').length;
                         const autoCount  = sg.items.filter(i => i.autoResolvable).length;
+                        const nAssets    = sg.assetGroups ? sg.assetGroups.length : 0;
+                        const renderRow  = reason === 'unknown_acquisition'
+                          ? (issue => renderAcquisitionRow(issue))
+                          : (issue => renderReviewRow(issue));
+
+                        // Bulk action button for this sub-group
+                        const sgBulkType = reason === 'unknown_acquisition'
+                          ? ({ spam_candidate:'spam', airdrop_candidate:'airdrop',
+                               internal_transfer_candidate:'internal_transfer',
+                               opening_balance_candidate:'opening_balance' }[sg.key] || null)
+                          : null;
+                        const sgBulkBtn = sgBulkType
+                          ? `<button onclick="TaxUI.selectAllInGroup('${reason}','${sg.key}')" style="margin-left:auto;font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid rgba(148,163,184,.2);background:transparent;color:#94a3b8;cursor:pointer">Välj alla</button>`
+                          : '';
+
+                        const assetGroupsHtml = sg.assetGroups && nAssets > 1
+                          ? sg.assetGroups.map(ag => {
+                              const agKey = `${reason}:${sg.key}:${ag.sym}`;
+                              const isCollapsed = S.reviewAssetCollapsed.has(agKey);
+                              return `
+                              <div style="border-left:2px solid rgba(148,163,184,.1);margin-left:4px">
+                                <div onclick="TaxUI.toggleAssetGroup(${JSON.stringify(agKey)})"
+                                     style="display:flex;align-items:center;gap:8px;padding:5px 10px;cursor:pointer;background:rgba(148,163,184,.03);border-bottom:1px solid rgba(148,163,184,.06)">
+                                  <span style="font-size:10px;color:#64748b">${isCollapsed ? '▶' : '▼'}</span>
+                                  <span style="font-size:12px;font-weight:600;color:#e2e8f0">${ag.sym}</span>
+                                  <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(0,0,0,.25);color:#64748b">${ag.items.length} rad${ag.items.length !== 1 ? 'er' : ''}</span>
+                                  <button onclick="event.stopPropagation();TaxUI.selectAllInAssetGroup('${reason}','${sg.key}','${ag.sym}')"
+                                    style="font-size:10px;padding:1px 7px;border-radius:4px;border:1px solid rgba(148,163,184,.15);background:transparent;color:#64748b;cursor:pointer">Välj alla</button>
+                                  ${sgBulkType ? `<button onclick="event.stopPropagation();(function(){TaxUI.selectAllInAssetGroup('${reason}','${sg.key}','${ag.sym}');TaxUI.bulkClassifySelected('${sgBulkType}');})()"
+                                    style="font-size:10px;padding:1px 7px;border-radius:4px;border:1px solid rgba(74,222,128,.2);background:rgba(74,222,128,.07);color:#4ade80;cursor:pointer">Alla ${ag.sym} → ${sgBulkType === 'spam' ? 'spam' : sgBulkType}</button>` : ''}
+                                </div>
+                                ${isCollapsed ? '' : renderRowsWithLimit(ag.items, renderRow, agKey)}
+                              </div>`;
+                            }).join('')
+                          : renderRowsWithLimit(sg.items, renderRow, `${reason}:${sg.key}`);
+
                         return `
                         <div style="padding:8px 12px 4px;background:rgba(15,23,42,.5);border-bottom:1px solid rgba(148,163,184,.08);border-left:3px solid ${sg.color || '#64748b'}">
                           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                             <span style="font-size:12px;font-weight:600;color:${sg.color || '#e2e8f0'}">${sg.label}</span>
-                            <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,.3);color:#94a3b8">${sg.items.length} rad${sg.items.length !== 1 ? 'er' : ''}</span>
+                            <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,.3);color:#94a3b8">${sg.items.length} rad${sg.items.length !== 1 ? 'er' : ''}${nAssets > 1 ? `, ${nAssets} tillgångar` : ''}</span>
                             ${autoCount > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(99,102,241,.12);color:#818cf8">✨ ${autoCount} auto-lösbar${autoCount !== 1 ? 'a' : ''}</span>` : ''}
                             ${highImpact > 0 ? `<span style="font-size:10px;color:#f87171">🔴 ${highImpact} hög</span>` : ''}
                             ${medImpact > 0 ? `<span style="font-size:10px;color:#fbbf24">🟡 ${medImpact} medel</span>` : ''}
                             ${lowImpact > 0 ? `<span style="font-size:10px;color:#4ade80">🟢 ${lowImpact} låg</span>` : ''}
+                            ${sgBulkBtn}
                           </div>
                           ${sg.tip ? `<div style="font-size:10px;color:#64748b;margin-top:2px;margin-bottom:2px">${sg.tip}</div>` : ''}
                         </div>
-                        ${sg.items.map(issue => renderAcquisitionRow(issue)).join('')}
-                      `;
-                      }).join('')
-                    : subGroups && subGroups.length > 1
-                    ? subGroups.map(sg => `
+                        ${assetGroupsHtml}`;
+                      }).join('');
+                    }
+
+                    // Non-asset-grouped: flat subGroups (other reasons)
+                    if (subGroups && subGroups.length > 1) {
+                      return subGroups.map(sg => `
                         <div style="padding:6px 12px 4px;background:rgba(148,163,184,.04);border-bottom:1px solid rgba(148,163,184,.08)">
                           <span style="font-size:11px;font-weight:600;color:#64748b">${sg.label}</span>
                           <span style="font-size:10px;color:#475569;margin-left:6px">${sg.items.length} transaction${sg.items.length !== 1 ? 's' : ''}</span>
                           ${sg.tip ? `<span style="font-size:10px;color:#475569;margin-left:8px">· ${sg.tip}</span>` : ''}
                         </div>
-                        ${sg.items.map(issue => renderReviewRow(issue)).join('')}
-                      `).join('')
-                    : items.map(issue => reason === 'unknown_acquisition' ? renderAcquisitionRow(issue) : renderReviewRow(issue)).join('')
-                  }
+                        ${renderRowsWithLimit(sg.items, issue => renderReviewRow(issue), `${reason}:${sg.key}`)}
+                      `).join('');
+                    }
+
+                    // Flat list with row limit
+                    const renderRow = reason === 'unknown_acquisition'
+                      ? (issue => renderAcquisitionRow(issue))
+                      : (issue => renderReviewRow(issue));
+                    return renderRowsWithLimit(items, renderRow, reason);
+                  })()}
                 </div>`}
               </div>`;
             }).join('')}
@@ -3432,6 +3553,18 @@ const TaxUI = (() => {
         `}
 
         ${S.editTxId ? renderEditModal() : ''}
+
+        ${S.pendingSimilarAction ? (() => {
+          const { ids, label } = S.pendingSimilarAction;
+          return `<div style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:200;
+            background:rgba(15,23,42,.97);backdrop-filter:blur(8px);border:1px solid rgba(99,102,241,.4);
+            border-radius:12px;padding:12px 18px;display:flex;align-items:center;gap:12px;
+            box-shadow:0 8px 32px rgba(0,0,0,.5);white-space:nowrap">
+            <span style="font-size:13px;color:#e2e8f0">Tillämpa på <strong style="color:#818cf8">${ids.size}</strong> liknande rader?</span>
+            <button onclick="TaxUI.applySimilarAction()" style="padding:5px 12px;border-radius:6px;border:1px solid rgba(99,102,241,.4);background:rgba(99,102,241,.2);color:#818cf8;font-size:12px;font-weight:600;cursor:pointer">Ja, tillämpa</button>
+            <button onclick="TaxUI.dismissSimilarToast()" style="padding:5px 10px;border-radius:6px;border:1px solid rgba(148,163,184,.15);background:transparent;color:#64748b;font-size:12px;cursor:pointer">Avfärda</button>
+          </div>`;
+        })() : ''}
       </div>
     `;
   }
@@ -3452,7 +3585,20 @@ const TaxUI = (() => {
       groups[issue.reason].items.push(issue);
       if (issue.isK4Blocker) groups[issue.reason].hasK4 = true;
     }
-    // For missing_sek_price, build sub-groups by priceBlockReason
+    // Helper: build asset-level sub-groups within a subGroup
+    function buildAssetSubGroups(items) {
+      const assetMap = {};
+      for (const issue of items) {
+        const sym = ((issue.txn?.assetSymbol || issue.asset || issue.symbol || '?')).toUpperCase();
+        if (!assetMap[sym]) assetMap[sym] = [];
+        assetMap[sym].push(issue);
+      }
+      return Object.entries(assetMap)
+        .sort(([,a],[,b]) => b.length - a.length) // most rows first
+        .map(([sym, asItems]) => ({ sym, items: asItems }));
+    }
+
+    // For missing_sek_price, build sub-groups by priceBlockReason + asset
     if (groups.missing_sek_price) {
       const subMap = {};
       for (const issue of groups.missing_sek_price.items) {
@@ -3465,9 +3611,12 @@ const TaxUI = (() => {
       groups.missing_sek_price.subGroups = Object.entries(subMap).sort(([a],[b]) => {
         const ai = SUB_ORDER.indexOf(a), bi = SUB_ORDER.indexOf(b);
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-      }).map(([key, items]) => ({ key, ...BLOCK_REASON_LABELS[key], items }));
+      }).map(([key, items]) => ({
+        key, ...BLOCK_REASON_LABELS[key], items,
+        assetGroups: buildAssetSubGroups(items),
+      }));
     }
-    // For unknown_acquisition, build sub-groups by resolutionType
+    // For unknown_acquisition, build sub-groups by resolutionType + asset
     const RESOLUTION_LABELS = {
       spam_candidate:              { label: '🗑️ Troligen spam',            color: '#4ade80', tip: 'Auto-lösbar — exkluderas med 0 kr kostnadsbas.' },
       airdrop_candidate:           { label: '🪂 Troligen airdrop',         color: '#818cf8', tip: 'Kan omklassificeras — kostnadsbas = FMV vid mottagning.' },
@@ -3486,7 +3635,10 @@ const TaxUI = (() => {
       groups.unknown_acquisition.subGroups = Object.entries(subMap).sort(([a],[b]) => {
         const ai = RES_ORDER.indexOf(a), bi = RES_ORDER.indexOf(b);
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-      }).map(([key, items]) => ({ key, ...(RESOLUTION_LABELS[key] || { label: key, color: '#94a3b8', tip: '' }), items }));
+      }).map(([key, items]) => ({
+        key, ...(RESOLUTION_LABELS[key] || { label: key, color: '#94a3b8', tip: '' }), items,
+        assetGroups: buildAssetSubGroups(items),
+      }));
     }
     // Return in priority order
     const ORDER = [
@@ -4667,6 +4819,7 @@ const TaxUI = (() => {
 
   // Mark a single transaction as spam + zero value (non-destructive — keeps the record)
   function markSpam(id) {
+    const txn = TaxEngine.getTransactions().find(t => t.id === id);
     TaxEngine.updateTransaction(id, {
       category: 'spam',
       priceSEKPerUnit: 0, costBasisSEK: 0,
@@ -4674,6 +4827,15 @@ const TaxUI = (() => {
       needsReview: false, reviewReason: 'spam_token', userReviewed: true,
     });
     S.taxResult = null;
+    // Check for similar rows and show toast
+    if (txn) {
+      const similar = findSimilarRows(Object.assign({}, txn, { _reviewReason: 'spam_token' }));
+      if (similar.length >= 2) {
+        const ids = similar.map(s => (s.txn?.id || s.id)).filter(Boolean);
+        showSimilarToast(ids, 'spam', 'spam');
+        return; // render called inside showSimilarToast
+      }
+    }
     render();
   }
 
@@ -5037,6 +5199,151 @@ const TaxUI = (() => {
     if (!S.collapsedGroups) S.collapsedGroups = new Set(['received_not_sold']);
     if (S.collapsedGroups.has(reason)) S.collapsedGroups.delete(reason);
     else S.collapsedGroups.add(reason);
+    render();
+  }
+
+  // ── Review page multi-select handlers ──────────────────────
+  function toggleSelectReview(id, checked) {
+    if (checked) S.reviewSelectedIds.add(id);
+    else S.reviewSelectedIds.delete(id);
+    render();
+  }
+
+  function selectAllInGroup(reason, resType) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult || null);
+    for (const iss of issues) {
+      if (iss.reason !== reason) continue;
+      if (resType && (iss.resolutionType || 'manual_review_required') !== resType) continue;
+      if (iss.txn?.id) S.reviewSelectedIds.add(iss.txn.id);
+      else if (iss.id) S.reviewSelectedIds.add(iss.id);
+    }
+    render();
+  }
+
+  function selectAllInAssetGroup(reason, resType, sym) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult || null);
+    for (const iss of issues) {
+      if (iss.reason !== reason) continue;
+      if (resType && (iss.resolutionType || iss.priceBlockReason || 'manual_review_required') !== resType) continue;
+      const txnSym = (iss.txn?.assetSymbol || iss.asset || iss.symbol || '').toUpperCase();
+      if (txnSym !== sym.toUpperCase()) continue;
+      if (iss.txn?.id) S.reviewSelectedIds.add(iss.txn.id);
+      else if (iss.id) S.reviewSelectedIds.add(iss.id);
+    }
+    render();
+  }
+
+  function clearReviewSelection() {
+    S.reviewSelectedIds.clear();
+    render();
+  }
+
+  function toggleAssetGroup(key) {
+    if (S.reviewAssetCollapsed.has(key)) S.reviewAssetCollapsed.delete(key);
+    else S.reviewAssetCollapsed.add(key);
+    render();
+  }
+
+  function expandReviewGroup(groupKey) {
+    S.reviewGroupExpanded.add(groupKey);
+    render();
+  }
+
+  function bulkClassifySelected(type) {
+    const ids = [...S.reviewSelectedIds];
+    if (ids.length === 0) return;
+    const typeLabels = {
+      internal_transfer: 'Intern transfer',
+      airdrop: 'Airdrop',
+      opening_balance: 'Öppningssaldo',
+      spam: 'Spam/uteslut',
+    };
+    const label = typeLabels[type] || type;
+    const confirmMsg = ids.length > 5
+      ? `Klassificera ${ids.length} markerade transaktioner som "${label}"?`
+      : null;
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    const allTxns = TaxEngine.getTransactions();
+    let updated = 0;
+    for (const id of ids) {
+      const t = allTxns.find(x => x.id === id);
+      if (!t) continue;
+      if (type === 'internal_transfer') {
+        t.resolutionCandidateType = 'internal_transfer';
+        t.isInternalTransfer = true;
+        t.reviewedAt = Date.now();
+      } else if (type === 'airdrop') {
+        t.resolutionCandidateType = 'airdrop';
+        t.category = 'income';
+        t.reviewedAt = Date.now();
+      } else if (type === 'opening_balance') {
+        t.resolutionCandidateType = 'opening_balance';
+        t.openingBalance = true;
+        t.reviewedAt = Date.now();
+      } else if (type === 'spam') {
+        t.isSpam = true;
+        t.resolutionCandidateType = 'spam';
+        t.reviewedAt = Date.now();
+      }
+      updated++;
+    }
+    TaxEngine.saveTransactions(allTxns);
+    S.reviewSelectedIds.clear();
+    showTaxToast('✅', `${updated} transaktioner klassificerade`, `Markerade som "${label}". Kör om pipeline för att se effekten.`, 'success');
+    render();
+  }
+
+  function bulkPriceSelected() {
+    const ids = [...S.reviewSelectedIds];
+    if (ids.length === 0) return;
+    // Delegate to existing batch price lookup UI if available
+    if (typeof bulkShowPriceSearch === 'function') {
+      bulkShowPriceSearch('missing_sek_price');
+    } else {
+      showTaxToast('ℹ️', 'Ange pris', `${ids.length} transaktioner valda — öppna prissökning per tillgång nedan.`, 'info');
+    }
+  }
+
+  // ── "Apply to similar" toast ─────────────────────────────────
+  function findSimilarRows(txn) {
+    const issues = TaxEngine.getReviewIssues(null, S.taxResult || null);
+    const sym = (txn.assetSymbol || '').toUpperCase();
+    const amt = txn.amount || txn.quantity || 0;
+    return issues.filter(iss => {
+      const t = iss.txn || iss;
+      if ((t.id || iss.id) === txn.id) return false;
+      const tSym = (t.assetSymbol || iss.asset || iss.symbol || '').toUpperCase();
+      if (tSym !== sym) return false;
+      if (iss.reason !== (txn._reviewReason || iss.reason)) return false;
+      // amount within 2 orders of magnitude
+      const tAmt = t.amount || t.quantity || 0;
+      if (amt > 0 && tAmt > 0) {
+        const ratio = Math.max(amt, tAmt) / Math.min(amt, tAmt);
+        if (ratio > 100) return false;
+      }
+      return true;
+    });
+  }
+
+  function showSimilarToast(similarIds, action, label) {
+    S.pendingSimilarAction = { ids: new Set(similarIds), action, label };
+    render();
+    // Auto-dismiss after 6s
+    setTimeout(() => {
+      if (S.pendingSimilarAction) { S.pendingSimilarAction = null; render(); }
+    }, 6000);
+  }
+
+  function applySimilarAction() {
+    if (!S.pendingSimilarAction) return;
+    const { ids, action, label } = S.pendingSimilarAction;
+    S.pendingSimilarAction = null;
+    for (const id of ids) S.reviewSelectedIds.add(id);
+    bulkClassifySelected(action);
+  }
+
+  function dismissSimilarToast() {
+    S.pendingSimilarAction = null;
     render();
   }
 
@@ -5723,6 +6030,11 @@ const TaxUI = (() => {
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
     bulkAutoInfer, resolveUnknownTokens, toggleReviewGroup,
     bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances, autoResolveAll, autoFixEasyCases,
+    // Review multi-select + bulk actions
+    toggleSelectReview, selectAllInGroup, selectAllInAssetGroup, clearReviewSelection,
+    toggleAssetGroup, expandReviewGroup,
+    bulkClassifySelected, bulkPriceSelected,
+    applySimilarAction, dismissSimilarToast,
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,

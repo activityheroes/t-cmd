@@ -118,6 +118,11 @@ const TaxEngine = (() => {
   // ── CoinGecko asset ID mapping — free, no auth required ──────────
   // CoinGecko IDs (primary price source — free tier, no auth required)
   // Note: differs from CoinCap on BNB, AVAX, MATIC, NEAR, ARB etc.
+  // CoinGecko IDs for volatile non-stable assets only.
+  // Stablecoins (USDC, USDT, DAI, BUSD etc.) are intentionally excluded:
+  // they live in STABLES and are priced via historical FX, never via API.
+  // Wrapped tokens (WETH, WBTC, WSOL) are also excluded — they track their
+  // underlying asset and are priced via swap-leg derivation.
   const CC_IDS = {
     BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', BNB: 'binancecoin',
     ADA: 'cardano', DOT: 'polkadot', AVAX: 'avalanche-2', MATIC: 'matic-network',
@@ -127,8 +132,8 @@ const TaxEngine = (() => {
     SHIB: 'shiba-inu', PEPE: 'pepe', WIF: 'dogwifhat', BONK: 'bonk',
     JUP: 'jupiter', PYTH: 'pyth-network', SEI: 'sei-network', TIA: 'celestia',
     STRK: 'starknet', TON: 'the-open-network',
-    USDT: 'tether', USDC: 'usd-coin', BUSD: 'binance-usd', DAI: 'dai',
-    WETH: 'weth', WBTC: 'wrapped-bitcoin', WSOL: 'wrapped-solana',
+    // No stablecoins here — they are in STABLES and use FX pricing
+    // No wrapped tokens — priced via their underlying through swap-leg derivation
     ALGO: 'algorand', FTM: 'fantom', SAND: 'the-sandbox', MANA: 'decentraland',
     CRV: 'curve-dao-token', AAVE: 'aave', COMP: 'compound-governance-token',
     SNX: 'havven', MKR: 'maker', LDO: 'lido-dao', RPL: 'rocket-pool',
@@ -1651,8 +1656,8 @@ const TaxEngine = (() => {
       return { ...t, priceSEKPerUnit: 0, costBasisSEK: 0,
                priceSource: PS.TRADE_EXACT, priceConfidence: 'high' };
     }
-    // Non-taxable / spam: skip
-    if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) return t;
+    // Non-taxable / spam: skip (FEE rows are also non-taxable)
+    if (!isTaxableCategory(t.category)) return t;
 
     const sym  = (t.assetSymbol || '').toUpperCase();
     const date = (t.date || '').slice(0, 10);
@@ -2374,7 +2379,7 @@ const TaxEngine = (() => {
       for (const t of txns) {
         if (cgRequests.length >= MAX_CG) break;
         if (t.isInternalTransfer) continue;
-        if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
+        if (!isTaxableCategory(t.category)) continue; // fees never reach external APIs
         if (t.priceSEKPerUnit > 0) continue;
         if (STABLES.has((t.assetSymbol || '').toUpperCase())) continue;
 

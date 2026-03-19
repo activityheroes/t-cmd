@@ -2599,7 +2599,7 @@ const TaxEngine = (() => {
 
     for (const t of txns) {
       if (t.isInternalTransfer) continue;
-      if (!isTaxableCategory(t.category) && t.category !== CAT.FEE) continue;
+      if (!isTaxableCategory(t.category)) continue; // fees never reach external DEX APIs
       if (t.priceSEKPerUnit > 0 || t.coinGeckoId) continue; // already priced or has CG
       if (!t.contractAddress) continue;
       const network = GT_NETWORK_MAP[t.chain] || GT_NETWORK_MAP[chainFromSource(t.source)];

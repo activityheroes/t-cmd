@@ -623,6 +623,12 @@ const TaxEngine = (() => {
       autoClassified: false,
       isInternalTransfer: false,
       assetSymbol: normalizedSym,
+      // economicId: canonical economic-family identifier (SOL for WSOL/MSOL/STSOL, etc.)
+      // Used by provenance linking and cross-source ownership-path matching.
+      // Falls back to normalizedSym when AssetIdentity module is not loaded.
+      economicId: (typeof AssetIdentity !== 'undefined')
+                    ? AssetIdentity.getEconomicId(normalizedSym)
+                    : normalizedSym,
       // contractAddress: the original on-chain address before symbol resolution
       // Used for GeckoTerminal pricing when the token isn't in CoinGecko
       contractAddress: raw.contractAddress || raw.mintAddress
@@ -1165,12 +1171,13 @@ const TaxEngine = (() => {
       72 * 3600_000, 0.05, false,
     );
 
-    // ── Pass 3: CEX withdrawal → on-chain deposit (48 h, 2%) ──
-    // Exchange sources paired with blockchain sources
+    // ── Pass 3: CEX withdrawal → on-chain deposit (96 h, 3%) ──
+    // Exchange withdrawal fees can reach 2–3%; some exchanges also queue
+    // withdrawals up to several days. Widen from 48h/2% to 96h/3%.
     runPass(
       [CAT.TRANSFER_OUT, CAT.SEND],
       [CAT.TRANSFER_IN,  CAT.RECEIVE],
-      48 * 3600_000, 0.02, false,
+      96 * 3600_000, 0.03, false,
     );
 
     // ── Pass 4: Wrap/unwrap within same account (same asset canonical) ──
@@ -1192,6 +1199,79 @@ const TaxEngine = (() => {
          t.category === CAT.RECEIVE || t.category === CAT.SEND),
       );
       if (counterpart) pair(out, counterpart, 'wrap');
+    }
+
+    // ── Pass 5: Orphaned wallet RECEIVE → preceding exchange BUY ───────────
+    // Scenario: user bought crypto on an exchange, withdrew to their wallet,
+    // but the exchange's CSV has no separate "withdrawal" / SEND row (common
+    // with Revolut and some other CEX exports).  Without this pass the wallet
+    // RECEIVE creates a SECOND taxPool acquisition entry for the same economic
+    // asset, doubling the cost basis (unfavorable and incorrect).
+    //
+    // If we find a prior exchange BUY of the same economic family with a
+    // compatible amount (within 5% for fees + slippage) within 7 days, mark
+    // only the RECEIVE as isInternalTransfer=true (asymmetric pairing).
+    //
+    // The BUY is NOT marked — it must flow through the lot engine to establish
+    // the cost basis in taxPool.  Skipping the RECEIVE prevents double-counting
+    // while keeping the original purchase price as the basis.
+    {
+      const _getEcoId = sym =>
+        (typeof AssetIdentity !== 'undefined') ? AssetIdentity.getEconomicId(sym) : sym;
+      const _amtOk = (sent, recv, sym) =>
+        (typeof AssetIdentity !== 'undefined')
+          ? AssetIdentity.amountsLikelyMatch(sent, recv, sym, 'provenance')
+          : Math.abs(sent - recv) / (sent || 1) <= 0.05;
+      const SEVEN_DAYS_MS = 7 * 24 * 3600_000;
+
+      // Only consider RECEIVEs not yet paired, from a different account than any BUY
+      const orphanedReceives = txns.filter(t =>
+        !matched.has(t.id) &&
+        (t.category === CAT.RECEIVE || t.category === CAT.TRANSFER_IN),
+      );
+
+      for (const recv of orphanedReceives) {
+        if (matched.has(recv.id)) continue;
+        const recvMs  = new Date(recv.date).getTime();
+        const recvEco = _getEcoId(recv.assetSymbol);
+
+        // Find the most-recent exchange BUY for the same economic asset that:
+        //   • occurred before this RECEIVE
+        //   • is on a different account
+        //   • has a compatible amount (accounting for withdrawal/network fees)
+        //   • is within 7 days
+        const buyCandidate = txns
+          .filter(t =>
+            !matched.has(t.id) &&
+            t.category === CAT.BUY &&
+            t.accountId !== recv.accountId &&
+            _getEcoId(t.assetSymbol) === recvEco &&
+            new Date(t.date).getTime() <= recvMs &&
+            (recvMs - new Date(t.date).getTime()) <= SEVEN_DAYS_MS &&
+            _amtOk(t.amount, recv.amount, recv.assetSymbol),
+          )
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+
+        if (buyCandidate) {
+          // Asymmetric mark: RECEIVE is internal, BUY is left untouched so
+          // the lot engine can still create the taxPool entry at purchase price.
+          recv.isInternalTransfer = true;
+          recv.matchedTxId        = buyCandidate.id;
+          recv.matchedType        = 'provenance_linked_receive';
+          recv.needsReview        = false;
+          recv.reviewReason       = null;
+          recv.sourceStatus       = 'exchange_buy_candidate';
+          recv.provenanceNote     =
+            `Inköp på ${buyCandidate.source || 'börs'} ` +
+            `${new Date(buyCandidate.date).toLocaleDateString('sv-SE')} ` +
+            `(${buyCandidate.amount} ${buyCandidate.assetSymbol}) — ` +
+            `ingen uttagsrad hittades; mottagandet klassas som intern rörelse ` +
+            `för att undvika dubbel kostnadsbas.`;
+          matched.add(recv.id);
+          // Note: buyCandidate.id is intentionally NOT added to matched.
+          // The BUY must remain unmatched so it enters taxPool normally.
+        }
+      }
     }
 
     return txns;
@@ -4448,15 +4528,22 @@ const TaxEngine = (() => {
   function resolveUnknownAcquisitions(disposals, allTxns, acquisitionMap, txHashMap) {
     if (!disposals || !allTxns) return;
 
+    // Helper: get economic family id for a symbol
+    const _ecoId = sym =>
+      (typeof AssetIdentity !== 'undefined') ? AssetIdentity.getEconomicId(sym) : sym;
+
     // Build asset → all inbound/outbound transactions map for transfer matching
-    const txsByAsset = {};
+    const txsByAsset  = {};
+    const txsByEcoId  = {};   // keyed by economicId — catches any alias gaps
+    const PASS1_CATS  = [CAT.SEND, CAT.TRANSFER_OUT, CAT.BRIDGE_OUT,
+                         CAT.RECEIVE, CAT.TRANSFER_IN, CAT.BRIDGE_IN];
     for (const t of allTxns) {
       const sym = t.assetSymbol;
       if (!sym || t.isInternalTransfer) continue;
-      const cat = t.category;
-      if (![CAT.SEND, CAT.TRANSFER_OUT, CAT.BRIDGE_OUT,
-            CAT.RECEIVE, CAT.TRANSFER_IN, CAT.BRIDGE_IN].includes(cat)) continue;
+      if (!PASS1_CATS.includes(t.category)) continue;
       (txsByAsset[sym] = txsByAsset[sym] || []).push(t);
+      const eco = _ecoId(sym);
+      if (eco !== sym) (txsByEcoId[eco] = txsByEcoId[eco] || []).push(t);
     }
 
     // Earliest imported transaction timestamp — proxy for "import start"
@@ -4490,10 +4577,37 @@ const TaxEngine = (() => {
         }
       }
 
+      // ── Pre-pass: Build priorCandidates debug array ──────────────────
+      // Aggregate all known acquisitions for this economic asset family
+      // before the disposal date.  Attached to the disposal for UI display
+      // and for informing better resolutionNote text.
+      const dispEcoId = _ecoId(sym);
+      const allKnownAcqs = [
+        ...(acquisitionMap[sym]           || []),
+        // Include aliases (e.g. CBBTC acquisitions for a BTC disposal)
+        ...(dispEcoId !== sym ? (acquisitionMap[dispEcoId] || []) : []),
+      ].filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i); // dedupe by id
+
+      const priorAcqs        = allKnownAcqs.filter(a => new Date(a.date).getTime() < dispMs);
+      const trustedPriorAcqs = priorAcqs.filter(a => a.isTrusted);
+
+      d.priorCandidates = priorAcqs.map(a => ({
+        rowId:           a.id,
+        date:            a.date,
+        candidateType:   a.category,
+        amount:          a.amount,
+        costSEK:         a.costSEK || null,
+        isTrusted:       a.isTrusted,
+        rejectionReasons: a.isTrusted ? [] : ['price_source_untrusted'],
+      }));
+
       // ── Pass 1: Internal transfer candidate ──────────────────────────
-      // Look for any movement of the same asset ± 5% qty within 72 h that
-      // hasn't been marked as an internal transfer yet (and isn't this disposal).
-      const candidates = (txsByAsset[sym] || []).filter(t => {
+      // Look for any movement of the same asset ± 8% qty within 72 h that
+      // hasn't been marked as an internal transfer yet.
+      // Also checks economicId aliases (catches any remaining normalization gaps).
+      const p1Base = [...(txsByAsset[sym] || []),
+                      ...(txsByEcoId[dispEcoId] || []).filter(t => t.assetSymbol !== sym)];
+      const candidates = p1Base.filter(t => {
         if (t.isInternalTransfer || t.category === CAT.TRANSFER_IN || t.category === CAT.BRIDGE_IN) return false;
         const tMs      = new Date(t.date).getTime();
         const timeDiff = Math.abs(tMs - dispMs);
@@ -4603,15 +4717,35 @@ const TaxEngine = (() => {
       // Only remaining missing_history rows land here.  These are the
       // TRUE hard K4 blockers: no transfer match, no opening-balance signal,
       // no airdrop/spam pattern, and no auto-resolvable path.
-      const acqCount = (acquisitionMap[sym] || []).length;
       d.resolutionType          = RT.MANUAL;
       d.resolutionCandidateType = RT.MANUAL;
       d.resolutionConfidence    = 'low';
       d.autoResolvable          = false;
       d.blocksCurrentK4         = true;   // this is a genuine hard blocker
-      d.resolutionNote = acqCount === 0
-        ? `Inga anskaffningar importerade för ${sym}. Importera köphistorik från börsen eller plånboken där tokenen ursprungligen anskaffades.`
-        : `Anskaffningshistorik finns (${acqCount} transaktioner) men täcker inte denna avyttring. Kontrollera om fler transaktioner saknas.`;
+      // Build a contextual note using the priorCandidates gathered in the pre-pass
+      const totalKnown   = priorAcqs.length;
+      const trustedCount = trustedPriorAcqs.length;
+      if (totalKnown === 0) {
+        d.resolutionNote =
+          `Inga anskaffningar importerade för ${sym}. ` +
+          `Importera köphistorik från börsen eller plånboken där ${sym} ursprungligen anskaffades.`;
+      } else if (trustedCount > 0) {
+        // Data exists but quantity in taxPool is still insufficient.
+        // Most likely cause: a provenance link is broken (e.g. SEND row missing
+        // from exchange export, amount mismatch, or cross-account gap).
+        const trustedAmt = trustedPriorAcqs.reduce((s, a) => s + (a.amount || 0), 0);
+        d.resolutionNote =
+          `${trustedCount} pålitlig(a) anskaffning(ar) finns för ${sym} ` +
+          `(totalt ${trustedAmt.toFixed(4)} ${sym}) men täcker ej skattepoolen för denna avyttring. ` +
+          `Trolig orsak: saknad uttags-/överlämningsrad från börsen, eller belopps-/tids-gappar ` +
+          `som förhindrade automatisk matchning. Kontrollera att alla konton och historikfiler är importerade.`;
+      } else {
+        // Data exists but price sources are all untrusted → can't enter taxPool.
+        d.resolutionNote =
+          `${totalKnown} anskaffning(ar) hittades för ${sym} men ingen har en pålitlig priskälla ` +
+          `(krävs för skattepoolen). Kontrollera att priserna är korrekt prissatta, ` +
+          `eller lägg till en manuell kostnadsbas.`;
+      }
     }
 
     // ── Final pass: Compute impactLevel on every classified disposal ──

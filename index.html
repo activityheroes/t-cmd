@@ -495,7 +495,9 @@
   <script src="js/tax-models.js?v=1"></script>
   <script src="js/tax-pipeline.js?v=1"></script>
   <script src="js/coingecko-pricing.js?v=1"></script>
-  <script src="js/tax-engine.js?v=40"></script>
+  <!-- asset-identity must load before tax-engine (provides AssetIdentity global) -->
+  <script src="js/asset-identity.js?v=1"></script>
+  <script src="js/tax-engine.js?v=41"></script>
   <!-- pdf-lib — K4 PDF generation using official SKV template (no server required) -->
   <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="js/k4-pdf-filler.js"></script>

@@ -4623,18 +4623,70 @@ const TaxEngine = (() => {
       });
 
       if (candidates.length > 0) {
-        const best     = candidates[0];
-        const diffH    = Math.abs(new Date(best.date).getTime() - dispMs) / 3600_000;
-        const confidence = diffH < 1 ? 'high' : diffH < 24 ? 'medium' : 'low';
-        d.resolutionType             = RT.INTERNAL_TRANSFER;
-        d.resolutionCandidateType    = RT.INTERNAL_TRANSFER;
-        d.resolutionConfidence       = confidence;
-        d.resolutionCandidateTxId    = best.id;
-        d.autoResolvable             = false;   // needs user to import the source account
-        d.blocksCurrentK4            = false;   // row is excluded from K4, not a blocker
-        d.resolutionNote = `Hittade möjlig intern transfer: ${best.category} av ${best.amount.toFixed(4)} ${sym} `
-          + `(${diffH < 1 ? 'inom 1h' : Math.round(diffH) + 'h senare/tidigare'}, konto ${best.accountId || '?'}). `
-          + `Importera det kontot — motorn matchar automatiskt och löser kostnadsbas.`;
+        const best  = candidates[0];
+        const diffH = Math.abs(new Date(best.date).getTime() - dispMs) / 3600_000;
+
+        // ── 5-component weighted confidence score ─────────────────────────
+        //   asset(35%) + amount(25%) + time(15%) + ownership(15%) + source(10%)
+        const candEco    = best.economicId || best.assetSymbol;
+        const assetScore = sym === best.assetSymbol ? 1.0
+                         : dispEcoId === candEco    ? 0.9
+                         : 0;
+        const amtDiff     = qty > 0 ? Math.abs(best.amount - qty) / Math.max(best.amount, qty) : 1;
+        const amountScore = amtDiff < 0.01 ? 1.0
+                          : amtDiff < 0.03 ? 0.9
+                          : amtDiff < 0.05 ? 0.7
+                          : amtDiff < 0.08 ? 0.5
+                          : 0;
+        const timeScore   = diffH <   1 ? 1.0
+                          : diffH <  24 ? 0.9
+                          : diffH <  72 ? 0.7
+                          : 0.5;
+        const ownershipScore = best.accountId !== d.accountId ? 0.9 : 0.3;
+        const sourceScore    = 0.9;   // same-user ecosystem signal
+
+        const score      = (assetScore * 0.35) + (amountScore * 0.25)
+                         + (timeScore  * 0.15) + (ownershipScore * 0.15)
+                         + (sourceScore * 0.10);
+        const confidence = score >= 0.8 ? 'high' : score >= 0.5 ? 'medium' : 'low';
+
+        // Non-taxable disposals (SEND/TRANSFER_OUT/BRIDGE_OUT) with high
+        // confidence can be auto-resolved — marking them as internal transfers
+        // is safe: they were never taxable events to begin with.
+        // Taxable disposals (SELL/TRADE) are NEVER auto-resolved — the risk
+        // of falsely excluding a real sale is too high.
+        const NON_TAXABLE_DISPOSAL_CATS = [CAT.SEND, CAT.TRANSFER_OUT, CAT.BRIDGE_OUT];
+        const isNonTaxable = NON_TAXABLE_DISPOSAL_CATS.includes(d.category);
+
+        d.resolutionScore         = score;
+        d.resolutionType          = RT.INTERNAL_TRANSFER;
+        d.resolutionCandidateType = RT.INTERNAL_TRANSFER;
+        d.resolutionConfidence    = confidence;
+        d.resolutionCandidateTxId = best.id;
+        d.autoResolvable          = score >= 0.8 && isNonTaxable;
+        d.blocksCurrentK4         = false;
+        d.autoResolve             = {
+          eligible:    true,
+          confidence:  score,
+          action:      isNonTaxable ? 'mark_internal' : 'review_required',
+          candidateId: best.id,
+          reason:      `${best.category} av ${best.amount.toFixed(4)} ${sym} ` +
+                       `${diffH < 1 ? '< 1h' : Math.round(diffH) + 'h'} bort ` +
+                       `(konto ${(best.accountId || '').slice(-8) || '?'}, ` +
+                       `${Math.round(score * 100)}% konfidens)`,
+        };
+        d.resolutionNote =
+          (d.autoResolvable
+            ? `✨ Auto-lösbar (${Math.round(score * 100)}% konfidens): `
+            : `🔍 Möjlig intern transfer (${Math.round(score * 100)}% konfidens): `) +
+          `${best.category} av ${best.amount.toFixed(4)} ${sym} ` +
+          `(${diffH < 1 ? 'inom 1h' : Math.round(diffH) + 'h senare/tidigare'}, ` +
+          `konto ${best.accountId || '?'}). ` +
+          (d.autoResolvable
+            ? `Kan lösas automatiskt — tryck ⚡ Auto-lösa.`
+            : isNonTaxable
+              ? `Importera källkontot — motorn matchar och löser kostnadsbas.`
+              : `SELL/TRADE-avyttring — verifiera manuellt innan klassificering.`);
         continue;
       }
 
@@ -4765,9 +4817,9 @@ const TaxEngine = (() => {
   // Returns { resolved, spamCount, airdropCount, details[] }.
   // ════════════════════════════════════════════════════════════
   function autoFixEasyCases(txns, taxResult) {
-    if (!txns || !taxResult?.disposals) return { resolved: 0, spamCount: 0, airdropCount: 0, details: [] };
+    if (!txns || !taxResult?.disposals) return { resolved: 0, spamCount: 0, airdropCount: 0, transferCount: 0, details: [] };
     const details = [];
-    let spamCount = 0, airdropCount = 0;
+    let spamCount = 0, airdropCount = 0, transferCount = 0;
 
     for (const d of taxResult.disposals) {
       if (d.valuationStatus !== 'missing_history') continue;
@@ -4783,19 +4835,45 @@ const TaxEngine = (() => {
         t.notes = (t.notes || '') + ' [auto-fix: spam]';
         spamCount++;
         details.push(`${d.assetSymbol}: spam → exkluderad (0 kr)`);
+
       } else if (d.resolutionType === RT.AIRDROP && d.resolutionConfidence === 'high') {
         t.category = CAT.AIRDROP;
         t.userReviewed = true;
         t.notes = (t.notes || '') + ' [auto-fix: airdrop]';
         airdropCount++;
         details.push(`${d.assetSymbol}: airdrop → omklassificerad`);
+
+      } else if (d.resolutionType === RT.INTERNAL_TRANSFER && d.resolutionConfidence === 'high') {
+        // Auto-resolve high-confidence SEND/TRANSFER_OUT/BRIDGE_OUT as internal transfers.
+        // autoResolvable is only true for non-taxable categories (set in resolveUnknownAcquisitions),
+        // so we never auto-resolve SELL/TRADE disposals here.
+        t.isInternalTransfer = true;
+        t.matchedTxId        = d.resolutionCandidateTxId || null;
+        t.matchedType        = 'auto_resolved_internal';
+        t.needsReview        = false;
+        t.userReviewed       = true;
+        t.notes = (t.notes || '') + ` [auto-fix: intern transfer, ${Math.round((d.resolutionScore || 0) * 100)}% konfidens]`;
+
+        // Also mark the candidate transaction (the counterpart movement)
+        if (d.resolutionCandidateTxId) {
+          const peer = txns.find(tx => tx.id === d.resolutionCandidateTxId);
+          if (peer && !peer.isInternalTransfer) {
+            peer.isInternalTransfer = true;
+            peer.matchedTxId        = t.id;
+            peer.matchedType        = 'auto_resolved_internal';
+            peer.needsReview        = false;
+          }
+        }
+        transferCount++;
+        details.push(`${d.assetSymbol}: intern transfer → matchad (${Math.round((d.resolutionScore || 0) * 100)}% konfidens)`);
       }
     }
 
     return {
-      resolved: spamCount + airdropCount,
+      resolved: spamCount + airdropCount + transferCount,
       spamCount,
       airdropCount,
+      transferCount,
       details,
     };
   }

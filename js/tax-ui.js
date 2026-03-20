@@ -4259,7 +4259,11 @@ const TaxUI = (() => {
           const criticalRows   = [...excManual, ...excMissing, ...excBlocked, ...excSanity];
           const reviewRows     = [...excSpamCand, ...excAirdropCand, ...excTransfer, ...excOpenBal];
           const infoRows       = [...excEstimated, ...excUnknownId, ...excNoise];
-          const autoSolvable   = excSpamCand.length + excAirdropCand.length;
+          // Separate internal-transfer rows into auto-resolvable (high confidence)
+          // vs. needs-import (medium/low — user must import the counterpart account).
+          const excTransferAuto   = excTransfer.filter(d => d.autoResolvable === true);
+          const excTransferManual = excTransfer.filter(d => !d.autoResolvable);
+          const autoSolvable   = excSpamCand.length + excAirdropCand.length + excTransferAuto.length;
           const excSanityGain2 = excSanity.reduce((s, d) => s + (d.gainLossSEK || 0), 0);
 
           return `
@@ -4321,7 +4325,7 @@ const TaxUI = (() => {
               <span style="font-size:12px;font-weight:700;color:#fbbf24">Granskning rekommenderas — inte fatalt</span>
               <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:#fbbf24">${reviewRows.length} rader</span>
               ${autoSolvable > 0 ? `
-              <button class="tax-btn tax-btn-xs" style="margin-left:auto;color:#4ade80;border-color:rgba(74,222,128,.3);background:rgba(74,222,128,.07);font-weight:600" onclick="TaxUI.autoResolveAll()" title="Lös spam + klassificera airdrops automatiskt">⚡ Auto-lösa ${autoSolvable} rader (${excSpamCand.length} spam + ${excAirdropCand.length} airdrops)</button>` : ''}
+              <button class="tax-btn tax-btn-xs" style="margin-left:auto;color:#4ade80;border-color:rgba(74,222,128,.3);background:rgba(74,222,128,.07);font-weight:600" onclick="TaxUI.autoResolveAll()" title="Lös spam, airdrops och högt-konfidens interna transfers automatiskt">⚡ Auto-lösa ${autoSolvable} rader${[excSpamCand.length > 0 ? excSpamCand.length+' spam' : '', excAirdropCand.length > 0 ? excAirdropCand.length+' airdrops' : '', excTransferAuto.length > 0 ? excTransferAuto.length+' intern' : ''].filter(Boolean).map((s,i) => i===0 ? ' ('+s : ' · '+s).join('')}${autoSolvable > 0 ? ')' : ''}</button>` : ''}
             </div>
             <div style="font-size:10px;color:#64748b;margin-bottom:8px">
               Motorn har identifierat möjliga lösningar. Dessa blockerar <em>inte</em> din K4 men bör bekräftas för bästa resultat.
@@ -4330,8 +4334,10 @@ const TaxUI = (() => {
               bulkBtn: excSpamCand.length > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(148,163,184,.12);color:#94a3b8;border:1px solid rgba(148,163,184,.2)" onclick="TaxUI.bulkResolveSpamCandidates()">🗑️ Lös alla spam (${excSpamCand.length})</button>` : '' })}
             ${renderGroup({ rows: excAirdropCand, icon: '📬', color: '#fbbf24', bg: 'rgba(251,191,36,.05)', border: 'rgba(251,191,36,.2)', label: 'Möjlig airdrop — mottagning utan köp, FMV som kostnadsbas',
               bulkBtn: excAirdropCand.length > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.2)" onclick="TaxUI.bulkResolveAirdropCandidates()">📬 Klassificera som airdrops (${excAirdropCand.length})</button>` : '' })}
-            ${renderGroup({ rows: excTransfer, icon: '🔄', color: '#38bdf8', bg: 'rgba(56,189,248,.05)', border: 'rgba(56,189,248,.2)', label: 'Möjlig intern transfer — importera källkontot',
-              bulkBtn: `<button class="tax-btn tax-btn-xs" style="background:rgba(56,189,248,.1);color:#38bdf8;border:1px solid rgba(56,189,248,.2)" onclick="TaxUI.navigate('accounts')">➕ Importera källkontot</button>` })}
+            ${excTransferAuto.length > 0 ? renderGroup({ rows: excTransferAuto, icon: '✨', color: '#4ade80', bg: 'rgba(74,222,128,.05)', border: 'rgba(74,222,128,.2)', label: `Intern transfer — hög konfidens (≥ 80%) — kan lösas automatiskt`,
+              bulkBtn: `<button class="tax-btn tax-btn-xs" style="background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.3);font-weight:600" onclick="TaxUI.autoResolveAll()">⚡ Lös ${excTransferAuto.length} intern${excTransferAuto.length > 1 ? 'a' : ''} transfer${excTransferAuto.length > 1 ? 's' : ''}</button>` }) : ''}
+            ${excTransferManual.length > 0 ? renderGroup({ rows: excTransferManual, icon: '🔄', color: '#38bdf8', bg: 'rgba(56,189,248,.05)', border: 'rgba(56,189,248,.2)', label: 'Möjlig intern transfer — medel/låg konfidens — importera källkontot',
+              bulkBtn: `<button class="tax-btn tax-btn-xs" style="background:rgba(56,189,248,.1);color:#38bdf8;border:1px solid rgba(56,189,248,.2)" onclick="TaxUI.navigate('accounts')">➕ Importera källkontot</button>` }) : ''}
             ${renderGroup({ rows: excOpenBal, icon: '📅', color: '#a78bfa', bg: 'rgba(167,139,250,.05)', border: 'rgba(167,139,250,.2)', label: 'Möjligt öppningssaldo — token ägdes troligen före import',
               bulkBtn: excOpenBal.length > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.2)" onclick="TaxUI.bulkCreateOpeningBalances()">📅 Skapa öppningssaldon (${excOpenBal.length})</button>` : '' })}
           </div>` : ''}
@@ -5156,18 +5162,23 @@ const TaxUI = (() => {
     const result = S.taxResult || getOrComputeTaxResult();
     const k4 = TaxEngine.generateK4Report(result);
     const exc = k4.excludedByStatus || {};
-    const spamRows    = exc['spam_candidate']    || [];
-    const airdropRows = exc['airdrop_candidate'] || [];
-    const total = spamRows.length + airdropRows.length;
+    const spamRows     = exc['spam_candidate']    || [];
+    const airdropRows  = exc['airdrop_candidate'] || [];
+    // High-confidence internal transfers (SEND/TRANSFER_OUT only — autoResolvable set by engine)
+    const transferRows = (result.disposals || []).filter(d =>
+      d.resolutionType === 'internal_transfer_candidate' && d.autoResolvable === true,
+    );
+    const total = spamRows.length + airdropRows.length + transferRows.length;
     if (!total) {
-      showTaxToast('ℹ️', 'Inget att lösa', 'Inga spam- eller airdrop-kandidater hittades.', 'info');
+      showTaxToast('ℹ️', 'Inget att lösa', 'Inga säkra auto-lösningsbara rader hittades.', 'info');
       return;
     }
     if (!confirm(
-      `Auto-lösa ${total} rader?\n\n` +
-      (spamRows.length > 0    ? `• ${spamRows.length} spam-rader → exkluderas med 0 kr kostnadsbas\n` : '') +
-      (airdropRows.length > 0 ? `• ${airdropRows.length} airdrop-rader → omklassificeras med FMV-kostnadsbas\n` : '') +
-      `\nDetta går att ångra via Transaktioner.`
+      `⚡ Auto-lösa ${total} säkra rader?\n\n` +
+      (spamRows.length > 0     ? `• ${spamRows.length} spam → exkluderas (0 kr kostnadsbas)\n` : '') +
+      (airdropRows.length > 0  ? `• ${airdropRows.length} airdrops → FMV-kostnadsbas\n` : '') +
+      (transferRows.length > 0 ? `• ${transferRows.length} interna transfers → matchade (≥ 80% konfidens)\n` : '') +
+      `\nBara rader med hög konfidenspoäng inkluderas. Taxabla avyttringar (SELL/TRADE) löses aldrig automatiskt.\nDetta går att ångra via Transaktioner.`
     )) return;
 
     let txns = TaxEngine.getTransactions();
@@ -5193,14 +5204,35 @@ const TaxUI = (() => {
       });
     }
 
+    // Internal transfer pass — mark both sides as internal transfers
+    if (transferRows.length > 0) {
+      const pairsToMark = new Map(); // txId → matchedTxId
+      for (const d of transferRows) {
+        if (d.id)                      pairsToMark.set(d.id, d.resolutionCandidateTxId || null);
+        if (d.resolutionCandidateTxId) pairsToMark.set(d.resolutionCandidateTxId, d.id);
+      }
+      const scoreById = new Map(transferRows.map(d => [d.id, d.resolutionScore || 0]));
+      txns = txns.map(t => {
+        if (!pairsToMark.has(t.id)) return t;
+        const score = scoreById.get(t.id) || scoreById.get(pairsToMark.get(t.id)) || 0;
+        return { ...t,
+          isInternalTransfer: true,
+          matchedTxId:        pairsToMark.get(t.id),
+          matchedType:        'auto_resolved_internal',
+          needsReview:        false,
+          userReviewed:       true,
+          notes: (t.notes || '') + ` [auto-fix: intern transfer, ${Math.round(score * 100)}% konf.]`,
+        };
+      });
+    }
+
     TaxEngine.saveTransactions(txns);
     S.taxResult = null;
     const parts = [];
-    if (spamRows.length > 0) parts.push(`${spamRows.length} spam → exkluderade (0 kr)`);
-    if (airdropRows.length > 0) parts.push(`${airdropRows.length} airdrops → omklassificerade (FMV-kostnadsbas)`);
-    showTaxToast('✅', `${total} rader lösta!`,
-      parts.join(' \u00b7 '),
-      'success');
+    if (spamRows.length > 0)     parts.push(`${spamRows.length} spam → exkluderade`);
+    if (airdropRows.length > 0)  parts.push(`${airdropRows.length} airdrops → FMV-kostnadsbas`);
+    if (transferRows.length > 0) parts.push(`${transferRows.length} intern transfers → matchade`);
+    showTaxToast('✅', `${total} rader lösta!`, parts.join(' · '), 'success');
     render();
   }
 

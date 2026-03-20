@@ -976,9 +976,16 @@ const TaxEngine = (() => {
     const amount = t.amount || 0;
 
     // ── Exchange-reported types (most reliable) ────────────
-    if (rawType.match(/^buy$/))  return CAT.BUY;
-    if (rawType.match(/^sell$/)) return CAT.SELL;
+    if (rawType.match(/^buy$/))   return CAT.BUY;
+    if (rawType.match(/^sell$/))  return CAT.SELL;
+    if (rawType.match(/^trade$/)) return (t.inAsset && t.inAmount > 0) ? CAT.TRADE : CAT.RECEIVE;
     if (rawType.match(/swap|convert|exchange/)) return CAT.TRADE;
+
+    // Explicit send/receive/transfer rawTypes (set by CSV parsers that preserve direction)
+    if (rawType.match(/^send$/))          return CAT.SEND;
+    if (rawType.match(/^receive$/))       return CAT.RECEIVE;
+    if (rawType.match(/^transfer.?in$/))  return CAT.TRANSFER_IN;
+    if (rawType.match(/^transfer.?out$/)) return CAT.TRANSFER_OUT;
 
     // Income: staking, earn, rewards, interest
     if (rawType.match(/staking|earn|reward|interest|cashback|referral|mining/)) return CAT.INCOME;
@@ -5594,42 +5601,195 @@ const TaxEngine = (() => {
     const rows = parseCSV(text);
     if (!rows.length) return [];
 
-    // Detect format by checking for Trading Statement column
+    // Detect format by checking for Trading Statement columns
     const isTradingStatement = 'Date acquired' in rows[0] && 'Date sold' in rows[0];
     if (isTradingStatement) return _parseRevolutTradingStatement(rows, accountId);
 
-    // ── Format A: Standard Revolut CSV ──────────────────────────────────────
+    // ── Format A: Standard Revolut App CSV ───────────────────────────────────
+    // Revolut emits TWO rows per EXCHANGE: one for each leg (fiat and crypto).
+    // e.g. buying SOL for SEK:
+    //   Row 1: Type=EXCHANGE, Currency=SEK,  Amount=-500  (fiat out)
+    //   Row 2: Type=EXCHANGE, Currency=SOL,  Amount=+5    (crypto in)
+    // Strategy:
+    //   • Group all EXCHANGE rows by Reference so we can see both legs.
+    //   • Skip the fiat leg — all needed info comes from the crypto row's
+    //     "Fiat amount (inc. fees)" column or from the paired fiat row.
+    //   • For Amount > 0 (received crypto)  → BUY  with inAsset=fiat, inAmount=fiatAmt
+    //   • For Amount < 0 (disposed crypto)  → SELL with inAsset=fiat, inAmount=fiatAmt
+    //   • For two crypto legs with same Reference → TRADE (crypto-to-crypto conversion)
+    // Non-EXCHANGE rows (TRANSFER, TOPUP, CARD_PAYMENT, etc.) processed separately.
+
+    // Known fiat currencies — used to detect and skip the fiat leg of an exchange
+    const FIAT_CCY = new Set([
+      'USD','EUR','SEK','GBP','NOK','DKK','CHF','JPY','CAD','AUD','HKD',
+      'SGD','NZD','CNY','INR','BRL','MXN','ZAR','RUB','TRY','PLN','CZK',
+      'HUF','RON','BGN','HRK','ISK','SAR','AED','MYR','THB','IDR','PHP',
+      'KRW','TWD','COP','CLP','PEN','ARS','VND','UAH','ILS','EGP','NGN',
+    ]);
+
+    const parseAmt = v => parseFloat(v || 0);
+    const absAmt   = v => Math.abs(parseAmt(v));
+
+    // Separate COMPLETED EXCHANGE rows from all other rows
+    const completed    = rows.filter(r => (r['State'] || '').toUpperCase() === 'COMPLETED');
+    const exchangeRows = completed.filter(r => (r['Type'] || '').toUpperCase() === 'EXCHANGE');
+    const otherRows    = completed.filter(r => (r['Type'] || '').toUpperCase() !== 'EXCHANGE');
+
+    // Group EXCHANGE rows by their Reference (same trade shares a Reference)
+    const exchangeGroups = new Map();
+    for (const r of exchangeRows) {
+      const ref = (r['Reference'] || '').trim()
+              || `rev_exch_${r['Completed Date']||r['Started Date']}_${r['Currency']}_${r['Amount']}`;
+      if (!exchangeGroups.has(ref)) exchangeGroups.set(ref, []);
+      exchangeGroups.get(ref).push(r);
+    }
+
     const out = [];
-    for (const r of rows) {
-      const state = (r['State'] || '').toUpperCase();
-      if (state !== 'COMPLETED') continue;
-      const type = (r['Type'] || '').toUpperCase();
-      const sym = (r['Currency'] || '').toUpperCase();
-      const amount = Math.abs(parseFloat(r['Amount'] || 0));
-      if (!sym || amount === 0) continue;
-      const date = r['Completed Date'] || r['Started Date'] || '';
-      const fiat = Math.abs(parseFloat(r['Fiat amount (inc. fees)'] || r['Fiat amount'] || 0));
-      const fee = Math.abs(parseFloat(r['Fee'] || 0));
-      const baseCcy = (r['Base currency'] || '').toUpperCase();
-      const fiatSEK = (baseCcy === 'SEK' || baseCcy === '') ? fiat : 0;
-      let txType = 'receive';
-      if (type === 'EXCHANGE') txType = 'trade';
-      else if (type === 'TRANSFER' && parseFloat(r['Amount'] || 0) < 0) txType = 'send';
-      else if (type === 'TRANSFER') txType = 'receive';
+
+    // ── Process EXCHANGE groups ──────────────────────────────────────────────
+    for (const [ref, group] of exchangeGroups) {
+      const date = group[0]['Completed Date'] || group[0]['Started Date'] || '';
+      const desc = group[0]['Description'] || '';
+
+      const fiatLegs   = group.filter(r => FIAT_CCY.has((r['Currency'] || '').toUpperCase()));
+      const cryptoLegs = group.filter(r => !FIAT_CCY.has((r['Currency'] || '').toUpperCase()));
+
+      if (cryptoLegs.length === 0) continue; // pure fiat-to-fiat, skip
+
+      if (cryptoLegs.length === 1) {
+        // ── One crypto leg: fiat ↔ crypto ──────────────────────────────────
+        const cr       = cryptoLegs[0];
+        const sym      = (cr['Currency'] || '').toUpperCase();
+        const rawAmt   = parseAmt(cr['Amount']);
+        const cryptoAmt = Math.abs(rawAmt);
+        if (cryptoAmt === 0) continue;
+
+        // Resolve fiat side: prefer paired fiat row, else Fiat amount column
+        let fiatSym, fiatAmt;
+        if (fiatLegs.length > 0) {
+          const fr = fiatLegs[0];
+          fiatSym = (fr['Currency'] || fr['Base currency'] || 'SEK').toUpperCase();
+          fiatAmt = absAmt(fr['Amount']);
+        } else {
+          fiatSym = (cr['Base currency'] || 'SEK').toUpperCase();
+          fiatAmt = absAmt(cr['Fiat amount (inc. fees)'] || cr['Fiat amount'] || 0);
+        }
+        // Sanity: if fiat sym is itself a crypto, something is off — fall back
+        if (!FIAT_CCY.has(fiatSym)) fiatSym = 'SEK';
+
+        const isBuy  = rawAmt > 0; // +crypto = bought, -crypto = sold
+        const price  = cryptoAmt > 0 && fiatAmt > 0 ? fiatAmt / cryptoAmt : 0;
+        const feeSEK = fiatSym === 'SEK'
+                       ? absAmt(cr['Fee'] || 0)
+                       : (fiatLegs.length > 0 ? absAmt(fiatLegs[0]['Fee'] || 0) : 0);
+
+        out.push(normalizeTransaction({
+          txHash:           ref,
+          date,
+          type:             isBuy ? 'buy' : 'sell',
+          assetSymbol:      sym,
+          amount:           cryptoAmt,
+          // inAsset/inAmount encodes the fiat leg so Level-2 pricing can derive SEK price
+          inAsset:          fiatSym,
+          inAmount:         fiatAmt,
+          rawTradePrice:    price,    // price per unit in fiatSym
+          rawTradeCurrency: fiatSym,
+          feeSEK,
+          needsReview:      false,
+          notes: `Revolut ${isBuy ? 'buy' : 'sell'} ${cryptoAmt} ${sym} for ${fiatAmt} ${fiatSym} — ${desc}`.trim(),
+        }, accountId, 'revolut_csv'));
+
+      } else if (cryptoLegs.length === 2) {
+        // ── Two crypto legs: crypto-to-crypto conversion ────────────────────
+        const outLeg = cryptoLegs.find(r => parseAmt(r['Amount']) < 0);
+        const inLeg  = cryptoLegs.find(r => parseAmt(r['Amount']) > 0);
+        if (!outLeg || !inLeg) continue;
+
+        const outSym = (outLeg['Currency'] || '').toUpperCase();
+        const inSym  = (inLeg['Currency']  || '').toUpperCase();
+        const outAmt = absAmt(outLeg['Amount']);
+        const inAmt  = absAmt(inLeg['Amount']);
+        if (outAmt === 0 || inAmt === 0) continue;
+
+        // Single TRADE transaction covers disposal of outSym + acquisition of inSym
+        out.push(normalizeTransaction({
+          txHash:      ref,
+          date,
+          type:        'trade',
+          assetSymbol: outSym,
+          amount:      outAmt,
+          inAsset:     inSym,
+          inAmount:    inAmt,
+          feeSEK:      absAmt(outLeg['Fee'] || 0) + absAmt(inLeg['Fee'] || 0),
+          needsReview: false,
+          notes: `Revolut convert ${outAmt} ${outSym} → ${inAmt} ${inSym} — ${desc}`.trim(),
+        }, accountId, 'revolut_csv'));
+
+      } else {
+        // ── 3+ legs (unusual multi-hop): emit each crypto leg independently ─
+        for (const cr of cryptoLegs) {
+          const sym    = (cr['Currency'] || '').toUpperCase();
+          const rawAmt = parseAmt(cr['Amount']);
+          const amt    = Math.abs(rawAmt);
+          if (amt === 0) continue;
+          const fiatSym = (cr['Base currency'] || 'SEK').toUpperCase();
+          const fiatAmt = absAmt(cr['Fiat amount (inc. fees)'] || cr['Fiat amount'] || 0);
+          out.push(normalizeTransaction({
+            txHash:           `${ref}_${sym}`,
+            date,
+            type:             rawAmt > 0 ? 'buy' : 'sell',
+            assetSymbol:      sym,
+            amount:           amt,
+            inAsset:          FIAT_CCY.has(fiatSym) ? fiatSym : 'SEK',
+            inAmount:         fiatAmt,
+            rawTradePrice:    amt > 0 && fiatAmt > 0 ? fiatAmt / amt : 0,
+            rawTradeCurrency: FIAT_CCY.has(fiatSym) ? fiatSym : 'SEK',
+            feeSEK:           absAmt(cr['Fee'] || 0),
+            needsReview:      true,
+            notes: `Revolut multi-hop ${rawAmt > 0 ? 'in' : 'out'} ${amt} ${sym} — ${desc}`.trim(),
+          }, accountId, 'revolut_csv'));
+        }
+      }
+    }
+
+    // ── Process non-EXCHANGE rows (TRANSFER, TOPUP, CARD_PAYMENT, etc.) ─────
+    for (const r of otherRows) {
+      const type   = (r['Type'] || '').toUpperCase();
+      const sym    = (r['Currency'] || '').toUpperCase();
+      const rawAmt = parseAmt(r['Amount']);
+      const amt    = Math.abs(rawAmt);
+      if (!sym || amt === 0) continue;
+      // Skip fiat-only rows (e.g. SEK balance adjustments, bank transfers)
+      if (FIAT_CCY.has(sym)) continue;
+
+      const date    = r['Completed Date'] || r['Started Date'] || '';
+      const fiatSym = (r['Base currency'] || 'SEK').toUpperCase();
+      const fiatAmt = absAmt(r['Fiat amount (inc. fees)'] || r['Fiat amount'] || 0);
+      const feeSEK  = fiatSym === 'SEK' ? absAmt(r['Fee'] || 0) : 0;
+      const fiatSEK = fiatSym === 'SEK' ? fiatAmt : 0;
+
+      let txType;
+      if      (type === 'TRANSFER' && rawAmt < 0) txType = 'send';
+      else if (type === 'TRANSFER')               txType = 'receive';
       else if (type === 'CARD_PAYMENT' || type === 'PAYMENT') txType = 'sell';
-      else if (type === 'TOPUP') txType = 'buy';
+      else if (type === 'TOPUP')                  txType = 'buy';
+      else                                        txType = rawAmt < 0 ? 'send' : 'receive';
+
       out.push(normalizeTransaction({
-        txHash: r['Reference'] || `rev_${date}_${sym}_${amount}`,
+        txHash:       r['Reference'] || `rev_${date}_${sym}_${amt}`,
         date,
-        type: txType,
-        assetSymbol: sym,
-        amount,
+        type:         txType,
+        assetSymbol:  sym,
+        amount:       amt,
+        inAsset:      fiatSEK > 0 ? fiatSym : undefined,
+        inAmount:     fiatSEK > 0 ? fiatAmt : undefined,
         costBasisSEK: fiatSEK > 0 ? fiatSEK : undefined,
-        feeSEK: fee > 0 && baseCcy === 'SEK' ? fee : 0,
-        needsReview: !fiatSEK,
+        feeSEK,
+        needsReview:  !fiatSEK,
         notes: `Revolut ${r['Type'] || ''} — ${r['Description'] || ''}`.trim(),
       }, accountId, 'revolut_csv'));
     }
+
     return out;
   }
 
@@ -5639,6 +5799,11 @@ const TaxEngine = (() => {
   // both sides. Financial fields are always in USD (Currency column).
   // Fees are charged on the sell side.
   function _parseRevolutTradingStatement(rows, accountId) {
+    // Each row is one disposed FIFO lot from Revolut's capital gains report.
+    // Columns: Date acquired, Date sold, Symbol, Quantity, Cost basis, Gross proceeds, Fees, Currency
+    // All monetary fields are in the Currency column (usually USD).
+    // We emit a BUY at dateAcquired + SELL at dateSold so both sides of every
+    // disposal are visible to the Swedish genomsnittsmetoden engine.
     const out = [];
     let idx = 0;
 
@@ -5651,46 +5816,60 @@ const TaxEngine = (() => {
 
       if (!sym || qty === 0 || !dateAcq || !dateSold) continue;
 
-      const costBasisUSD     = parseFloat(r['Cost basis'] || 0);
-      const grossProceedsUSD = parseFloat(r['Gross proceeds'] || 0);
-      const feeUSD           = parseFloat(r['Fees'] || 0);
-      const quoteCcy         = (r['Currency'] || 'USD').toUpperCase();
+      const costBasisQuote     = parseFloat(r['Cost basis'] || 0);
+      const grossProceedsQuote = parseFloat(r['Gross proceeds'] || 0);
+      const feeQuote           = parseFloat(r['Fees'] || 0);
+      const quoteCcy           = (r['Currency'] || 'USD').toUpperCase();
 
-      const buyPrice  = costBasisUSD  > 0 && qty > 0 ? costBasisUSD  / qty : 0;
-      const sellPrice = grossProceedsUSD > 0 && qty > 0 ? grossProceedsUSD / qty : 0;
+      const buyPrice  = costBasisQuote > 0  && qty > 0 ? costBasisQuote  / qty : 0;
+      const sellPrice = grossProceedsQuote > 0 && qty > 0 ? grossProceedsQuote / qty : 0;
 
-      // Use idx in txHash so duplicate dates+quantities don't collide
-      // (Revolut splits one purchase into multiple FIFO lots)
+      // Convert quote-currency fee to approximate SEK.
+      // We don't have historical FX here so use the hardcoded fallback rates.
+      // (The pricing pipeline will use real historical FX for the main price;
+      //  fee accuracy at ~10 SEK/USD is acceptable for K4 purposes.)
+      const feeToSEK = quoteCcy === 'EUR' ? STABLE_SEK.EUR : STABLE_SEK.USD;
+      const feeSEK   = feeQuote * feeToSEK;
 
-      // BUY — establishes the acquisition for genomsnittsmetoden
+      // For stablecoins (USDC, USDT, etc.) tag the source as exchange_buy_candidate
+      // so the stable_source_unknown bucket is avoided for Trading Statement rows.
+      const isStable        = STABLES.has(sym);
+      const stableSourceSts = isStable ? 'exchange_buy_candidate' : null;
+
+      // idx in txHash prevents hash collisions when Revolut splits a single
+      // purchase into multiple FIFO lots with the same date+quantity.
+
+      // ── BUY: establishes acquisition for genomsnittsmetoden ──
       out.push(normalizeTransaction({
-        txHash:          `rev_buy_${sym}_${dateAcq.replace(/[^0-9]/g,'')}_${idx}`,
-        date:            dateAcq,
-        type:            'buy',
-        assetSymbol:     sym,
-        amount:          qty,
-        inAsset:         quoteCcy,
-        inAmount:        costBasisUSD,
-        rawTradePrice:   buyPrice,
+        txHash:           `rev_buy_${sym}_${dateAcq.replace(/[^0-9]/g,'')}_${idx}`,
+        date:             dateAcq,
+        type:             'buy',
+        assetSymbol:      sym,
+        amount:           qty,
+        inAsset:          quoteCcy,
+        inAmount:         costBasisQuote,
+        rawTradePrice:    buyPrice,
         rawTradeCurrency: quoteCcy,
-        feeSEK:          0,          // fees charged on sell side
-        needsReview:     false,
+        feeSEK:           0,               // fees fully charged on the sell side
+        sourceStatus:     stableSourceSts,
+        needsReview:      false,
         notes: `Revolut buy ${qty} ${sym} @ ${buyPrice.toFixed(4)} ${quoteCcy} (trading statement lot ${idx})`,
       }, accountId, 'revolut_csv'));
 
-      // SELL — disposal event; triggers gain/loss calculation
+      // ── SELL: disposal event; triggers gain/loss calculation ──
       out.push(normalizeTransaction({
-        txHash:          `rev_sell_${sym}_${dateSold.replace(/[^0-9]/g,'')}_${idx}`,
-        date:            dateSold,
-        type:            'sell',
-        assetSymbol:     sym,
-        amount:          qty,
-        inAsset:         quoteCcy,
-        inAmount:        grossProceedsUSD,
-        rawTradePrice:   sellPrice,
+        txHash:           `rev_sell_${sym}_${dateSold.replace(/[^0-9]/g,'')}_${idx}`,
+        date:             dateSold,
+        type:             'sell',
+        assetSymbol:      sym,
+        amount:           qty,
+        inAsset:          quoteCcy,
+        inAmount:         grossProceedsQuote,
+        rawTradePrice:    sellPrice,
         rawTradeCurrency: quoteCcy,
-        feeSEK:          feeUSD,     // USD amount; pipeline converts via FX
-        needsReview:     false,
+        feeSEK,                            // converted from quote currency above
+        sourceStatus:     stableSourceSts,
+        needsReview:      false,
         notes: `Revolut sell ${qty} ${sym} @ ${sellPrice.toFixed(4)} ${quoteCcy} (trading statement lot ${idx})`,
       }, accountId, 'revolut_csv'));
     }

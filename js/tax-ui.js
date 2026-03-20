@@ -5536,7 +5536,28 @@ const TaxUI = (() => {
       else if (parser === 'kraken') txns = P.parseKrakenCSV(_pendingCSVText, acc.id);
       else if (parser === 'bybit') txns = P.parseBybitCSV(_pendingCSVText, acc.id);
       else if (parser === 'coinbase') txns = P.parseCoinbaseCSV(_pendingCSVText, acc.id);
-      else if (parser === 'revolut') txns = P.parseRevolutCSV(_pendingCSVText, acc.id);
+      else if (parser === 'revolut') {
+        txns = P.parseRevolutCSV(_pendingCSVText, acc.id);
+        // Post-parse validation: count economic event types so the user can
+        // immediately see if BUY/SELL/TRADE events were correctly recognised.
+        const _buys   = txns.filter(t => t.rawType === 'buy').length;
+        const _sells  = txns.filter(t => t.rawType === 'sell').length;
+        const _trades = txns.filter(t => t.rawType === 'trade').length;
+        const _rcv    = txns.filter(t => t.rawType === 'receive').length;
+        console.info(
+          `[Revolut import] parsed ${txns.length} rows → ` +
+          `${_buys} BUY · ${_sells} SELL · ${_trades} TRADE(crypto↔crypto) · ${_rcv} RECEIVE · ` +
+          `(check DevTools for details)`
+        );
+        // Flag a likely parser miss: if CSV has rows but no buys AND no sells
+        if (txns.length > 0 && _buys === 0 && _sells === 0 && _trades === 0) {
+          if (st) st.innerHTML = `
+            <div class="tax-import-error" style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:#fbbf24">
+              ⚠️ Revolut-importen skapade inga BUY/SELL/TRADE-händelser (${txns.length} rader, alla som RECEIVE).
+              Kontrollera att du exporterade rätt fil — välj <strong>Kontoutdrag → Kryptovaluta</strong>.
+            </div>`;
+        }
+      }
       else if (parser === 'mexc') txns = P.parseMEXCCSV(_pendingCSVText, acc.id);
       else if (parser === 'solscan') txns = P.parseSolscanCSV(_pendingCSVText, acc.id);
       else txns = P.parseGenericCSV(_pendingCSVText, acc.id);

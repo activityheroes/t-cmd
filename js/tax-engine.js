@@ -4527,7 +4527,15 @@ const TaxEngine = (() => {
       // ── Pass 2: Opening balance candidate ────────────────────────────
       // Disposal within 90 days of the earliest imported date strongly
       // suggests the user held the token before their import window started.
-      if (earliestMs > 0 && dispMs <= earliestMs + 90 * 24 * 3600_000) {
+      // BUT: if acquisitionMap already contains acquisitions for this asset
+      // that precede the disposal date, the token was NOT an opening balance —
+      // the real problem is an untrusted price source on those acquisitions.
+      // Skip opening-balance labeling in that case so the disposal surfaces as
+      // manual_review_required (user must fix the acquisition's price source).
+      const hasPriorAcquisition = (acquisitionMap[sym] || []).some(
+        a => new Date(a.date).getTime() < dispMs
+      );
+      if (earliestMs > 0 && dispMs <= earliestMs + 90 * 24 * 3600_000 && !hasPriorAcquisition) {
         const daysAfter = Math.round((dispMs - earliestMs) / (24 * 3600_000));
         const confidence = daysAfter < 0 ? 'high' : daysAfter < 14 ? 'high' : 'medium';
         d.resolutionType          = RT.OPENING_BALANCE;
@@ -5690,13 +5698,14 @@ const TaxEngine = (() => {
           assetSymbol:      sym,
           amount:           cryptoAmt,
           // inAsset/inAmount encodes the fiat leg so Level-2 pricing can derive SEK price
-          inAsset:          fiatSym,
-          inAmount:         fiatAmt,
-          rawTradePrice:    price,    // price per unit in fiatSym
-          rawTradeCurrency: fiatSym,
+          // Only set when fiatAmt > 0; if 0 the market API will price the row instead.
+          inAsset:          fiatAmt > 0 ? fiatSym : undefined,
+          inAmount:         fiatAmt > 0 ? fiatAmt : undefined,
+          rawTradePrice:    price,    // price per unit in fiatSym (0 if unknown)
+          rawTradeCurrency: fiatAmt > 0 ? fiatSym : undefined,
           feeSEK,
-          needsReview:      false,
-          notes: `Revolut ${isBuy ? 'buy' : 'sell'} ${cryptoAmt} ${sym} for ${fiatAmt} ${fiatSym} — ${desc}`.trim(),
+          needsReview:      fiatAmt === 0, // flag for manual review when price data absent
+          notes: `Revolut ${isBuy ? 'buy' : 'sell'} ${cryptoAmt} ${sym}${fiatAmt > 0 ? ` for ${fiatAmt} ${fiatSym}` : ' (price unknown)'} — ${desc}`.trim(),
         }, accountId, 'revolut_csv'));
 
       } else if (cryptoLegs.length === 2) {

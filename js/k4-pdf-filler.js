@@ -88,6 +88,34 @@ window.K4PdfFiller = (() => {
   // Page 2 header (Personnummer top-right of every Section D sheet)
   const P2_PERSONNR = { x0: 428.12, x1: 557.72, top: 30.00, bot: 54.00 };
 
+  // ── WinAnsi sanitizer ────────────────────────────────────
+  // pdf-lib's standard fonts (Helvetica, etc.) use WinAnsi encoding which only
+  // covers U+0000–U+00FF.  Characters above that range throw:
+  //   "WinAnsi cannot encode '◎' (0x25ce)"
+  // This happens whenever a token symbol or display name contains emoji or
+  // Unicode symbols (◎, ●, ★, →, …).  Strip/transliterate them here so the
+  // entire K4 export is never blocked by a single exotic token name.
+  function sanitizePdf(value) {
+    if (value === null || value === undefined) return '';
+    const s = String(value);
+    if (!/[^\u0000-\u00FF]/.test(s)) return s; // fast path
+    return s.replace(/[^\u0000-\u00FF]/g, ch => {
+      const SUBS = {
+        '\u25CE': 'o', '\u25CB': 'o', '\u25CF': '*', '\u25C9': 'o',
+        '\u2B55': 'o', '\u2022': '-', '\u2023': '-',
+        '\u2192': '->', '\u2190': '<-', '\u2194': '<->',
+        '\u21D2': '=>', '\u21D0': '<=',
+        '\u2248': '~', '\u2260': '!=', '\u221E': 'inf',
+        '\u20BF': 'BTC', '\u20AC': 'EUR',
+        '\u2019': "'", '\u2018': "'", '\u201C': '"', '\u201D': '"',
+        '\u2013': '-',  '\u2014': '-',  '\u2026': '...',
+        '\u2605': '*', '\u2606': '*',
+        '\u00D7': 'x', '\u00F7': '/',
+      };
+      return SUBS[ch] !== undefined ? SUBS[ch] : '?';
+    });
+  }
+
   // ── Text formatting ───────────────────────────────────────
   function fmtSEK(val) {
     if (!val) return '';
@@ -128,9 +156,13 @@ window.K4PdfFiller = (() => {
     const fontBold = await destDoc.embedFont(StandardFonts.HelveticaBold);
 
     // ── Helpers ───────────────────────────────────────────
+    // sanitizePdf() is defined at module scope (above fmtSEK) so it can be shared
+    // with generateAccountantReport() too.  All draw helpers call it to strip
+    // any codepoint > U+00FF before passing text to pdf-lib's WinAnsi font.
+
     function drawLeft(page, text, box, fontSize, opts = {}) {
       if (!text && text !== 0) return;
-      page.drawText(String(text), {
+      page.drawText(sanitizePdf(text), {
         x:    box.x0 + 3,
         y:    textY(box.top, box.bot, fontSize),
         size: fontSize,
@@ -141,7 +173,7 @@ window.K4PdfFiller = (() => {
 
     function drawCenter(page, text, box, fontSize, opts = {}) {
       if (!text && text !== 0) return;
-      const s   = String(text);
+      const s   = sanitizePdf(text);
       const w   = font.widthOfTextAtSize(s, fontSize);
       const cx  = (box.x0 + box.x1) / 2;
       page.drawText(s, {
@@ -155,7 +187,7 @@ window.K4PdfFiller = (() => {
 
     function drawRight(page, text, box, fontSize, opts = {}) {
       if (!text && text !== 0) return;
-      const s = String(text);
+      const s = sanitizePdf(text);
       const w = font.widthOfTextAtSize(s, fontSize);
       page.drawText(s, {
         x:    box.x1 - w - 3,
@@ -168,7 +200,7 @@ window.K4PdfFiller = (() => {
 
     function drawRightXY(page, text, rightX, y, fontSize, opts = {}) {
       if (!text && text !== 0) return;
-      const s = String(text);
+      const s = sanitizePdf(text);
       const w = font.widthOfTextAtSize(s, fontSize);
       page.drawText(s, {
         x:    rightX - w - 3,
@@ -246,8 +278,8 @@ window.K4PdfFiller = (() => {
         // Antal/Belopp — right-align
         drawRightXY(p2, fmtQty(row.qty), COL.antal.x1, ry, 8);
 
-        // Beteckning — left-align, max ~25 chars
-        const label = String(row.displayName || row.sym || '').substring(0, 25);
+        // Beteckning — left-align, max ~25 chars; sanitize to strip non-WinAnsi glyphs
+        const label = sanitizePdf(String(row.displayName || row.sym || '').substring(0, 25));
         p2.drawText(label, { x: COL.beteckn.x0 + 2, y: ry, size: 8, font, color: black });
 
         // Försäljningspris — right-align
@@ -298,8 +330,8 @@ window.K4PdfFiller = (() => {
     const { PDFDocument, StandardFonts, rgb } = PDFLib;
 
     const { disposals = [], year } = taxResult || {};
-    const name   = (userInfo?.name  || '').trim();
-    const pnr    = (userInfo?.pnr   || '').trim();
+    const name   = sanitizePdf((userInfo?.name  || '').trim());
+    const pnr    = sanitizePdf((userInfo?.pnr   || '').trim());
     const txYear = String(year || userInfo?.year || '');
 
     const doc   = await PDFDocument.create();
@@ -387,15 +419,15 @@ window.K4PdfFiller = (() => {
       }
 
       const rowData = [
-        [String((d.date||'').slice(0,10)),                            ML+2  ],
-        [String(d.assetSymbol||'').substring(0,14),                   ML+68 ],
-        [String(parseFloat((d.amountSold||0).toPrecision(5))),        ML+160],
-        [Math.round(d.proceedsSEK||0).toLocaleString('sv-SE'),        ML+210],
-        [Math.round(d.costBasisSEK||0).toLocaleString('sv-SE'),       ML+268],
-        [gain > 0 ? gain.toLocaleString('sv-SE') : '',                ML+326],
-        [loss > 0 ? loss.toLocaleString('sv-SE') : '',                ML+374],
-        ['Genomsnitt',                                                 ML+422],
-        [String(d.accountLabel || d.accountId || '').substring(0,14), ML+475],
+        [sanitizePdf((d.date||'').slice(0,10)),                                    ML+2  ],
+        [sanitizePdf(String(d.assetSymbol||'').substring(0,14)),                   ML+68 ],
+        [String(parseFloat((d.amountSold||0).toPrecision(5))),                     ML+160],
+        [Math.round(d.proceedsSEK||0).toLocaleString('sv-SE'),                     ML+210],
+        [Math.round(d.costBasisSEK||0).toLocaleString('sv-SE'),                    ML+268],
+        [gain > 0 ? gain.toLocaleString('sv-SE') : '',                             ML+326],
+        [loss > 0 ? loss.toLocaleString('sv-SE') : '',                             ML+374],
+        ['Genomsnitt',                                                              ML+422],
+        [sanitizePdf(String(d.accountLabel || d.accountId || '').substring(0,14)), ML+475],
       ];
 
       for (const [val, x] of rowData) {

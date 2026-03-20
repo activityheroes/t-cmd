@@ -1096,17 +1096,11 @@ window.adminTestKey = async function (name) {
         }
       }
     } else if (name === 'etherscan') {
-      // Etherscan test: call their API status endpoint
-      try {
-        const r = await fetch(`https://api.etherscan.io/api?module=account&action=balance&address=0x0000000000000000000000000000000000000000&tag=latest&apikey=${key}`);
-        const data = await r.json();
-        const ok = data?.status === '1' || data?.message === 'OK';
-        if (status) {
-          status.textContent = ok ? '✓ Etherscan key is valid!' : '✗ Etherscan key invalid or quota exceeded';
-          status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
-        }
-      } catch {
-        if (status) { status.textContent = 'Error testing Etherscan key'; status.style.color = '#ef4444'; }
+      // Etherscan test: tries v2 API first (new keys), falls back to v1 (legacy keys)
+      const result = await ChainAPIs.testEtherscanKey(key);
+      if (status) {
+        status.textContent = result.ok ? '✓ Etherscan key is valid!' : `✗ ${result.error || 'Etherscan key invalid or quota exceeded'}`;
+        status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
       }
     } else if (name === 'basescan' || name === 'arbiscan' || name === 'monadscan') {
       const testFn = name === 'basescan' ? ChainAPIs.testBasescanKey

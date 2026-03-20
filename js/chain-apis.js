@@ -377,6 +377,22 @@ const ChainAPIs = (() => {
     }
   }
 
+  // Etherscan v2 API (launched 2024) — new keys require ?chainid=1 on the /v2/api path.
+  // We try v2 first, then fall back to legacy v1 so old keys still pass.
+  async function testEtherscanKey(key) {
+    const addr = '0x0000000000000000000000000000000000000000';
+    const balanceQuery = `module=account&action=balance&address=${addr}&tag=latest&apikey=${key}`;
+    // Try v2 first
+    try {
+      const r = await fetch(`https://api.etherscan.io/v2/api?chainid=1&${balanceQuery}`);
+      const data = await r.json();
+      const ok = data?.status === '1' || data?.message === 'OK';
+      if (ok) return { ok: true };
+    } catch { /* fall through to v1 */ }
+    // Fall back to v1 (legacy keys / temporary network issues)
+    return testEtherscanCompatKey('https://api.etherscan.io/api', key, 'Etherscan');
+  }
+
   async function testBasescanKey(key) {
     return testEtherscanCompatKey('https://api.basescan.org/api', key, 'Basescan');
   }
@@ -472,6 +488,6 @@ const ChainAPIs = (() => {
     isBurnAddress, isLockerContract, isSafeLP,
     // Key testing
     testBirdeyeKey, testHeliusKey, testCoinGeckoKey,
-    testBasescanKey, testArbiscanKey, testMonadscanKey,
+    testEtherscanKey, testBasescanKey, testArbiscanKey, testMonadscanKey,
   };
 })();

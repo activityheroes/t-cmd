@@ -3251,6 +3251,19 @@ const TaxUI = (() => {
               ${stepRow(2, 'Åtgärda saknade priser',      missingPrice,   'missing_sek_price',   'blockers')}
               ${stepRow(3, 'Omatchade överföringar',       unmatchedXfer,  'unmatched_transfer',  'warnings')}
               ${stepRow(4, 'Okända tokens',                unknownToken,   'unknown_asset',       'warnings')}
+              ${unknownToken > 0 ? (() => {
+                const utIssues  = issues.filter(i => i.reason === 'unknown_asset');
+                const autoHide  = utIssues.filter(i => ['swap_intermediate','contract_spam','meme_coin'].includes(i.tokenClass?.type)).length;
+                const lowVal    = utIssues.filter(i => i.tokenClass?.type === 'low_value').length;
+                const realUnk   = utIssues.filter(i => !i.tokenClass || i.tokenClass.type === 'unknown_real').length;
+                const parts = [];
+                if (autoHide > 0) parts.push(`${autoHide} auto-döljbara`);
+                if (lowVal  > 0) parts.push(`${lowVal} lågvärde`);
+                if (realUnk > 0) parts.push(`${realUnk} kräver granskning`);
+                return parts.length > 0
+                  ? `<div style="margin:-4px 0 4px 38px;font-size:10px;color:#64748b">${parts.join(' · ')}</div>`
+                  : '';
+              })() : ''}
               <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;
                           background:${totalBlockers===0?'rgba(34,197,94,.06)':'rgba(255,255,255,.02)'};
                           border:1px solid ${totalBlockers===0?'rgba(34,197,94,.2)':'rgba(148,163,184,.1)'};cursor:pointer"
@@ -3507,6 +3520,9 @@ const TaxUI = (() => {
                   ${(() => {
                     const isAssetGrouped = (reason === 'unknown_acquisition' || reason === 'missing_sek_price')
                       && subGroups && subGroups.length > 0;
+                    // Token-class grouped rendering for unknown_asset
+                    const isTokenClassGrouped = reason === 'unknown_asset'
+                      && subGroups && subGroups.length > 0;
 
                     // Helper: render rows with row-limit + expand button
                     const renderRowsWithLimit = (sgItems, renderRow, groupKey) => {
@@ -3579,6 +3595,60 @@ const TaxUI = (() => {
                           ${sg.tip ? `<div style="font-size:10px;color:#64748b;margin-top:2px;margin-bottom:2px">${sg.tip}</div>` : ''}
                         </div>
                         ${assetGroupsHtml}`;
+                      }).join('');
+                    }
+
+                    // ── Token-class grouped rendering for unknown_asset ────────────────
+                    // Auto-hideable buckets (swap_intermediate/contract_spam/meme_coin/low_value)
+                    // are shown as collapsed panels with a bulk action button.
+                    // Only unknown_real items are shown individually.
+                    if (isTokenClassGrouped) {
+                      const AUTO_HIDDEN_TYPES = new Set(['swap_intermediate','contract_spam','meme_coin','low_value']);
+                      return subGroups.map(sg => {
+                        const isHideable   = AUTO_HIDDEN_TYPES.has(sg.cls);
+                        const clsKey       = `tokencls:${sg.cls}`;
+                        const isExpanded   = S.reviewGroupExpanded.has(clsKey);
+                        const autoLabel    = sg.meta?.autoAction === 'hide' ? '🚫 Auto-dölj alla' : '✓ Ignorera alla';
+                        const autoTitle    = sg.meta?.autoAction === 'hide'
+                          ? 'Klassificera alla som spam (nollvärde, exkluderas från K4)'
+                          : 'Markera alla som granskade';
+
+                        if (!isHideable) {
+                          // unknown_real — render individually, no bulk hide
+                          return `
+                          <div style="padding:8px 12px 4px;background:rgba(15,23,42,.5);border-bottom:1px solid rgba(148,163,184,.08);border-left:3px solid ${sg.meta.color}">
+                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                              <span style="font-size:12px;font-weight:600;color:${sg.meta.color}">${sg.meta.label}</span>
+                              <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,.3);color:#94a3b8">${sg.items.length} token${sg.items.length !== 1 ? 's' : ''}</span>
+                            </div>
+                            <div style="font-size:10px;color:#64748b;margin-top:2px;margin-bottom:4px">${sg.meta.tip}</div>
+                          </div>
+                          ${renderRowsWithLimit(sg.items, issue => renderReviewRow(issue), clsKey)}`;
+                        }
+
+                        // Auto-hideable bucket: collapsed by default with bulk action button
+                        return `
+                        <div style="border-left:3px solid ${sg.meta.color};background:rgba(15,23,42,.4)">
+                          <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;flex-wrap:wrap"
+                               onclick="TaxUI.expandReviewGroup(${JSON.stringify(clsKey)})">
+                            <span style="font-size:11px;font-weight:600;color:${sg.meta.color};flex:1">${sg.meta.label}</span>
+                            <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(0,0,0,.3);color:#94a3b8">${sg.items.length} tokens</span>
+                            <button onclick="event.stopPropagation();TaxUI.bulkHideTokenClass('${sg.cls}')"
+                              style="font-size:10px;padding:2px 10px;border-radius:5px;border:1px solid rgba(239,68,68,.25);background:rgba(239,68,68,.08);color:#f87171;cursor:pointer;white-space:nowrap"
+                              title="${autoTitle}">${autoLabel}</button>
+                            <span style="font-size:10px;color:#475569">${isExpanded ? '▼' : '▶'}</span>
+                          </div>
+                          <div style="padding:4px 12px 6px;font-size:10px;color:#475569">${sg.meta.tip}</div>
+                          ${isExpanded
+                            ? renderRowsWithLimit(sg.items, issue => renderReviewRow(issue), clsKey)
+                            : `<div style="padding:4px 14px 8px">
+                                <button onclick="TaxUI.expandReviewGroup(${JSON.stringify(clsKey)})"
+                                  style="font-size:10px;padding:2px 10px;border-radius:4px;border:1px dashed rgba(148,163,184,.2);background:transparent;color:#475569;cursor:pointer">
+                                  Visa ${sg.items.length} rader →
+                                </button>
+                              </div>`
+                          }
+                        </div>`;
                       }).join('');
                     }
 
@@ -3741,6 +3811,52 @@ const TaxUI = (() => {
         assetGroups: buildAssetSubGroups(items),
       }));
     }
+    // For unknown_asset, build sub-groups by token classification type.
+    // Each sub-group except 'unknown_real' gets a bulk-hide button and is
+    // collapsed by default — reducing 400+ rows to ~10-30 visible items.
+    if (groups.unknown_asset) {
+      const TOKEN_CLASS_META = {
+        swap_intermediate: {
+          label: '↔️ Swap-mellanled',
+          tip: 'Dessa tokens förekommer enbart som mellanled i multi-hop swaps. De har inget självständigt ekonomiskt värde och kan döljas automatiskt.',
+          color: '#60a5fa', autoAction: 'hide',
+        },
+        contract_spam: {
+          label: '🗑️ Olösbara kontraktsadresser',
+          tip: 'Symbol är fortfarande en rå kontraktsadress — token-metadata kunde inte lösas. Troligen spam-tokens eller utgångna tokens.',
+          color: '#f87171', autoAction: 'hide',
+        },
+        meme_coin: {
+          label: '🪙 Kortlivade meme-coins / pump.fun',
+          tip: 'Tokens med ≤5 transaktioner, inget CoinGecko-ID och ingen prisinformation. Troligen pump/dump-coins, meme-coins eller avlistade tokens.',
+          color: '#fbbf24', autoAction: 'hide',
+        },
+        low_value: {
+          label: '💰 Lågt värde (< 50 kr)',
+          tip: 'Uppskattat värde under 50 SEK. Kan ignoreras utan K4-påverkan.',
+          color: '#34d399', autoAction: 'ignore',
+        },
+        unknown_real: {
+          label: '❓ Verkliga okända — kräver granskning',
+          tip: 'Dessa tokens kunde inte klassificeras automatiskt och kräver manuell åtgärd.',
+          color: '#a78bfa', autoAction: 'ask_user',
+        },
+      };
+      const CLS_ORDER = ['swap_intermediate','contract_spam','meme_coin','low_value','unknown_real'];
+      const clsMap = {};
+      for (const issue of groups.unknown_asset.items) {
+        const cls = issue.tokenClass?.type || 'unknown_real';
+        if (!clsMap[cls]) clsMap[cls] = [];
+        clsMap[cls].push(issue);
+      }
+      groups.unknown_asset.subGroups = Object.entries(clsMap)
+        .sort(([a],[b]) => {
+          const ai = CLS_ORDER.indexOf(a), bi = CLS_ORDER.indexOf(b);
+          return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+        })
+        .map(([cls, items]) => ({ cls, meta: TOKEN_CLASS_META[cls] || TOKEN_CLASS_META.unknown_real, items }));
+    }
+
     // Return in priority order
     const ORDER = [
       'unknown_acquisition','negative_balance','missing_sek_price','unknown_asset',
@@ -5045,6 +5161,55 @@ const TaxUI = (() => {
   }
 
   // Mark all transactions in a review group as spam (zero value, excluded from K4)
+  // ── Bulk-hide all unknown tokens of a specific token class ─────────────
+  // Called by the auto-hide buttons in the classified unknown_asset sub-groups.
+  // Marks the tokens as spam (zero value, excluded from K4).
+  function bulkHideTokenClass(tokenClassType) {
+    const issues   = TaxEngine.getReviewIssues(null, S.taxResult);
+    const affected = issues.filter(i =>
+      i.reason === 'unknown_asset' && i.tokenClass?.type === tokenClassType
+    );
+    if (!affected.length) return;
+
+    const LABELS = {
+      swap_intermediate: 'swap-mellanled',
+      contract_spam:     'olösbara kontraktsadresser',
+      meme_coin:         'meme-coins / kortlivade tokens',
+      low_value:         'lågvärdes-tokens',
+    };
+    const label = LABELS[tokenClassType] || tokenClassType;
+    // low_value tokens: use "ignore" (mark reviewed only) rather than spam
+    const useIgnore = tokenClassType === 'low_value';
+
+    if (!confirm(
+      useIgnore
+        ? `Ignorera ${affected.length} ${label}?\nDe markeras som granskade men klassificeras inte om.`
+        : `Dölj ${affected.length} ${label} automatiskt?\nDe klassificeras som spam (nollvärde) och exkluderas från K4.`
+    )) return;
+
+    const ids = new Set(affected.map(i => i.txnId));
+    const updated = TaxEngine.getTransactions().map(t => {
+      if (!ids.has(t.id)) return t;
+      if (useIgnore) {
+        return { ...t, needsReview: false, reviewReason: null, userReviewed: true };
+      }
+      return { ...t,
+        category: 'spam',
+        priceSEKPerUnit: 0, costBasisSEK: 0,
+        priceSource: 'missing', priceConfidence: 'spam_zero',
+        needsReview: false, reviewReason: 'spam_token', userReviewed: true,
+        _autoHiddenAs: tokenClassType,   // audit trail
+      };
+    });
+    TaxEngine.saveTransactions(updated);
+    S.taxResult = null;
+    const icon = useIgnore ? '✅' : '🚫';
+    const verb = useIgnore ? 'ignorerade' : 'dolda';
+    showTaxToast(icon, `${affected.length} tokens ${verb}`,
+      `Klassificerade som ${useIgnore ? 'granskade' : 'spam'} — ${label}.`, 'success');
+    render();
+  }
+
   function bulkMarkSpam(reason) {
     const issues = TaxEngine.getReviewIssues(null, S.taxResult);
     const affected = issues.filter(i => i.reason === reason);
@@ -6225,6 +6390,7 @@ const TaxUI = (() => {
     toggleSelectAll, toggleSelectTx, deleteSelected, deleteAllFiltered, clearSelection,
     markReviewed, markAllReviewed, markSpam,
     markGroupSpam, bulkMarkSpam, bulkMarkReviewed, bulkZeroCost, bulkReclassify, bulkShowPriceSearch,
+    bulkHideTokenClass,
     bulkAutoInfer, resolveUnknownTokens, toggleReviewGroup,
     bulkResolveSpamCandidates, bulkResolveAirdropCandidates, bulkCreateOpeningBalances, autoResolveAll, autoFixEasyCases,
     // Review multi-select + bulk actions

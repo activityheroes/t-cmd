@@ -924,6 +924,74 @@ const TaxEngine = (() => {
   }
 
   // ════════════════════════════════════════════════════════════
+  // ── Unknown-token classifier ─────────────────────────────
+  // Reduces 400+ "Unknown token" review rows to ~10-30 genuinely actionable items
+  // by classifying each token into one of five auto-actionable buckets.
+  //
+  // Returns { type, confidence, autoAction, reason } where type is one of:
+  //   'swap_intermediate' — token only appears as a swap leg (auto-hide)
+  //   'contract_spam'     — symbol is an unresolved contract address (auto-hide)
+  //   'meme_coin'         — short-lived, no CoinGecko, only in swaps (auto-hide)
+  //   'low_value'         — estimated value < 50 SEK (auto-ignore)
+  //   'unknown_real'      — genuinely unknown, requires user decision
+  //
+  function classifyUnknownToken(t, txsByHash, symToTxns) {
+    const sym       = (t.assetSymbol || '').toUpperCase();
+    const hashGroup = t.txHash ? (txsByHash[t.txHash] || []) : [];
+    const allForSym = symToTxns[sym] || [];
+
+    // ── 1. Swap intermediate ────────────────────────────────
+    // The pricing pipeline already marks these as priceSource='swap_implied'
+    // when it can infer value from the swap counterpart.
+    if (t.priceSource === PS.SWAP_IMPLIED) {
+      return { type: 'swap_intermediate', confidence: 'high', autoAction: 'hide',
+               reason: 'Pris härledd från swap-motpart — troligt mellanled i multi-hop swap' };
+    }
+    // Also catch swap intermediates the pricing pipeline couldn't resolve:
+    // same txHash group has other assets, and this token only ever appears in TRADEs.
+    if (hashGroup.length > 1 && t.category === CAT.TRADE) {
+      const hasPricedPeer = hashGroup.some(
+        x => x.id !== t.id && (x.priceSEKPerUnit > 0 || (x.priceSource && x.priceSource !== PS.MISSING))
+      );
+      const tradeOnly = allForSym.length > 0
+        && allForSym.every(x => x.category === CAT.TRADE || x.category === CAT.SPAM);
+      if (hasPricedPeer || (tradeOnly && allForSym.length <= 6)) {
+        return { type: 'swap_intermediate', confidence: 'high', autoAction: 'hide',
+                 reason: 'Förekommer enbart i swap-kontext tillsammans med kända tillgångar' };
+      }
+    }
+
+    // ── 2. Contract-address spam ────────────────────────────
+    // Symbol is still a raw contract address — metadata resolution failed.
+    if (looksLikeContractAddress(sym)) {
+      return { type: 'contract_spam', confidence: 'high', autoAction: 'hide',
+               reason: 'Symbol är en kontraktsadress — token-metadata okänd eller olösbar' };
+    }
+
+    // ── 3. Meme-coin / pump-dump ────────────────────────────
+    // Short lifecycle: ≤ 5 transactions, no CoinGecko ID, no price, trade-only.
+    // Also catches tokens with pump.fun markers in name/notes.
+    const hasPumpName = /pump\.fun|pumpfun/i.test(t.assetName || t.notes || '');
+    const isPumpLike  = hasPumpName
+      || (allForSym.length > 0
+          && allForSym.every(x => x.category === CAT.TRADE || x.category === CAT.SPAM));
+    if (!t.coinGeckoId && !t.priceSEKPerUnit && allForSym.length <= 5 && isPumpLike) {
+      return { type: 'meme_coin', confidence: 'medium', autoAction: 'hide',
+               reason: `Kortlivad token (${allForSym.length} txn) — troligen meme-coin, pump/dump eller avlistad tillgång` };
+    }
+
+    // ── 4. Low value ────────────────────────────────────────
+    const estimatedSEK = (t.priceSEKPerUnit || 0) * Math.abs(t.amount || 0);
+    if (estimatedSEK > 0 && estimatedSEK < 50) {
+      return { type: 'low_value', confidence: 'high', autoAction: 'ignore',
+               reason: `Uppskattat värde ~${Math.round(estimatedSEK)} SEK — under granskningströskel` };
+    }
+
+    // ── 5. Truly unknown — needs user attention ─────────────
+    return { type: 'unknown_real', confidence: 'low', autoAction: 'ask_user',
+             reason: 'Kunde inte klassificeras automatiskt — manuell granskning krävs' };
+  }
+
   // STEP 3 — DETECT SPAM TOKENS
   // Mark spam BEFORE classification to avoid polluting K4.
   // ════════════════════════════════════════════════════════════
@@ -3098,6 +3166,13 @@ const TaxEngine = (() => {
       }
     }
 
+    // ── Build symbol → tx[] map for token classifier ──────
+    const _symToTxns = {};
+    for (const t of txns) {
+      const s = (t.assetSymbol || '').toUpperCase();
+      if (s) (_symToTxns[s] = _symToTxns[s] || []).push(t);
+    }
+
     // ── Pass 2: Structural checks (independent of per-tx flags) ──
     const taxableCats = new Set([
       CAT.SELL, CAT.TRADE, CAT.RECEIVE, CAT.INCOME, CAT.BUY,
@@ -3178,7 +3253,9 @@ const TaxEngine = (() => {
       // 2. Unknown token (contract address still showing or no name/CoinGecko ID)
       if (taxableCats.has(t.category) && !t.coinGeckoId && !STABLES.has(t.assetSymbol)) {
         if (looksLikeContractAddress(t.assetSymbol) || (!t.assetName && !TOKEN_DISPLAY_NAMES[t.assetSymbol?.toUpperCase()])) {
-          issues.push({ txnId: t.id, txn: t, reason: 'unknown_asset', meta: REVIEW_DESCRIPTIONS.unknown_asset });
+          const tokenClass = classifyUnknownToken(t, txsByHash, _symToTxns);
+          issues.push({ txnId: t.id, txn: t, reason: 'unknown_asset',
+            meta: REVIEW_DESCRIPTIONS.unknown_asset, tokenClass });
           flaggedIds.add(t.id); continue;
         }
       }

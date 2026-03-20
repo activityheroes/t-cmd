@@ -4570,6 +4570,15 @@ const TaxEngine = (() => {
         if (notMajor_d) {
           d.resolutionType       = RT.SPAM;
           d.resolutionConfidence = 'high';
+          d.reviewSeverity       = 'informational';
+          d.autoResolvable       = true;
+          d.blocksCurrentK4      = false;
+          d.autoResolve          = {
+            eligible: true, confidence: 0.97, action: 'auto_mark_spam',
+            candidateId: null, breakdown: null,
+            reasons: ['micro_proceeds_dust_token'],
+            reason: `Mikro-intäkt (${Math.round(procSEK_d)} kr) för okänd token — dust/rent-refund.`,
+          };
           d.resolutionNote = `Mikro-intäkt (${Math.round(procSEK_d)} kr) för okänd token ${sym}. `
             + `Troligen stängd token-account (Solana rent-refund) eller dust. `
             + `Exkluderas automatiskt med 0 kr kostnadsbas — ingen skatteeffekt.`;
@@ -4626,29 +4635,72 @@ const TaxEngine = (() => {
         const best  = candidates[0];
         const diffH = Math.abs(new Date(best.date).getTime() - dispMs) / 3600_000;
 
-        // ── 5-component weighted confidence score ─────────────────────────
-        //   asset(35%) + amount(25%) + time(15%) + ownership(15%) + source(10%)
-        const candEco    = best.economicId || best.assetSymbol;
-        const assetScore = sym === best.assetSymbol ? 1.0
-                         : dispEcoId === candEco    ? 0.9
-                         : 0;
-        const amtDiff     = qty > 0 ? Math.abs(best.amount - qty) / Math.max(best.amount, qty) : 1;
-        const amountScore = amtDiff < 0.01 ? 1.0
-                          : amtDiff < 0.03 ? 0.9
-                          : amtDiff < 0.05 ? 0.7
-                          : amtDiff < 0.08 ? 0.5
-                          : 0;
-        const timeScore   = diffH <   1 ? 1.0
-                          : diffH <  24 ? 0.9
-                          : diffH <  72 ? 0.7
-                          : 0.5;
-        const ownershipScore = best.accountId !== d.accountId ? 0.9 : 0.3;
-        const sourceScore    = 0.9;   // same-user ecosystem signal
-
-        const score      = (assetScore * 0.35) + (amountScore * 0.25)
-                         + (timeScore  * 0.15) + (ownershipScore * 0.15)
-                         + (sourceScore * 0.10);
-        const confidence = score >= 0.8 ? 'high' : score >= 0.5 ? 'medium' : 'low';
+        // ── 5-component weighted confidence score via ProvenanceScorer ────────
+        //   Falls back to inline computation if ProvenanceScorer not yet loaded.
+        let score, confidence, breakdown, scoreReasons;
+        if (typeof ProvenanceScorer !== 'undefined') {
+          const _scorer   = new ProvenanceScorer(window.defaultScoreConfig);
+          const subjectRow = {
+            rowId:             d.id,
+            strictId:          sym,
+            economicId:        dispEcoId,
+            sourceAccountId:   d.accountId  || null,
+            sourcePlatform:    d.source     || null,
+            timestamp:         d.date,
+            amount:            qty,
+            isStablecoin:      STABLES.has(sym),
+            isSpamCandidate:   false,
+            isDust:            false,
+            hasOwnedWalletContext: false,
+            symbol:            sym,
+          };
+          const candObj = {
+            rowId:           best.id,
+            kind:            'internal_transfer',
+            strictId:        best.assetSymbol,
+            economicId:      best.economicId || _ecoId(best.assetSymbol),
+            sourceAccountId: best.accountId  || null,
+            sourcePlatform:  best.source     || null,
+            timestamp:       best.date,
+            amount:          best.amount,
+            symbol:          best.assetSymbol,
+          };
+          const result   = _scorer.score(subjectRow, candObj);
+          score        = result.score;
+          confidence   = result.confidence;
+          breakdown    = result.breakdown;
+          scoreReasons = result.reasons;
+        } else {
+          // ── Legacy inline fallback (ProvenanceScorer not loaded yet) ────────
+          const candEco    = best.economicId || best.assetSymbol;
+          const assetScore = sym === best.assetSymbol ? 1.0
+                           : dispEcoId === candEco    ? 0.9
+                           : 0;
+          const amtDiff     = qty > 0 ? Math.abs(best.amount - qty) / Math.max(best.amount, qty) : 1;
+          const amountScore = amtDiff < 0.01 ? 1.0
+                            : amtDiff < 0.03 ? 0.9
+                            : amtDiff < 0.05 ? 0.7
+                            : amtDiff < 0.08 ? 0.5
+                            : 0;
+          const timeScore   = diffH <   1 ? 1.0
+                            : diffH <  24 ? 0.9
+                            : diffH <  72 ? 0.7
+                            : 0.5;
+          const ownershipScore = best.accountId !== d.accountId ? 0.9 : 0.3;
+          const sourceScore    = 0.9;
+          score      = (assetScore * 0.35) + (amountScore * 0.25)
+                     + (timeScore  * 0.15) + (ownershipScore * 0.15)
+                     + (sourceScore * 0.10);
+          confidence = score >= 0.8 ? 'high' : score >= 0.5 ? 'medium' : 'low';
+          breakdown  = { assetMatch: assetScore, amountMatch: amountScore, timeMatch: timeScore,
+                         ownershipMatch: ownershipScore, sourceFlowMatch: sourceScore,
+                         penalties: 0, total: score };
+          scoreReasons = [];
+          if (assetScore >= 0.9)      scoreReasons.push('same_economic_asset');
+          if (amountScore >= 0.9)     scoreReasons.push('amount_within_tolerance');
+          if (timeScore   >= 0.85)    scoreReasons.push('close_in_time');
+          if (ownershipScore >= 0.8)  scoreReasons.push('different_account');
+        }
 
         // Non-taxable disposals (SEND/TRANSFER_OUT/BRIDGE_OUT) with high
         // confidence can be auto-resolved — marking them as internal transfers
@@ -4659,6 +4711,9 @@ const TaxEngine = (() => {
         const isNonTaxable = NON_TAXABLE_DISPOSAL_CATS.includes(d.category);
 
         d.resolutionScore         = score;
+        d.scoreBreakdown          = breakdown;
+        d.scoreReasons            = scoreReasons;
+        d.reviewSeverity          = score >= 0.8 && isNonTaxable ? 'auto_fixable' : 'suggested';
         d.resolutionType          = RT.INTERNAL_TRANSFER;
         d.resolutionCandidateType = RT.INTERNAL_TRANSFER;
         d.resolutionConfidence    = confidence;
@@ -4668,8 +4723,10 @@ const TaxEngine = (() => {
         d.autoResolve             = {
           eligible:    true,
           confidence:  score,
-          action:      isNonTaxable ? 'mark_internal' : 'review_required',
+          action:      isNonTaxable ? 'auto_link_internal_transfer' : 'review_required',
           candidateId: best.id,
+          breakdown,
+          reasons:     scoreReasons,
           reason:      `${best.category} av ${best.amount.toFixed(4)} ${sym} ` +
                        `${diffH < 1 ? '< 1h' : Math.round(diffH) + 'h'} bort ` +
                        `(konto ${(best.accountId || '').slice(-8) || '?'}, ` +
@@ -4707,8 +4764,20 @@ const TaxEngine = (() => {
         d.resolutionType          = RT.OPENING_BALANCE;
         d.resolutionCandidateType = RT.OPENING_BALANCE;
         d.resolutionConfidence    = confidence;
+        d.reviewSeverity          = 'suggested';
         d.autoResolvable          = false;   // needs user to enter historical cost
         d.blocksCurrentK4         = false;
+        d.autoResolve             = {
+          eligible:    false,
+          confidence:  daysAfter < 0 ? 0.85 : daysAfter < 14 ? 0.80 : 0.65,
+          action:      'suggest_opening_balance',
+          candidateId: null,
+          breakdown:   null,
+          reasons:     daysAfter < 0 ? ['before_import_start'] : ['within_90_days_of_import'],
+          reason:      daysAfter < 0
+            ? `Avyttring sker FÖRE importstarten — token ägdes säkert före importen.`
+            : `${daysAfter} dagar efter importstarten — troligt öppningssaldo.`,
+        };
         d.resolutionNote = daysAfter < 0
           ? `Avyttring sker FÖRE det tidigaste importerade datumet — token ägdes definitivt före importen.`
           : `Avyttring sker ${daysAfter} dagar efter importstarten. `
@@ -4732,8 +4801,15 @@ const TaxEngine = (() => {
         d.resolutionType          = RT.SPAM;
         d.resolutionCandidateType = RT.SPAM;
         d.resolutionConfidence    = 'high';
+        d.reviewSeverity          = 'informational';
         d.autoResolvable          = true;   // engine can zero-cost this automatically
         d.blocksCurrentK4         = false;
+        d.autoResolve             = {
+          eligible: true, confidence: 0.95, action: 'auto_mark_spam',
+          candidateId: null, breakdown: null,
+          reasons: ['spam_pattern_match'],
+          reason: `${sym} matchar spam-mönster — 0 kr kostnadsbas.`,
+        };
         d.resolutionNote = `Spam-airdrop detekterad: ${sym} matchar spam-mönster (inga köp, okänd token). `
           + `Kan klassificeras som 0 kr kostnadsbas utan skatteeffekt.`;
         continue;
@@ -4745,8 +4821,15 @@ const TaxEngine = (() => {
           d.resolutionType          = RT.SPAM;
           d.resolutionCandidateType = RT.SPAM;
           d.resolutionConfidence    = ac.confidence;
+          d.reviewSeverity          = 'informational';
           d.autoResolvable          = ac.confidence === 'high';
           d.blocksCurrentK4         = false;
+          d.autoResolve             = {
+            eligible: ac.confidence === 'high', confidence: ac.confidence === 'high' ? 0.9 : 0.6,
+            action: 'auto_mark_spam', candidateId: null, breakdown: null,
+            reasons: ac.reasons || ['spam_airdrop'],
+            reason: `Spam-airdrop (${ac.reasons.join(', ')}).`,
+          };
           d.resolutionNote = `Mottogs som spam-airdrop (${ac.reasons.join(', ')}). `
             + `Klassificeras med 0 kr kostnadsbas.`;
           continue;
@@ -4755,9 +4838,16 @@ const TaxEngine = (() => {
           d.resolutionType          = RT.AIRDROP;
           d.resolutionCandidateType = RT.AIRDROP;
           d.resolutionConfidence    = ac.confidence;
+          d.reviewSeverity          = ac.confidence === 'high' ? 'auto_fixable' : 'suggested';
           // Auto-resolvable if high confidence: engine sets costBasis = FMV at receipt date
           d.autoResolvable          = ac.confidence === 'high';
           d.blocksCurrentK4         = false;
+          d.autoResolve             = {
+            eligible: ac.confidence === 'high', confidence: ac.confidence === 'high' ? 0.88 : 0.60,
+            action: 'auto_resolve_stablecoin_price', candidateId: null, breakdown: null,
+            reasons: ['airdrop_inbound_pattern', ...(ac.reasons || [])],
+            reason: `${ac.subtype === 'claimed' ? 'Claimad' : 'Oönskad'} airdrop (${ac.confidence} konfidens).`,
+          };
           d.resolutionNote = `Mottogs som ${ac.subtype === 'claimed' ? 'claimad' : 'oönskad'} airdrop `
             + `(konfidens: ${ac.confidence}). Kostnadsbas = FMV vid mottagning. `
             + (ac.confidence !== 'high' ? 'Verifiera marknadspriset vid mottagningsdatumet.' : '');
@@ -4772,8 +4862,14 @@ const TaxEngine = (() => {
       d.resolutionType          = RT.MANUAL;
       d.resolutionCandidateType = RT.MANUAL;
       d.resolutionConfidence    = 'low';
+      d.reviewSeverity          = 'hard_blocker';
       d.autoResolvable          = false;
       d.blocksCurrentK4         = true;   // this is a genuine hard blocker
+      d.autoResolve             = {
+        eligible: false, confidence: 0, action: 'manual_review',
+        candidateId: null, breakdown: null, reasons: [],
+        reason: `Ingen automatisk matchning — manuell granskning krävs.`,
+      };
       // Build a contextual note using the priorCandidates gathered in the pre-pass
       const totalKnown   = priorAcqs.length;
       const trustedCount = trustedPriorAcqs.length;

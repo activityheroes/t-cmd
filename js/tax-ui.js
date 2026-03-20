@@ -3120,6 +3120,19 @@ const TaxUI = (() => {
 
     const groups = groupByReason(filteredIssues);
 
+    // Per-section group lists (independent of active tab — used by 3-section layout)
+    const blockerGroups = groupByReason(blockersAll);
+    const warningGroups = groupByReason(warningsAll);
+    const infoGroups    = groupByReason(infoAll);
+
+    // Confidence % = fraction of excluded disposals that are NOT hard blockers
+    const _disp = (taxResult?.disposals || []);
+    const _allExc      = _disp.filter(d => d.excludeFromK4 || d.blocksCurrentK4);
+    const _hardBlock   = _allExc.filter(d => d.blocksCurrentK4);
+    const confidencePct = _allExc.length > 0
+      ? Math.round((_allExc.length - _hardBlock.length) / _allExc.length * 100)
+      : issues.length > 0 ? Math.round((1 - nHardBlockers / issues.length) * 100) : 100;
+
     const canAutoInfer = issues.filter(i =>
       i.reason === 'missing_sek_price' && ['market_api_failed','swap_inference_failed'].includes(i.priceBlockReason)
     ).length;
@@ -3143,15 +3156,10 @@ const TaxUI = (() => {
       <div class="tax-page">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Granska transaktioner</h1>
-          <span class="tax-page-subtitle">${nHardBlockers > 0 ? `⛔ ${nHardBlockers} hårda blockerare` : '✅ Inga hårda blockerare'}${nReviewRec > 0 ? ` · 🟡 ${nReviewRec} valfri granskning` : ''}${nInfo > 0 ? ` · 🔵 ${nInfo} info` : ''}${nAutoFix > 0 ? ` · ✨ ${nAutoFix} auto-lösningsbara` : ''}</span>
-          ${issues.length > 0 ? `
-            <div class="tax-page-actions" style="gap:8px">
-              ${nAutoFix > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(74,222,128,.15);color:#4ade80;border:1px solid rgba(74,222,128,.35);font-weight:700;padding:6px 16px" onclick="TaxUI.autoResolveAll()">⚡ Auto-lösa ${nAutoFix} säkra rader</button>` : ''}
-              ${unknownAssetCount > 0 ? `<button class="tax-btn tax-btn-sm" id="btn-resolve-tokens" style="background:rgba(14,165,233,.12);color:#38bdf8;border:1px solid rgba(14,165,233,.25)" onclick="TaxUI.resolveUnknownTokens()">🔍 Slå upp ${unknownAssetCount} okända tokens</button>` : ''}
-              ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-inferera ${canAutoInfer}</button>` : ''}
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()">⚙️ Kör om pipeline</button>
-              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Markera alla OK</button>
-            </div>` : ''}
+          <span class="tax-page-subtitle">${nHardBlockers > 0 ? `⛔ ${nHardBlockers} blockerare` : '✅ Inga blockerare'} · ${confidencePct}% konfidens</span>
+          <div class="tax-page-actions" style="gap:8px">
+            <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Markera alla OK</button>
+          </div>
         </div>
 
         ${staleSolanaCount > 0 ? `
@@ -3316,58 +3324,54 @@ const TaxUI = (() => {
           </div>
         ` : `
 
-        <!-- Tab bar — uses statusSummary counts so it agrees with Reports page -->
-        <div style="display:flex;gap:4px;margin-bottom:16px;padding:4px;background:rgba(255,255,255,.03);border:1px solid var(--tax-border);border-radius:10px;width:fit-content">
-          ${[
-            { key: 'blockers', label: '⛔ Hårda blockerare', count: nHardBlockers,  color: nHardBlockers > 0 ? '#f87171' : null,
-              tooltip: 'Disposals that prevent the current K4 export from being valid. Must be fixed before filing.' },
-            { key: 'warnings', label: '🟡 Valfri granskning', count: nReviewRec,    color: nReviewRec > 0 ? '#fbbf24' : null,
-              tooltip: 'Excluded rows that do not block the current K4 export. Optional — fixing improves accuracy.' },
-            { key: 'info',     label: '🔵 Info',             count: nInfo,          color: nInfo > 0 ? '#818cf8' : null,
-              tooltip: 'Already handled rows (spam, estimated pricing). Informational only.' },
-            { key: 'all',      label: 'Alla',                count: issues.length,  color: null },
-          ].map(({ key, label, count, color, tooltip }) => {
-            const isActive = activeTab === key;
-            return `<button
-              onclick="window.setReviewTab('${key}')"
-              style="padding:6px 14px;border-radius:7px;border:none;cursor:pointer;font-size:12px;font-weight:${isActive ? '600' : '400'};
-                     background:${isActive ? 'rgba(255,255,255,.07)' : 'transparent'};
-                     color:${isActive ? (color || '#e2e8f0') : 'var(--tax-muted)'};
-                     transition:all .15s">
-              ${label}
-              ${count > 0 ? `<span style="margin-left:5px;padding:1px 6px;border-radius:9px;font-size:10px;background:${isActive && color ? color.replace(')', ',.15)').replace('rgb','rgba') : 'rgba(148,163,184,.12)'};color:${color || 'var(--tax-muted)'}">${count}</span>` : ''}
-            </button>`;
-          }).join('')}
+        <!-- ── Stats bar (spec §4A) ──────────────────────────────────── -->
+        <div style="margin-bottom:14px;padding:12px 16px;border-radius:12px;background:rgba(255,255,255,.02);border:1px solid rgba(148,163,184,.12)">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="display:flex;gap:14px;flex-wrap:wrap;flex:1">
+              <div style="text-align:center">
+                <div style="font-size:22px;font-weight:700;color:${nHardBlockers > 0 ? '#f87171' : '#4ade80'};line-height:1">${nHardBlockers}</div>
+                <div style="font-size:10px;color:#64748b;margin-top:2px">Hårda blockerare</div>
+              </div>
+              <div style="width:1px;background:rgba(148,163,184,.12);align-self:stretch"></div>
+              <div style="text-align:center">
+                <div style="font-size:22px;font-weight:700;color:#fbbf24;line-height:1">${warningsAll.length}</div>
+                <div style="font-size:10px;color:#64748b;margin-top:2px">Förslag</div>
+              </div>
+              <div style="width:1px;background:rgba(148,163,184,.12);align-self:stretch"></div>
+              <div style="text-align:center">
+                <div style="font-size:22px;font-weight:700;color:#4ade80;line-height:1">${nAutoFix}</div>
+                <div style="font-size:10px;color:#64748b;margin-top:2px">Auto-fix säkra</div>
+              </div>
+              <div style="width:1px;background:rgba(148,163,184,.12);align-self:stretch"></div>
+              <div style="text-align:center">
+                <div style="font-size:22px;font-weight:700;color:${confidencePct >= 80 ? '#4ade80' : confidencePct >= 50 ? '#fbbf24' : '#f87171'};line-height:1">${confidencePct}%</div>
+                <div style="font-size:10px;color:#64748b;margin-top:2px">Konfidens</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              ${nAutoFix > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(74,222,128,.15);color:#4ade80;border:1px solid rgba(74,222,128,.35);font-weight:700;padding:7px 18px" onclick="TaxUI.autoResolveAll()">⚡ Auto-fixa ${nAutoFix} säkra rader</button>` : ''}
+              ${unknownAssetCount > 0 ? `<button class="tax-btn tax-btn-sm" id="btn-resolve-tokens" style="background:rgba(14,165,233,.12);color:#38bdf8;border:1px solid rgba(14,165,233,.25)" onclick="TaxUI.resolveUnknownTokens()">🔍 Slå upp ${unknownAssetCount} tokens</button>` : ''}
+              ${canAutoInfer > 0 ? `<button class="tax-btn tax-btn-sm" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25)" onclick="TaxUI.bulkAutoInfer()">🔁 Auto-inferera ${canAutoInfer}</button>` : ''}
+              <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.triggerPipeline()" title="Kör om hela skattepipelinen">⚙️ Kör om</button>
+            </div>
+          </div>
         </div>
-
-          ${filteredIssues.length === 0 ? `
-          <div style="text-align:center;padding:40px 20px;color:var(--tax-muted)">
-            <div style="font-size:36px;margin-bottom:8px">✅</div>
-            <div style="font-size:14px;font-weight:500;color:#e2e8f0">
-              ${activeTab === 'blockers' ? '✅ Inga hårda blockerare — de verifierade K4-raderna kan exporteras' :
-                activeTab === 'warnings' ? '✅ Inga valfria granskningsposter' :
-                activeTab === 'info' ? '✅ Inga informationsposter' :
-                '✅ Inga undantag'}
-            </div>
-            <div style="font-size:12px;margin-top:4px">
-              ${activeTab !== 'all' ? `<a href="#" style="color:#818cf8" onclick="window.setReviewTab('all');return false">Visa alla flikar →</a>` : 'Skatteberäkningarna är baserade på fullständig data.'}
-            </div>
-          </div>` : ''}
 
           ${(() => {
             const unknownAcqIssues = issues.filter(i => i.reason === 'unknown_acquisition');
             const distinctAssets = new Set(unknownAcqIssues.map(i => i.asset || i.symbol || '')).size;
             if (distinctAssets < 2) return '';
-            return `<div style="margin-bottom:16px;padding:14px 16px;border-radius:10px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.25);display:flex;align-items:flex-start;gap:12px">
+            return `<div style="margin-bottom:14px;padding:12px 16px;border-radius:10px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.25);display:flex;align-items:flex-start;gap:12px">
               <span style="font-size:20px;line-height:1">🔍</span>
               <div style="flex:1">
                 <div style="font-size:13px;font-weight:600;color:#fbbf24;margin-bottom:3px">Saknade konton upptäckta</div>
-                <div style="font-size:12px;color:#94a3b8;line-height:1.5">${distinctAssets} tillgångar såldes utan registrerat köp. Du kanske saknar ett konto — importera börsen eller plånboken där du köpte dem för att automatiskt lösa dessa poster.</div>
+                <div style="font-size:12px;color:#94a3b8;line-height:1.5">${distinctAssets} tillgångar såldes utan registrerat köp. Importera börsen/plånboken för att automatiskt lösa dessa poster.</div>
               </div>
               <button class="tax-btn tax-btn-sm" style="background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3);flex-shrink:0" onclick="TaxUI.openAddAccountModal()">➕ Lägg till konto</button>
             </div>`;
           })()}
 
+          <!-- Sticky bulk action bar (shows when rows are selected) -->
           ${(() => {
             const n = S.reviewSelectedIds.size;
             if (n === 0) return '';
@@ -3385,8 +3389,10 @@ const TaxUI = (() => {
             </div>`;
           })()}
 
-          <div class="tax-review-groups">
-            ${groups.map(({ reason, meta, items, subGroups }) => {
+          <!-- ── Section renderer (reused for all 3 sections) ─────────── -->
+          ${(() => {
+            // Inner renderer — identical to old groups.map() logic
+            const renderGroupList = (sGroups) => sGroups.map(({ reason, meta, items, subGroups }) => {
               const isK4Critical = items.some(i => i.isK4Blocker) || ['negative_balance','unknown_acquisition'].includes(reason);
               const isCritical   = isK4Critical || ['missing_sek_price','unknown_asset','ambiguous_swap'].includes(reason);
               const isLowPri     = ['received_not_sold','spam_token'].includes(reason);
@@ -3582,8 +3588,55 @@ const TaxUI = (() => {
                   })()}
                 </div>`}
               </div>`;
-            }).join('')}
-          </div>
+            }).join('');
+
+            // ── Section wrapper (spec §4B) ─────────────────────────────────
+            const sectionStyle = `margin-bottom:10px;border-radius:10px;overflow:hidden;border:1px solid`;
+            const summaryStyle = `cursor:pointer;padding:11px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;list-style:none;user-select:none;font-weight:600`;
+
+            const sect1Html = renderGroupList(blockerGroups);
+            const sect2Html = renderGroupList(warningGroups);
+            const sect3Html = renderGroupList(infoGroups);
+
+            return `
+            <!-- ── Section 1: Hard blockers (spec §4B sec 1) ──────────── -->
+            <details open style="${sectionStyle} rgba(239,68,68,.25)">
+              <summary style="${summaryStyle};background:rgba(239,68,68,.06)">
+                <span style="font-size:15px">⛔</span>
+                <span style="font-size:12px;color:#f87171;flex:1">Hårda blockerare</span>
+                <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(239,68,68,.15);color:#f87171">${nHardBlockers} rader</span>
+                ${nHardBlockers === 0 ? `<span style="font-size:10px;color:#4ade80">✅ Ingen åtgärd krävs</span>` : `<span style="font-size:10px;color:#f87171">Måste åtgärdas för K4-export</span>`}
+              </summary>
+              ${nHardBlockers === 0
+                ? `<div style="padding:16px;text-align:center;color:#4ade80;font-size:12px">✅ Inga hårda blockerare — verifierade K4-rader kan exporteras direkt.</div>`
+                : `<div class="tax-review-groups">${sect1Html}</div>`}
+            </details>
+
+            <!-- ── Section 2: Suggested fixes (spec §4B sec 2) ─────────── -->
+            ${warningsAll.length > 0 ? `
+            <details ${warningsAll.length > 0 ? 'open' : ''} style="${sectionStyle} rgba(251,191,36,.2)">
+              <summary style="${summaryStyle};background:rgba(251,191,36,.04)">
+                <span style="font-size:15px">🟡</span>
+                <span style="font-size:12px;color:#fbbf24;flex:1">Förslag — inte fatalt, men bör granskas</span>
+                <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(251,191,36,.12);color:#fbbf24">${warningsAll.length} rader</span>
+                ${nAutoFix > 0 ? `<button class="tax-btn tax-btn-xs" style="background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.3);font-weight:600" onclick="event.preventDefault();TaxUI.autoResolveAll()">⚡ Auto-fixa ${nAutoFix}</button>` : ''}
+              </summary>
+              <div class="tax-review-groups">${sect2Html}</div>
+            </details>` : ''}
+
+            <!-- ── Section 3: Hidden low-impact (spec §4B sec 3) ─────────── -->
+            ${infoAll.length > 0 ? `
+            <details style="${sectionStyle} rgba(99,102,241,.15)">
+              <summary style="${summaryStyle};background:rgba(99,102,241,.03)">
+                <span style="font-size:15px">🔵</span>
+                <span style="font-size:12px;color:#818cf8;flex:1">Dold lågprioriterat — spam, dust, stablecoins</span>
+                <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(99,102,241,.1);color:#818cf8">${infoAll.length} rader</span>
+                <span style="font-size:10px;color:#64748b">Behöver ingen åtgärd</span>
+              </summary>
+              <div class="tax-review-groups">${sect3Html}</div>
+            </details>` : ''}
+            `;
+          })()}
         `}
 
         ${S.editTxId ? renderEditModal() : ''}
@@ -4194,11 +4247,52 @@ const TaxUI = (() => {
           const renderDisposalRow = (d) => {
             const gl = d.gainLossSEK;
             const sanFlags = (d.sanityFlags || []);
-            const resNote = d.resolutionNote || '';
-            const resConf = d.resolutionConfidence || '';
+            const resNote  = d.resolutionNote || '';
+            const resConf  = d.resolutionConfidence || '';
             const confColor = resConf === 'high' ? '#4ade80' : resConf === 'medium' ? '#fbbf24' : '#f87171';
+            const pct       = d.resolutionScore != null ? Math.round(d.resolutionScore * 100) : null;
+
+            // ── Inline candidate explanation card (spec §4D "Row card") ────
+            const candCard = (() => {
+              const ar = d.autoResolve;
+              if (!ar || !ar.candidateId) return '';
+              const REASON_SWE = {
+                same_economic_asset:           'Samma ekonomiska tillgång',
+                same_strict_asset:             'Exakt samma token',
+                amount_within_tolerance:       'Belopp inom tolerans',
+                close_in_time:                 'Nära i tid',
+                owned_wallet_or_exchange_path: 'Känt ägarbyte',
+                different_account:             'Annat konto',
+                wrapped_native_bridge:         'Wrapped/native-ekvivalent',
+                prior_exchange_buy_found:      'Tidigare börsinköp',
+                spam_pattern_match:            'Spam-mönster',
+                airdrop_inbound_pattern:       'Airdrop-inkommande',
+                before_import_start:           'Före importstart',
+                within_90_days_of_import:      'Inom 90 dagar från import',
+              };
+              const reasons = (ar.reasons || []).map(r => REASON_SWE[r] || r);
+              const candColor = resConf === 'high' ? '#4ade80' : resConf === 'medium' ? '#fbbf24' : '#f87171';
+              const bd = ar.breakdown;
+              return `
+              <div style="margin-top:4px;padding:5px 8px;border-radius:5px;background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.15);font-size:9px">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px">
+                  <span style="color:#818cf8;font-weight:600">Bästa kandidat hittad</span>
+                  <span style="padding:1px 5px;border-radius:3px;background:rgba(99,102,241,.12);color:${candColor};font-weight:700">${pct != null ? pct + '%' : '?'} konfidens</span>
+                  ${ar.action && ar.action !== 'review_required' ? `<span style="padding:1px 5px;border-radius:3px;background:rgba(74,222,128,.08);color:#4ade80">${ar.action}</span>` : ''}
+                  ${reasons.length > 0 ? `<span style="color:#64748b">${reasons.join(' · ')}</span>` : ''}
+                </div>
+                ${bd ? `<div style="display:flex;gap:8px;flex-wrap:wrap;color:#475569">
+                  <span>Tillgång: ${Math.round(bd.assetMatch*100)}%</span>
+                  <span>Belopp: ${Math.round(bd.amountMatch*100)}%</span>
+                  <span>Tid: ${Math.round(bd.timeMatch*100)}%</span>
+                  <span>Ägarskap: ${Math.round(bd.ownershipMatch*100)}%</span>
+                  <span>Källflöde: ${Math.round(bd.sourceFlowMatch*100)}%</span>
+                </div>` : ''}
+              </div>`;
+            })();
+
             return `
-            <div style="display:flex;flex-direction:column;gap:3px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px">
+            <div style="display:flex;flex-direction:column;gap:2px;padding:5px 8px;background:rgba(15,23,42,.4);border-radius:5px;font-size:10px;border-left:2px solid ${resConf === 'high' ? 'rgba(74,222,128,.4)' : resConf === 'medium' ? 'rgba(251,191,36,.3)' : 'rgba(239,68,68,.25)'}">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                 <span class="tax-mono" style="font-weight:600;color:#e2e8f0;min-width:70px">${d.assetSymbol}</span>
                 <span style="color:#475569">${(d.date||'').slice(0,10)}</span>
@@ -4206,12 +4300,13 @@ const TaxUI = (() => {
                 ${d.proceedsSEK != null ? `<span style="color:#94a3b8">${d.excludeFromK4 ? 'Uppskattat värde' : 'Försäljningspris'}: ${TaxEngine.formatSEK(d.proceedsSEK)}</span>` : '<span style="color:#f87171">Pris: okänt</span>'}
                 ${d.costBasisSEK != null ? `<span style="color:#64748b">KB: ${TaxEngine.formatSEK(d.costBasisSEK)}</span>` : '<span style="color:#f87171">KB: saknas</span>'}
                 ${gl != null ? `<span style="${gl >= 0 ? 'color:#4ade80' : 'color:#f87171'}">${gl >= 0 ? '+' : ''}${TaxEngine.formatSEK(gl)}</span>` : ''}
-                ${resConf ? `<span style="font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(15,23,42,.5);color:${confColor}" title="Återställningskonfidens">${resConf}</span>` : ''}
+                ${pct != null ? `<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(15,23,42,.5);color:${confColor};font-weight:700" title="Provenanskonfidens">${pct}%</span>` : ''}
                 ${sanFlags.map(f => `<span style="padding:1px 5px;border-radius:3px;background:rgba(249,115,22,.12);color:#f97316;font-size:9px;font-family:monospace" title="${f}">${f.split(':')[0]}</span>`).join('')}
                 <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.openAssetAudit('${d.assetSymbol}')" style="padding:1px 5px" title="Granska ${d.assetSymbol}">🔍</button>
                 <button class="tax-btn tax-btn-xs tax-btn-ghost" onclick="TaxUI.editTx('${d.id}')" style="padding:1px 5px">✏️</button>
               </div>
               ${resNote ? `<div style="font-size:9px;color:#64748b;line-height:1.4;padding-left:2px">💡 ${resNote}</div>` : ''}
+              ${candCard}
             </div>`;
           };
 

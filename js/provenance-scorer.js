@@ -22,8 +22,8 @@
 
 // ── Default configuration ───────────────────────────────────────────────────
 const defaultScoreConfig = {
-  autoResolveThreshold:  0.80,
-  suggestThreshold:      0.50,
+  autoResolveThreshold:  0.75,   // was 0.80 — lowered so high-conf matches auto-fix
+  suggestThreshold:      0.45,   // was 0.50 — lowered so medium-conf rows reach 'suggested'
 
   // Time windows (hours)
   maxHoursStrong:  24,        // ≤24h  → score 1.0
@@ -190,9 +190,11 @@ class ProvenanceScorer {
 
     if (sAcct && cAcct) {
       if (sAcct === cAcct) {
-        // Same account: suspicious for an internal transfer — penalise slightly
-        // but don't zero out (could be a CEX showing both legs on same account)
-        return 0.3;
+        // Same account: neutral signal for users with a single imported account.
+        // Previously penalised at 0.3, which suppressed valid matches when the user
+        // only has one wallet/exchange imported and both legs appear on the same account.
+        // Changed to 0.65 (slightly below 'different account' at 0.9 but not a penalty).
+        return 0.65;
       }
       // Different accounts — this is the expected internal transfer pattern
       return 0.9;

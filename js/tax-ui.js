@@ -150,6 +150,12 @@ const TaxUI = (() => {
   function render() {
     const panel = document.getElementById('tax-panel');
     if (!panel) return;
+
+    // Preserve scroll position of the main content area so that single-row
+    // actions (markReviewed, bulkClassify, etc.) don't jump back to the top.
+    const prevMain = panel.querySelector('.tax-main');
+    const savedScrollTop = prevMain ? prevMain.scrollTop : 0;
+
     let pageHTML = '';
     try {
       pageHTML = renderPage();
@@ -167,6 +173,14 @@ const TaxUI = (() => {
       </div>
     `;
     bindEvents();
+
+    // Restore scroll — use rAF so the layout has been applied first.
+    if (savedScrollTop > 0) {
+      requestAnimationFrame(() => {
+        const newMain = panel.querySelector('.tax-main');
+        if (newMain) newMain.scrollTop = savedScrollTop;
+      });
+    }
   }
 
   function renderSidebar() {

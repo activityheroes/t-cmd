@@ -3244,10 +3244,16 @@ const TaxEngine = (() => {
         if (flaggedIds.has(d.id) || !d.unknownAcquisition) continue;
         const t = txById.get(d.id);
         if (!t || t.userReviewed) continue;
+        // d.blocksCurrentK4 is set to false by resolveUnknownAcquisitions when a
+        // candidate is found (internal_transfer, opening_balance, spam, airdrop).
+        // Always inherit that flag rather than using the hardcoded isK4Blocker:true
+        // from REVIEW_DESCRIPTIONS, which would incorrectly mark resolved disposals
+        // as hard blockers even after classification.
+        const metaK4 = d.blocksCurrentK4 !== false;
         issues.push({
           txnId: d.id, txn: t,
           reason: 'unknown_acquisition',
-          meta: REVIEW_DESCRIPTIONS.unknown_acquisition,
+          meta: { ...REVIEW_DESCRIPTIONS.unknown_acquisition, isK4Blocker: metaK4 },
           // Resolution fields from resolveUnknownAcquisitions pipeline
           resolutionType:       d.resolutionType       || 'manual_review_required',
           resolutionConfidence: d.resolutionConfidence  || 'low',
@@ -4703,27 +4709,34 @@ const TaxEngine = (() => {
         }
 
         // Non-taxable disposals (SEND/TRANSFER_OUT/BRIDGE_OUT) with high
-        // confidence can be auto-resolved — marking them as internal transfers
-        // is safe: they were never taxable events to begin with.
-        // Taxable disposals (SELL/TRADE) are NEVER auto-resolved — the risk
-        // of falsely excluding a real sale is too high.
+        // confidence can be auto-resolved by reclassifying as internal transfers.
+        // Taxable disposals (SELL/TRADE) with high confidence can be auto-resolved
+        // by linking the candidate as cost basis — this does not suppress the taxable
+        // event; it fills in the acquisition cost so K4 can be completed.
         const NON_TAXABLE_DISPOSAL_CATS = [CAT.SEND, CAT.TRANSFER_OUT, CAT.BRIDGE_OUT];
         const isNonTaxable = NON_TAXABLE_DISPOSAL_CATS.includes(d.category);
+        const autoResolveThreshold = (typeof defaultScoreConfig !== 'undefined')
+          ? (defaultScoreConfig.autoResolveThreshold || 0.75)
+          : 0.75;
+        const candidateAction = isNonTaxable
+          ? 'auto_link_internal_transfer'
+          : 'auto_link_cost_basis';
+        const isAutoResolvable = score >= autoResolveThreshold;
 
         d.resolutionScore         = score;
         d.scoreBreakdown          = breakdown;
         d.scoreReasons            = scoreReasons;
-        d.reviewSeverity          = score >= 0.8 && isNonTaxable ? 'auto_fixable' : 'suggested';
+        d.reviewSeverity          = isAutoResolvable ? 'auto_fixable' : 'suggested';
         d.resolutionType          = RT.INTERNAL_TRANSFER;
         d.resolutionCandidateType = RT.INTERNAL_TRANSFER;
         d.resolutionConfidence    = confidence;
         d.resolutionCandidateTxId = best.id;
-        d.autoResolvable          = score >= 0.8 && isNonTaxable;
+        d.autoResolvable          = isAutoResolvable;
         d.blocksCurrentK4         = false;
         d.autoResolve             = {
           eligible:    true,
           confidence:  score,
-          action:      isNonTaxable ? 'auto_link_internal_transfer' : 'review_required',
+          action:      isAutoResolvable ? candidateAction : 'review_required',
           candidateId: best.id,
           breakdown,
           reasons:     scoreReasons,
@@ -4733,17 +4746,19 @@ const TaxEngine = (() => {
                        `${Math.round(score * 100)}% konfidens)`,
         };
         d.resolutionNote =
-          (d.autoResolvable
+          (isAutoResolvable
             ? `✨ Auto-lösbar (${Math.round(score * 100)}% konfidens): `
-            : `🔍 Möjlig intern transfer (${Math.round(score * 100)}% konfidens): `) +
+            : `🔍 Möjlig ${isNonTaxable ? 'intern transfer' : 'kostnadsbas'} (${Math.round(score * 100)}% konfidens): `) +
           `${best.category} av ${best.amount.toFixed(4)} ${sym} ` +
           `(${diffH < 1 ? 'inom 1h' : Math.round(diffH) + 'h senare/tidigare'}, ` +
           `konto ${best.accountId || '?'}). ` +
-          (d.autoResolvable
-            ? `Kan lösas automatiskt — tryck ⚡ Auto-lösa.`
+          (isAutoResolvable
+            ? isNonTaxable
+              ? `Kan lösas automatiskt som intern transfer — tryck ⚡ Auto-lösa.`
+              : `Kostnadsbas kan länkas automatiskt — tryck ⚡ Auto-lösa.`
             : isNonTaxable
               ? `Importera källkontot — motorn matchar och löser kostnadsbas.`
-              : `SELL/TRADE-avyttring — verifiera manuellt innan klassificering.`);
+              : `SELL/TRADE-avyttring — verifiera kandidaten och bekräfta.`);
         continue;
       }
 
@@ -8389,6 +8404,96 @@ const TaxEngine = (() => {
     };
   }
 
+  // ── Score Distribution Diagnostic Report ─────────────────
+  /**
+   * Compute a detailed score distribution report for the provenance scoring system.
+   * Shows how many rows have candidates, what score bands they land in, and which
+   * actions are being suggested. Useful for tuning thresholds and diagnosing why
+   * "auto-fix safe = 0" or "hard blockers are too high".
+   *
+   * @param {object} taxResult — output of computeTaxYear()
+   * @returns {object} diagnostics
+   */
+  function computeScoreDistribution(taxResult) {
+    if (!taxResult || !taxResult.disposals) {
+      return { error: 'No taxResult or disposals — run pipeline first.' };
+    }
+
+    const disposals = taxResult.disposals;
+    const unknownAcq = disposals.filter(d => d.unknownAcquisition);
+
+    const withCandidate = unknownAcq.filter(d => d.resolutionCandidateTxId);
+    const noCandidate   = unknownAcq.filter(d => !d.resolutionCandidateTxId);
+
+    // Score bands for disposals that have a resolutionScore
+    const scored = unknownAcq.filter(d => typeof d.resolutionScore === 'number');
+    const bands = {
+      '≥0.90': scored.filter(d => d.resolutionScore >= 0.90).length,
+      '≥0.80': scored.filter(d => d.resolutionScore >= 0.80 && d.resolutionScore < 0.90).length,
+      '≥0.75': scored.filter(d => d.resolutionScore >= 0.75 && d.resolutionScore < 0.80).length,
+      '≥0.70': scored.filter(d => d.resolutionScore >= 0.70 && d.resolutionScore < 0.75).length,
+      '≥0.50': scored.filter(d => d.resolutionScore >= 0.50 && d.resolutionScore < 0.70).length,
+      '<0.50':  scored.filter(d => d.resolutionScore < 0.50).length,
+    };
+
+    // Actions by type (from autoResolve.action)
+    const actionCounts = {};
+    for (const d of unknownAcq) {
+      const action = d.autoResolve?.action || d.resolutionType || 'unknown';
+      actionCounts[action] = (actionCounts[action] || 0) + 1;
+    }
+
+    // Review severity breakdown
+    const severityCounts = {};
+    for (const d of unknownAcq) {
+      const sev = d.reviewSeverity || 'unset';
+      severityCounts[sev] = (severityCounts[sev] || 0) + 1;
+    }
+
+    // Committed counts (disposals that were resolved — blocksCurrentK4: false)
+    const committed = unknownAcq.filter(d => d.blocksCurrentK4 === false);
+    const stillBlocking = unknownAcq.filter(d => d.blocksCurrentK4 !== false);
+
+    // Top unresolved assets (no candidate found)
+    const noCandAssets = {};
+    for (const d of noCandidate) {
+      const sym = d.assetSymbol || d.symbol || '?';
+      noCandAssets[sym] = (noCandAssets[sym] || 0) + 1;
+    }
+    const topNoCandidateAssets = Object.entries(noCandAssets)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([sym, count]) => ({ sym, count }));
+
+    // Average score for disposals with candidates
+    const avgScore = withCandidate.length > 0
+      ? (withCandidate.reduce((sum, d) => sum + (d.resolutionScore || 0), 0) / withCandidate.length)
+      : 0;
+
+    // Disposals with autoResolvable=true (ready for auto-fix)
+    const autoFixable = unknownAcq.filter(d => d.autoResolvable === true);
+
+    return {
+      total_unknown_acquisition: unknownAcq.length,
+      with_candidates:           withCandidate.length,
+      no_candidates:             noCandidate.length,
+      scored_count:              scored.length,
+      avg_score_with_candidate:  Math.round(avgScore * 100) / 100,
+      score_bands:               bands,
+      actions_by_type:           actionCounts,
+      severity_by_type:          severityCounts,
+      committed_not_blocking:    committed.length,
+      still_blocking:            stillBlocking.length,
+      auto_fixable_count:        autoFixable.length,
+      top_no_candidate_assets:   topNoCandidateAssets,
+      // Threshold info for context
+      thresholds: {
+        autoResolve: (typeof defaultScoreConfig !== 'undefined') ? defaultScoreConfig.autoResolveThreshold : 0.75,
+        suggest:     (typeof defaultScoreConfig !== 'undefined') ? defaultScoreConfig.suggestThreshold     : 0.45,
+      },
+    };
+  }
+
   // ── Public API ────────────────────────────────────────────
   return {
     CAT, PS, PC, REVIEW_DESCRIPTIONS,
@@ -8424,6 +8529,7 @@ const TaxEngine = (() => {
     buildAssetProvenance,
     querySuspiciousZeroCost, queryEstimatedHighProceedsDisposals,
     resolveUnknownAcquisitions, RT, autoFixEasyCases,  // recovery pipeline + resolution type constants
+    computeScoreDistribution,   // diagnostic report: score bands, candidate coverage, auto-fix counts
     // K4 export
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review

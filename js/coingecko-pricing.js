@@ -121,38 +121,13 @@ const CoinGeckoPricing = (() => {
   }
 
   // ── Core: fetch price by contract address ──────────────────
-  async function fetchByContract(platform, contractAddress, dateStr) {
-    if (!platform || !contractAddress || !dateStr) return null;
-    const cgPlatform = CG_PLATFORM_MAP[(platform || '').toLowerCase()];
-    if (!cgPlatform) return null;
-    const key = cacheKey('ca', contractAddress, dateStr);
-
-    // Cache check
-    const cached = getFromCache(key);
-    if (cached) return makePriceResult(cached.priceUSD, 'contract_address', dateStr, cached.dateReturned, true);
-
-    // Dedup
-    if (INFLIGHT.has(key)) return INFLIGHT.get(key);
-
-    const promise = (async () => {
-      try {
-        await throttle();
-        const result = await ChainAPIs.cgHistoricalByContract(cgPlatform, contractAddress, dateStr);
-        if (!result || !result.priceUSD) return null;
-
-        const entry = { priceUSD: result.priceUSD, dateReturned: result.timestampReturned || dateStr };
-        setCache(key, entry);
-        return makePriceResult(result.priceUSD, 'contract_address', dateStr, entry.dateReturned, false);
-      } catch (e) {
-        console.warn(`[CoinGeckoPricing] fetchByContract(${cgPlatform}, ${contractAddress.slice(0, 8)}…, ${dateStr}):`, e.message);
-        return null;
-      } finally {
-        INFLIGHT.delete(key);
-      }
-    })();
-
-    INFLIGHT.set(key, promise);
-    return promise;
+  // DISABLED: The CoinGecko endpoint /coins/{platform}/contract/{address}/market_chart/range
+  // requires a paid CoinGecko plan. The Demo API key always returns HTTP 401 for this
+  // endpoint. Tokens without a CoinGecko coin ID should be priced via the GeckoTerminal
+  // OHLCV path (pool discovery → OHLCV) instead, which IS supported on the Demo key.
+  // eslint-disable-next-line no-unused-vars
+  async function fetchByContract(_platform, _contractAddress, _dateStr) {
+    return null; // always 401 on Demo key — see comment above
   }
 
   // ── Batch fetch for a set of price requests ────────────────

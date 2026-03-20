@@ -166,6 +166,19 @@ const TaxEngine = (() => {
     VET: 'vechain', HBAR: 'hedera-hashgraph', ETC: 'ethereum-classic',
     BCH: 'bitcoin-cash', EOS: 'eos', ZEC: 'zcash', XMR: 'monero',
     RAY: 'raydium', ORCA: 'orca', MNGO: 'mango-markets',
+    // Solana ecosystem tokens — added so contract-address fallback is never needed
+    ATLAS: 'star-atlas', POLIS: 'star-atlas-polis',
+    RENDER: 'render-token', RNDR: 'render-token',
+    ZEUS: 'zeus-network',
+    HNT: 'helium', MOBILE: 'helium-mobile-network', IOT: 'helium-iot',
+    JTO: 'jito-governance-token',
+    DRIFT: 'drift-protocol',
+    SHDW: 'genesysgo-shadow',
+    TNSR: 'tensor',
+    PYTH: 'pyth-network',
+    W: 'wormhole',
+    KMNO: 'kamino',
+    JLP: 'jupiter-perpetuals-liquidity-provider-token',
   };
 
   // ── Transaction Categories ────────────────────────────────
@@ -1496,23 +1509,59 @@ const TaxEngine = (() => {
     polygon_pos: 'polygon_pos', avax: 'avax', bsc: 'bsc',
   };
 
+  // In-session cache: token mint address → top pool address (or null if not found).
+  // GeckoTerminal OHLCV endpoint (/pools/{address}/ohlcv) requires a POOL address,
+  // not a token mint address.  We must discover the pool first.
+  const _gtPoolCache = new Map();
+
+  // Discover the top liquidity pool for a token mint address.
+  // Calls /onchain/networks/{network}/tokens/{mintAddress}/pools (Demo key supported).
+  // Returns the pool address string, or null on failure.
+  async function fetchGeckoTerminalPool(mintAddress, gtNetwork, cgKey) {
+    const cacheKey = `${gtNetwork}:${mintAddress}`;
+    if (_gtPoolCache.has(cacheKey)) return _gtPoolCache.get(cacheKey);
+    try {
+      const keyParam = cgKey ? `?x_cg_demo_api_key=${encodeURIComponent(cgKey)}` : '';
+      const url = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/tokens/${mintAddress}/pools${keyParam}`;
+      const r = await fetchWithTimeout(url, 8000);
+      if (!r || !r.ok) { _gtPoolCache.set(cacheKey, null); return null; }
+      const json = await r.json();
+      // Response: { data: [{ id: "solana_POOL_ADDRESS", type: "pool" }, ...] }
+      const topPoolId = json?.data?.[0]?.id;
+      if (!topPoolId) { _gtPoolCache.set(cacheKey, null); return null; }
+      // id is "{network}_{poolAddress}" — strip the network prefix
+      const poolAddress = topPoolId.replace(/^[^_]+_/, '') || null;
+      _gtPoolCache.set(cacheKey, poolAddress);
+      return poolAddress;
+    } catch { _gtPoolCache.set(cacheKey, null); return null; }
+  }
+
   // Fetch OHLCV for a token by contract/mint address for a given year.
+  // Automatically discovers the top pool address before fetching OHLCV data.
   // Returns Map<YYYY-MM-DD, usdPrice> or null on failure.
   async function fetchGeckoTerminalYear(address, network, year) {
     const gtNetwork = GT_NETWORK_MAP[network];
     if (!gtNetwork || !address) return null;
     try {
-      const beforeTs = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
-      // Use CoinGecko Onchain endpoint (authenticated via CG Demo key)
       const cgKey = typeof ChainAPIs !== 'undefined' && ChainAPIs.getKeys
         ? ChainAPIs.getKeys().coingecko : null;
-      const sep = '?';
+
+      // Step 1: Discover the top pool for this token mint.
+      // GeckoTerminal's /pools/{addr}/ohlcv endpoint needs a POOL address, not a mint.
+      // Token mint addresses used as pool IDs → 404 (pump tokens) or 401 (listed tokens).
+      const poolAddress = await fetchGeckoTerminalPool(address, gtNetwork, cgKey);
+      if (!poolAddress) {
+        console.debug(`[CG Onchain] No pool found for ${gtNetwork}/${address.slice(0, 8)}… — skipping`);
+        return null;
+      }
+
+      // Step 2: Fetch OHLCV for the discovered pool address.
+      const beforeTs = Math.floor(Date.UTC(year, 11, 31, 23, 59, 59) / 1000);
       const keyParam = cgKey ? `&x_cg_demo_api_key=${encodeURIComponent(cgKey)}` : '';
-      const url = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/pools/${address}/ohlcv/day`
-        + `${sep}limit=365&before_timestamp=${beforeTs}&currency=usd${keyParam}`;
-      console.debug(`[CG Onchain] OHLCV: ${gtNetwork}/${address.slice(0, 8)}… year=${year}`);
+      const url = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/pools/${poolAddress}/ohlcv/day`
+        + `?limit=365&before_timestamp=${beforeTs}&currency=usd${keyParam}`;
+      console.debug(`[CG Onchain] OHLCV: ${gtNetwork}/${poolAddress.slice(0, 8)}… (token: ${address.slice(0, 8)}…) year=${year}`);
       const r = await fetchWithTimeout(url, 12000);
-      // Note: /tokens/ endpoint always returns 401 with CG Demo key — pools only.
       if (!r || !r.ok) return null;
       const json = await r.json();
       return parseOnchainOHLCV(json);
@@ -2761,20 +2810,21 @@ const TaxEngine = (() => {
         if (!dateStr) continue;
 
         // Already cached from CryptoCompare or earlier run?
-        const ccId = CC_IDS[sym];
+        // Use t.coinGeckoId first (set by normalizer), then CC_IDS static table.
+        // This ensures tokens like RENDER/ZEUS/ATLAS (in CC_IDS but not looked up
+        // from t.coinGeckoId) route via coin_id and never fall into the 401-prone
+        // contract-address path.
+        const ccId = t.coinGeckoId || CC_IDS[sym];
         if (ccId && updatedCache[cacheKey(ccId, dateStr)] !== undefined) continue;
 
-        // Prepare request
+        // Prepare request — only coin_id lookup; contract-address market_chart/range
+        // requires a paid CoinGecko plan and always returns 401 with the Demo key.
         const req = { dateStr };
         if (ccId) {
-          req.coinId = ccId;      // known CoinGecko ID → coin_id lookup
+          req.coinId = ccId;      // known CoinGecko ID → /coins/{id}/history
         }
-        if (t.contractAddress) {
-          req.contractAddress = t.contractAddress;
-          req.platform = t.chain || chainFromSource(t.source) || 'solana';
-        }
-        // Skip if we have neither ID nor contract
-        if (!req.coinId && !req.contractAddress) continue;
+        // Skip tokens with no resolvable CG coin ID — they'll go through GeckoTerminal.
+        if (!req.coinId) continue;
 
         // Dedup by coinId+date or contract+date
         const dedup = `${req.coinId || req.contractAddress}|${dateStr}`;
@@ -7602,6 +7652,16 @@ const TaxEngine = (() => {
     // Gaming / metaverse
     'ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx': 'ATLAS',
     'poLisWXnNRwC6oBu1vHiuKQzFjGL4XDSu4g9qjz9qVk': 'POLIS',
+    // Render Network
+    'rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof': 'RENDER',
+    // Zeus Network
+    'ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq': 'ZEUS',
+    // Jito
+    'jtojtomepa8beP8AuQc6eXt5FriJwfFMwjx2ZEPSQy': 'JTO',
+    // Wormhole
+    '85VBFQZC9TZkfaptBWjvUw7YbZjy52A6mjtPGjstQAmQ': 'W',
+    // Kamino
+    'KMNo3nJsBXfcpJTVhZcXLW7RmTwTt4GVFE7suUBo9sS': 'KMNO',
     // Bridged assets
     '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs': 'WETH',
     '9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E': 'WBTC',
@@ -7629,6 +7689,8 @@ const TaxEngine = (() => {
     SEI: 'Sei', TIA: 'Celestia', ATOM: 'Cosmos', NEAR: 'NEAR Protocol',
     XRP: 'XRP', LTC: 'Litecoin', TON: 'Toncoin',
     JTO: 'Jito', ZEUS: 'Zeus Network', BNSOL: 'Binance Staked SOL',
+    RENDER: 'Render Network', RNDR: 'Render Network',
+    W: 'Wormhole', KMNO: 'Kamino', JLP: 'Jupiter LP',
     DSYNC: 'Destra Network', PEPECOIN: 'PepeCoin', MON: 'Monad',
   };
 

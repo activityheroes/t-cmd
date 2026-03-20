@@ -1608,7 +1608,8 @@ const TaxEngine = (() => {
 
   const PS = {
     TRADE_EXACT:      'trade_exact',         // Exchange execution price (most reliable)
-    SWAP_IMPLIED:     'swap_implied',         // Derived from the other swap leg
+    SWAP_IMPLIED:     'swap_implied',         // Derived from the other swap leg via inAsset/inAmount
+    TX_IMPLIED:       'tx_implied_exact',     // Derived from _reconstruction.economicEvent (Solana route)
     MARKET_API:       'market_api_coingecko', // CryptoCompare historical daily price
     CG_DEMO:          'coingecko_demo',       // CoinGecko Demo API — authenticated historical
     DEX_MARKET:       'market_api_dex',       // GeckoTerminal on-chain DEX OHLCV
@@ -1626,7 +1627,8 @@ const TaxEngine = (() => {
   // All others produce 'estimated_reviewable' (excluded from K4 totals/PDF).
   const TRUSTED_K4_PRICE_SOURCES = new Set([
     PS.TRADE_EXACT,       // most reliable — direct from exchange
-    PS.SWAP_IMPLIED,      // Level-2 pricing chain: market price of received leg
+    PS.SWAP_IMPLIED,      // Level-2 pricing chain: market price of received leg (inAsset/inAmount)
+    PS.TX_IMPLIED,        // Level-2b: market price of reconstruction's final swap leg
     PS.MARKET_API,        // CryptoCompare historical daily
     PS.CG_DEMO,           // CoinGecko Demo API — authenticated historical
     PS.DEX_MARKET,        // GeckoTerminal DEX OHLCV
@@ -2062,6 +2064,60 @@ const TaxEngine = (() => {
       }
     }
 
+    // ── Level 2b: Reconstruction-based swap pricing ────────────────────────
+    // When Level 2 (inAsset/inAmount) failed — either because those fields were
+    // not populated or because getSEKValue() returned null — check the Solana
+    // transaction reconstruction's final economic event.
+    //
+    // The reconstruction captures the authoritative "user sold X of A and received
+    // Y of B" summary after collapsing all intermediate route hops (WSOL, pool
+    // tokens, etc.).  Its boughtAsset/boughtAmount and soldAsset/soldAmount are the
+    // cleaned-up, decimal-adjusted final legs — exactly what we need to derive price.
+    //
+    // We only use reconstruction data when confidence is NOT 'low', since 'low'
+    // means the economic event shape is ambiguous (LP, multi-asset, etc.) and the
+    // amounts themselves may be unreliable.
+    //
+    // This is the critical fix for token-to-token swaps (e.g. RENDER→ZEUS, ATLAS→SOL)
+    // where neither inAsset nor the external market API has a cached price but the
+    // reconstruction already carries the cross-leg amounts.
+    if (!t.priceSEKPerUnit) {
+      const econEvt = t._reconstruction?.economicEvent;
+      if (econEvt && econEvt.confidence !== 'low') {
+        const rBoughtSym = (econEvt.boughtAsset || '').toUpperCase();
+        const rBoughtAmt  = econEvt.boughtAmount  || 0;
+        const rSoldSym   = (econEvt.soldAsset  || '').toUpperCase();
+        const rSoldAmt   = econEvt.soldAmount   || 0;
+
+        // Helper — try both legs; return first that yields a finite, plausible SEK value
+        const tryReconLeg = (legSym, legAmt) => {
+          if (!legSym || !legAmt || legSym === sym) return null;
+          const legSEK = getSEKValue(legSym, legAmt, date, cache, fxByYear);
+          if (!legSEK || legSEK <= 0 || legSEK >= 50_000_000) return null;
+          return legSEK;
+        };
+
+        // Priority: bought leg (what was received) → sold leg (what was given away)
+        // Both should theoretically produce the same SEK value for a fair-value swap.
+        const reconSEK = tryReconLeg(rBoughtSym, rBoughtAmt)
+                      ?? tryReconLeg(rSoldSym,   rSoldAmt);
+
+        if (reconSEK && reconSEK > 0 && amt > 0) {
+          const anchorSym = tryReconLeg(rBoughtSym, rBoughtAmt) ? rBoughtSym : rSoldSym;
+          return {
+            ...t,
+            priceSEKPerUnit: reconSEK / amt,
+            costBasisSEK:    reconSEK,
+            priceSource:     PS.TX_IMPLIED,
+            priceConfidence: STABLES.has(anchorSym) ? PC.INFERRED_HIGH : PC.INFERRED_MED,
+            priceDerivedFromOtherLeg: true,
+            priceDerivedFromRecon:    true,
+            needsReview: false, reviewReason: null,
+          };
+        }
+      }
+    }
+
     // ── Level 3: Historical market API (CoinGecko + GeckoTerminal cache) ──
     if (!STABLES.has(sym)) {
       const cached = lookupCachedSEK(sym, date, cache, t.contractAddress);
@@ -2240,6 +2296,44 @@ const TaxEngine = (() => {
               priceDerivedFromOtherLeg: true,
               needsReview: false, reviewReason: null,
             };
+          }
+        }
+
+        // ── 2d: Reconstruction-based fallback (Jupiter/aggregator routes) ──
+        // When inAsset derivation failed, try _reconstruction.economicEvent.
+        // This handles multi-hop Solana swaps where the intermediate tokens are
+        // not priced individually — the route summary gives us the anchor value.
+        if (!t.priceSEKPerUnit) {
+          const econEvt = t._reconstruction?.economicEvent;
+          if (econEvt && econEvt.confidence !== 'low') {
+            const rBoughtSym = (econEvt.boughtAsset  || '').toUpperCase();
+            const rBoughtAmt  = econEvt.boughtAmount  || 0;
+            const rSoldSym   = (econEvt.soldAsset    || '').toUpperCase();
+            const rSoldAmt   = econEvt.soldAmount    || 0;
+            const tryReconLeg2d = (legSym, legAmt) => {
+              if (!legSym || !legAmt || legSym === sym) return null;
+              const unitSEK = nearestSymPrice(legSym, date)
+                           || getSEKValue(legSym, 1, date, cache, fxByYear);
+              if (!unitSEK || unitSEK <= 0) return null;
+              const totalSEK = unitSEK * legAmt;
+              if (totalSEK <= 0 || totalSEK >= 50_000_000) return null;
+              return { totalSEK, anchorSym: legSym };
+            };
+            const r2d = tryReconLeg2d(rBoughtSym, rBoughtAmt)
+                     ?? tryReconLeg2d(rSoldSym,   rSoldAmt);
+            if (r2d && amt > 0) {
+              changed = true;
+              return {
+                ...t,
+                priceSEKPerUnit: r2d.totalSEK / amt,
+                costBasisSEK:    r2d.totalSEK,
+                priceSource:     PS.TX_IMPLIED,
+                priceConfidence: STABLES.has(r2d.anchorSym) ? PC.INFERRED_HIGH : PC.INFERRED_MED,
+                priceDerivedFromOtherLeg: true,
+                priceDerivedFromRecon:    true,
+                needsReview: false, reviewReason: null,
+              };
+            }
           }
         }
 
@@ -3243,10 +3337,27 @@ const TaxEngine = (() => {
           priceBlockReason = 'market_api_failed';
           suggestedAction  = 'batch_price_lookup';
         }
+        const econEvtDbg = t._reconstruction?.economicEvent;
+        const priceBlockDebug = {
+          txHash:            t.txHash || null,
+          reconConfidence:   econEvtDbg?.confidence || null,
+          reconKind:         econEvtDbg?.kind        || null,
+          reconSoldAsset:    econEvtDbg?.soldAsset   || null,
+          reconSoldAmount:   econEvtDbg?.soldAmount  || null,
+          reconBoughtAsset:  econEvtDbg?.boughtAsset || null,
+          reconBoughtAmount: econEvtDbg?.boughtAmount || null,
+          inAsset:           t.inAsset  || null,
+          inAmount:          t.inAmount || null,
+          hasCoinGeckoId:    !!(t.coinGeckoId),
+          priceSource:       t.priceSource || null,
+          priceBlockReason,
+          pricedPeersCount:  pricedPeers.length,
+          swapPeersCount:    swapPeers.length,
+        };
         issues.push({ txnId: t.id, txn: t, reason: 'missing_sek_price',
           meta: REVIEW_DESCRIPTIONS.missing_sek_price,
           priority: isDisposal ? 'critical' : 'high', isK4Blocker: isDisposal,
-          priceBlockReason, suggestedAction });
+          priceBlockReason, suggestedAction, priceBlockDebug });
         flaggedIds.add(t.id); continue;
       }
 

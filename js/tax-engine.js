@@ -167,7 +167,7 @@ const TaxEngine = (() => {
     BCH: 'bitcoin-cash', EOS: 'eos', ZEC: 'zcash', XMR: 'monero',
     RAY: 'raydium', ORCA: 'orca', MNGO: 'mango-markets',
     // Solana ecosystem tokens — added so contract-address fallback is never needed
-    ATLAS: 'star-atlas', POLIS: 'star-atlas-polis',
+    ATLAS: 'star-atlas', POLIS: null, // star-atlas-polis delisted from CoinGecko
     RENDER: 'render-token', RNDR: 'render-token',
     ZEUS: 'zeus-network',
     HNT: 'helium', MOBILE: 'helium-mobile-network', IOT: 'helium-iot',

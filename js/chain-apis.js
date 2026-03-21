@@ -342,6 +342,7 @@ const ChainAPIs = (() => {
           'The quota resets monthly on your CoinGecko account.');
         return null;
       }
+      if (res.status === 404) return null; // coin delisted / not found — silently skip
       if (!res.ok) {
         console.warn(`[ChainAPIs] CoinGecko HTTP ${res.status} — ${path.slice(0, 80)}`);
         return null;

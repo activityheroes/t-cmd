@@ -1,5 +1,5 @@
 /* ============================================================
-   T-CMD — AI Fallback Client Module  v1
+   T-CMD — AI Fallback Client Module  v3
    Thin wrapper around the Supabase Edge Function `ai-fallback`.
    The OpenAI key NEVER touches this file — it's held server-side.
    ============================================================ */
@@ -37,18 +37,28 @@ const AIFallback = (() => {
       body: JSON.stringify({ action, ...payload }),
     });
 
-    const text = await res.text();
+    let text = '';
+    try { text = await res.text(); } catch { /* network drop */ }
+
     if (!res.ok) {
+      // 404 on get_job = stale/non-existent job — surface as a typed sentinel
+      // rather than a generic error so callers can handle it gracefully.
+      if (res.status === 404) {
+        const err = new Error(`AI Fallback [${action}]: job not found (404)`);
+        err.status = 404;
+        throw err;
+      }
       let msg;
       try {
         const j = JSON.parse(text);
         msg = j.error || j.message || text;
       } catch {
-        msg = text;
+        msg = text || `HTTP ${res.status}`;
       }
       throw new Error(`AI Fallback [${action}]: ${msg}`);
     }
 
+    if (!text) throw new Error(`AI Fallback [${action}]: empty response body`);
     try {
       return JSON.parse(text);
     } catch {
@@ -116,7 +126,18 @@ const AIFallback = (() => {
   // Returns the final job record.
   async function pollUntilComplete(jobId, { intervalMs = 3000, maxAttempts = 20, onPoll } = {}) {
     for (let i = 0; i < maxAttempts; i++) {
-      const data = await getJob(jobId);
+      let data;
+      try {
+        data = await getJob(jobId);
+      } catch (err) {
+        if (err.status === 404) {
+          // Job doesn't exist — stale ID from a redeployment or prior session.
+          // Return a synthetic record so callers don't crash; log once only.
+          console.warn(`[AIFallback] pollUntilComplete: job ${jobId} not found (stale ID) — stopping poll`);
+          return { job: { id: jobId, status: 'not_found' }, result: null };
+        }
+        throw err; // re-throw unexpected errors
+      }
       const status = data?.job?.status;
       if (onPoll) onPoll(data);
       if (status === 'completed' || status === 'failed') return data;

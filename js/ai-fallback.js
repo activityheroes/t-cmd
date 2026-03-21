@@ -7,14 +7,20 @@
 const AIFallback = (() => {
 
   // ── Endpoint ─────────────────────────────────────────────
+  function _cfg() {
+    // TCMD_CONFIG is a const (not on window) — access directly
+    return (typeof TCMD_CONFIG !== 'undefined') ? TCMD_CONFIG : null;
+  }
+
   function _fnUrl() {
-    const base = window.TCMD_CONFIG?.SUPABASE_URL;
+    const base = _cfg()?.SUPABASE_URL;
     if (!base) return null;
     return `${base}/functions/v1/ai-fallback`;
   }
 
   function isConfigured() {
-    return !!_fnUrl() && !!(window.TCMD_CONFIG?.SUPABASE_ANON_KEY);
+    const cfg = _cfg();
+    return !!_fnUrl() && !!(cfg?.SUPABASE_ANON_KEY);
   }
 
   // ── Core fetch helper ────────────────────────────────────
@@ -26,7 +32,7 @@ const AIFallback = (() => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'apikey': window.TCMD_CONFIG?.SUPABASE_ANON_KEY || '',
+        'apikey': _cfg()?.SUPABASE_ANON_KEY || '',
       },
       body: JSON.stringify({ action, ...payload }),
     });

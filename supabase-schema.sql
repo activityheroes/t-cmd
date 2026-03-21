@@ -320,6 +320,96 @@ CREATE POLICY "invites_update" ON invites FOR UPDATE USING (true);
 
 
 -- ════════════════════════════════════════════════════════════════
+-- 10. API KEYS — block anon key from reading the OpenAI row
+--     The OpenAI key is read ONLY by the ai-fallback Edge Function
+--     via Supabase service role (which bypasses RLS entirely).
+--     Belt-and-suspenders: even if service role isn't used, anon
+--     key can never read the `openai` row.
+-- ════════════════════════════════════════════════════════════════
+DROP POLICY IF EXISTS "apikeys_select" ON api_keys;
+CREATE POLICY "apikeys_select" ON api_keys
+  FOR SELECT USING (name NOT IN ('openai'));
+
+-- Seed the OpenAI row with an empty value (admin pastes key in UI)
+INSERT INTO api_keys (name, value) VALUES ('openai', '')
+ON CONFLICT (name) DO NOTHING;
+
+
+-- ════════════════════════════════════════════════════════════════
+-- 11. AI FALLBACK TABLES
+--     Jobs, results, and attempt logs for AI-assisted review.
+--     All three use USING (true) for SELECT (consistent with other
+--     tables in this schema — app layer scopes by user_id).
+-- ════════════════════════════════════════════════════════════════
+
+-- Drop cleanup (safe to re-run)
+DO $$ BEGIN
+  DROP POLICY IF EXISTS "aifb_jobs_rw"     ON ai_fallback_jobs;
+  DROP POLICY IF EXISTS "aifb_results_rw"  ON ai_fallback_results;
+  DROP POLICY IF EXISTS "aifb_attempts_rw" ON ai_fallback_attempts;
+EXCEPTION WHEN others THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS ai_fallback_jobs (
+  id             UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id        TEXT,
+  job_type       TEXT NOT NULL,          -- unknown_token_classifier | missing_price_explainer | suggested_price_assistant
+  row_id         TEXT,
+  tx_hash        TEXT,
+  chain          TEXT DEFAULT 'solana',
+  token_symbol   TEXT,
+  mint_address   TEXT,
+  timestamp      TIMESTAMPTZ,
+  input_payload  JSONB NOT NULL DEFAULT '{}',
+  status         TEXT NOT NULL DEFAULT 'queued',  -- queued | running | completed | failed
+  model          TEXT DEFAULT 'gpt-4o-mini',
+  prompt_version TEXT DEFAULT '1.0',
+  created_at     TIMESTAMPTZ DEFAULT now(),
+  started_at     TIMESTAMPTZ,
+  completed_at   TIMESTAMPTZ,
+  error          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ai_fallback_results (
+  id                   UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  job_id               UUID REFERENCES ai_fallback_jobs(id) ON DELETE CASCADE,
+  user_id              TEXT,
+  job_type             TEXT NOT NULL,
+  resolved             BOOLEAN DEFAULT false,
+  result_payload       JSONB,
+  confidence           TEXT,                 -- high | medium | low
+  recommended_action   TEXT,
+  evidence_summary     JSONB,
+  raw_openai_response  JSONB,
+  applied              BOOLEAN DEFAULT false,
+  applied_at           TIMESTAMPTZ,
+  rejected             BOOLEAN DEFAULT false,
+  rejected_at          TIMESTAMPTZ,
+  created_at           TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ai_fallback_attempts (
+  id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  job_id          UUID REFERENCES ai_fallback_jobs(id) ON DELETE CASCADE,
+  attempt_number  INT NOT NULL DEFAULT 1,
+  started_at      TIMESTAMPTZ DEFAULT now(),
+  completed_at    TIMESTAMPTZ,
+  status          TEXT,
+  tokens_used     INT,
+  cost_usd        NUMERIC(10,6),
+  error           TEXT,
+  response_time_ms INT
+);
+
+ALTER TABLE ai_fallback_jobs     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_fallback_results  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_fallback_attempts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "aifb_jobs_rw"     ON ai_fallback_jobs     USING (true);
+CREATE POLICY "aifb_results_rw"  ON ai_fallback_results  USING (true);
+CREATE POLICY "aifb_attempts_rw" ON ai_fallback_attempts USING (true);
+
+
+-- ════════════════════════════════════════════════════════════════
 -- NEXT STEPS — full server-side enforcement
 -- ════════════════════════════════════════════════════════════════
 -- The SELECT policies above use USING (true) because this app uses

@@ -437,6 +437,12 @@ const SupabaseDB = (() => {
             // API keys are app-wide (admin-managed) when Supabase is live.
             // When falling back to localStorage the keys are stored per-user so one
             // user cannot read another user's manually entered dev keys.
+            //
+            // SECURITY: `openai` is intentionally excluded here — it is stored in the
+            // api_keys table but is only read server-side by the ai-fallback Edge Function
+            // via Supabase service role (which bypasses RLS). The anon key is blocked from
+            // reading the openai row by RLS (`name NOT IN ('openai')`), and we also
+            // never include it in the return value below as a belt-and-suspenders guard.
             const userId = _uid();
             const K = window.TCMD_KEYS || {};
             if (!SUPABASE_READY) {
@@ -445,6 +451,7 @@ const SupabaseDB = (() => {
                     birdeye:   localStorage.getItem(`tcmd_${userId}_birdeye_key`)   || K.birdeye   || '',
                     etherscan: localStorage.getItem(`tcmd_${userId}_etherscan_key`) || K.etherscan || '',
                     coingecko: localStorage.getItem(`tcmd_${userId}_coingecko_key`) || K.coingecko || '',
+                    // openai intentionally excluded — server-side only
                 };
             }
             try {
@@ -456,6 +463,7 @@ const SupabaseDB = (() => {
                     birdeye:   keys.birdeye   || K.birdeye   || '',
                     etherscan: keys.etherscan || K.etherscan || '',
                     coingecko: keys.coingecko || K.coingecko || '',
+                    // openai intentionally excluded — server-side only
                 };
             } catch {
                 return {
@@ -463,6 +471,7 @@ const SupabaseDB = (() => {
                     birdeye:   localStorage.getItem(`tcmd_${userId}_birdeye_key`)   || K.birdeye   || '',
                     etherscan: localStorage.getItem(`tcmd_${userId}_etherscan_key`) || K.etherscan || '',
                     coingecko: localStorage.getItem(`tcmd_${userId}_coingecko_key`) || K.coingecko || '',
+                    // openai intentionally excluded — server-side only
                 };
             }
         },

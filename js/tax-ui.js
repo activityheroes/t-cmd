@@ -57,6 +57,11 @@ const TaxUI = (() => {
     reviewGroupExpanded: new Set(),        // keys for sub-groups expanded beyond row limit
     // Review page: pending "apply to similar" toast
     pendingSimilarAction: null,            // { ids: Set, action: string, label: string }
+    // AI Fallback panel state
+    aiFallbackJobs: new Map(),             // jobId → job record
+    aiFallbackResults: new Map(),          // rowId → result record
+    aiFallbackRunning: false,              // true while polling / awaiting run()
+    aiFallbackJobType: null,              // which job type is currently running
   };
 
   let _pendingCSVText = null;
@@ -3276,6 +3281,96 @@ const TaxUI = (() => {
           </div>`;
         })()}
 
+        <!-- ── AI-assisted review panel ─────────────────────── -->
+        ${(() => {
+          if (typeof AIFallback === 'undefined' || !AIFallback.isConfigured()) return '';
+
+          // Detect eligible rows per job type
+          const classifierIssues = issues.filter(i =>
+            i.reason === 'unknown_asset' &&
+            (!i.tokenClass || i.tokenClass.type === 'unknown_real')
+          );
+          const explainerIssues = issues.filter(i =>
+            i.reason === 'missing_sek_price' && i.priceBlockDebug
+          );
+          const priceAssistIssues = issues.filter(i =>
+            i.reason === 'missing_sek_price' && !i.priceBlockDebug
+          );
+
+          const nClassifier  = classifierIssues.length;
+          const nExplainer   = explainerIssues.length;
+          const nPriceAssist = priceAssistIssues.length;
+          const totalEligible = nClassifier + nExplainer + nPriceAssist;
+
+          // Collect results to display
+          const pendingResults = [];
+          for (const [, result] of S.aiFallbackResults) {
+            if (!result.applied && !result.rejected) pendingResults.push(result);
+          }
+
+          if (totalEligible === 0 && pendingResults.length === 0 && !S.aiFallbackRunning) return '';
+
+          const confColor = c => c === 'high' ? '#4ade80' : c === 'medium' ? '#fbbf24' : '#f87171';
+          const btnStyle = `height:28px;padding:0 10px;border:1px solid rgba(99,102,241,.3);border-radius:6px;
+            background:rgba(99,102,241,.1);color:#a5b4fc;font-size:11px;cursor:pointer;white-space:nowrap`;
+          const btnPrimary = `height:28px;padding:0 10px;border:none;border-radius:6px;
+            background:rgba(99,102,241,.25);color:#c7d2fe;font-size:11px;font-weight:600;cursor:pointer`;
+
+          return `
+          <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;
+            background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.2)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <span style="font-size:14px">🤖</span>
+              <span style="font-size:12px;font-weight:700;color:#818cf8;letter-spacing:.04em">AI-assisterad granskning</span>
+              <span style="font-size:11px;color:#475569;flex:1">OpenAI analyserar olösta rader (max 5 per körning)</span>
+              ${S.aiFallbackRunning ? `<span style="font-size:11px;color:#fbbf24">⏳ Kör…</span>` : ''}
+            </div>
+
+            ${totalEligible > 0 && !S.aiFallbackRunning ? `
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:${pendingResults.length > 0 ? '12px' : '0'}">
+              ${nClassifier > 0 ? `<button style="${btnPrimary}" onclick="TaxUI.runAIFallback('unknown_token_classifier')">
+                🔍 Klassificera ${nClassifier} okänd${nClassifier !== 1 ? 'a' : ''} token${nClassifier !== 1 ? 's' : ''}
+              </button>` : ''}
+              ${nExplainer > 0 ? `<button style="${btnStyle}" onclick="TaxUI.runAIFallback('missing_price_explainer')">
+                🔎 Förklara ${nExplainer} saknat${nExplainer !== 1 ? 'a' : ''} pris${nExplainer !== 1 ? 'er' : ''}
+              </button>` : ''}
+              ${nPriceAssist > 0 ? `<button style="${btnStyle}" onclick="TaxUI.runAIFallback('suggested_price_assistant')">
+                💰 Hitta pris för ${nPriceAssist} rad${nPriceAssist !== 1 ? 'er' : ''}
+              </button>` : ''}
+            </div>` : ''}
+
+            ${pendingResults.length > 0 ? `
+            <div style="border-top:1px solid rgba(99,102,241,.15);padding-top:10px">
+              <div style="font-size:10px;font-weight:600;color:#64748b;letter-spacing:.05em;text-transform:uppercase;margin-bottom:8px">
+                Resultat (${pendingResults.length})
+              </div>
+              <div style="display:grid;gap:6px">
+                ${pendingResults.map(result => {
+                  const p = result.result_payload || {};
+                  const sym = p.token_symbol || p.symbol || '?';
+                  const conf = result.confidence || 'low';
+                  const action = result.recommended_action || p.recommended_action || '';
+                  const summary = result.evidence_summary?.summary || p.evidence_summary?.summary || p.classification_reason || p.analysis_summary || '';
+                  return `
+                  <div style="padding:8px 10px;background:rgba(15,23,42,.5);border-radius:8px;border:1px solid rgba(99,102,241,.15);font-size:11px">
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${summary ? '4px' : '0'}">
+                      <span style="font-weight:700;color:#e2e8f0">${sym}</span>
+                      <span style="padding:1px 6px;border-radius:10px;background:rgba(15,23,42,.6);color:${confColor(conf)};font-size:10px">${conf}</span>
+                      ${action ? `<span style="color:#94a3b8;font-size:10px">${action}</span>` : ''}
+                      <div style="flex:1"></div>
+                      <button style="height:22px;padding:0 8px;border:none;border-radius:5px;background:rgba(34,197,94,.15);color:#4ade80;font-size:10px;cursor:pointer"
+                        onclick="TaxUI.applyAIResult('${result.job_id}', '${result.id}')">Tillämpa ✓</button>
+                      <button style="height:22px;padding:0 8px;border:none;border-radius:5px;background:rgba(239,68,68,.1);color:#f87171;font-size:10px;cursor:pointer"
+                        onclick="TaxUI.rejectAIResult('${result.id}')">Avfärda ✗</button>
+                    </div>
+                    ${summary ? `<div style="color:#64748b;font-size:10px;line-height:1.4">${summary.slice(0, 200)}${summary.length > 200 ? '…' : ''}</div>` : ''}
+                  </div>`;
+                }).join('')}
+              </div>
+            </div>` : ''}
+          </div>`;
+        })()}
+
         <!-- ── Per-asset provenance view ──────────────────────── -->
         ${(() => {
           if (!taxResult || !TaxEngine.buildAssetProvenance) return '';
@@ -5688,6 +5783,106 @@ const TaxUI = (() => {
     render();
   }
 
+  // ── AI Fallback panel handlers ─────────────────────────────────────
+
+  async function runAIFallback(jobType) {
+    if (typeof AIFallback === 'undefined' || !AIFallback.isConfigured()) {
+      showTaxToast('⚠️', 'AI inte konfigurerat', 'SUPABASE_URL saknas i TCMD_CONFIG.', 'warning');
+      return;
+    }
+    if (S.aiFallbackRunning) return;
+    S.aiFallbackRunning = true;
+    S.aiFallbackJobType = jobType;
+    render();
+
+    try {
+      const issues = TaxEngine.getReviewIssues(null, S.taxResult || null);
+      const jobs = await AIFallback.run(issues, jobType, (pct, msg) => {
+        S.pipelineMsg = msg;
+        S.pipelinePct = pct;
+      });
+
+      if (!jobs || jobs.length === 0) {
+        showTaxToast('ℹ️', 'Inga jobb', 'Inga olösta rader hittades för detta job-typ.', 'info');
+        return;
+      }
+
+      // Poll all jobs until complete (they run synchronously server-side, so usually 1 round)
+      for (const job of jobs) {
+        try {
+          const data = await AIFallback.pollUntilComplete(job.id, {
+            intervalMs: 3000,
+            maxAttempts: 20,
+          });
+          if (data?.results?.length) {
+            for (const result of data.results) {
+              if (!result.applied && !result.rejected) {
+                const rowId = data.job?.row_id || result.id;
+                S.aiFallbackJobs.set(job.id, data.job);
+                S.aiFallbackResults.set(result.id, result);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[TaxUI] AI job poll error:', e.message);
+        }
+      }
+
+      const n = S.aiFallbackResults.size;
+      if (n > 0) {
+        showTaxToast('🤖', 'AI-resultat klara', `${n} resultat redo att granskas.`, 'success');
+      } else {
+        showTaxToast('ℹ️', 'AI: Inga resultat', 'AI hittade inga tydliga svar.', 'info');
+      }
+    } catch (e) {
+      showTaxToast('✗', 'AI-fel', e.message, 'error');
+      console.error('[TaxUI] runAIFallback error:', e);
+    } finally {
+      S.aiFallbackRunning = false;
+      S.aiFallbackJobType = null;
+      S.pipelinePct = 0;
+      S.pipelineMsg = '';
+      render();
+    }
+  }
+
+  async function applyAIResult(jobId, resultId) {
+    if (typeof AIFallback === 'undefined') return;
+    try {
+      const data = await AIFallback.apply(jobId, resultId);
+      // Remove from pending results
+      S.aiFallbackResults.delete(resultId);
+      // Apply client patch if provided
+      if (data?.client_patch) {
+        const patch = data.client_patch;
+        const allTxns = TaxEngine.getTransactions();
+        const txn = allTxns.find(t => t.id === patch.row_id || t.txHash === patch.tx_hash);
+        if (txn) {
+          if (patch.action === 'hide' || patch.action === 'mark_spam') {
+            TaxEngine.updateTransaction(txn.id, { excluded: true, excludeReason: 'ai_spam', reviewed: true });
+          } else if (patch.action === 'mark_internal_transfer') {
+            TaxEngine.updateTransaction(txn.id, { resolutionCandidateType: 'internal_transfer', reviewed: true });
+          } else if (patch.action === 'mark_airdrop') {
+            TaxEngine.updateTransaction(txn.id, { resolutionCandidateType: 'airdrop', reviewed: true });
+          } else if (patch.action === 'set_price' && patch.price_usd) {
+            TaxEngine.updateTransaction(txn.id, { manualPriceUSD: patch.price_usd, reviewed: true });
+          }
+        }
+      }
+      showTaxToast('✅', 'Tillämpad', 'AI-resultatet tillämpades.', 'success');
+      render();
+      await triggerPipeline();
+    } catch (e) {
+      showTaxToast('✗', 'Fel', e.message, 'error');
+      render();
+    }
+  }
+
+  function rejectAIResult(resultId) {
+    S.aiFallbackResults.delete(resultId);
+    render();
+  }
+
   // Resolve human-readable names for all "Unknown token" transactions.
   // Uses DexScreener batch endpoint (full Solana mints) + Pump.fun fallback.
   // Updates the token name cache and re-renders — no pipeline re-run needed.
@@ -6411,6 +6606,8 @@ const TaxUI = (() => {
     // Portfolio dashboard
     portSetRange, filterAssets, toggleSmallBalances, setPortFilter,
     openAssetAudit, closeAssetAudit,
+    // AI Fallback panel
+    runAIFallback, applyAIResult, rejectAIResult,
     // Per-asset provenance view toggle
     toggleProvenanceAll() {
       S.provenanceShowAll = !S.provenanceShowAll;

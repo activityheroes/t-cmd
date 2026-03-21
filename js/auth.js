@@ -756,6 +756,16 @@ async function renderAdminPanel() {
                     <button onclick="adminTestKey('monadscan')" id="monadscan-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
                     <span id="monadscan-key-status" style="font-size:11px;color:var(--text-muted);min-width:80px;"></span>
                 </div>
+                <!-- OpenAI key (server-side only — stored in api_keys table, never returned to client) -->
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-primary);width:110px;flex-shrink:0;">🤖 OpenAI</label>
+                    <input id="admin-openai-key" type="password" placeholder="sk-proj-…"
+                        value=""
+                        style="flex:1;height:30px;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);padding:0 10px;outline:none;">
+                    <button onclick="adminSaveKey('openai')" style="height:30px;padding:0 12px;background:var(--accent-cyan);border:none;border-radius:7px;color:#0d1021;font-size:12px;font-weight:700;cursor:pointer;">Save</button>
+                    <button onclick="adminTestKey('openai')" id="openai-test-btn" style="height:30px;padding:0 12px;background:rgba(255,255,255,0.07);border:1px solid var(--border-subtle);border-radius:7px;color:var(--text-secondary);font-size:12px;cursor:pointer;">Test</button>
+                    <span id="openai-key-status" style="font-size:11px;color:var(--text-muted);min-width:120px;">Server-side only</span>
+                </div>
                 <div id="admin-key-status" style="font-size:11px;color:var(--text-muted);min-height:16px;"></div>
             </div>
         </div>
@@ -1076,48 +1086,63 @@ window.adminSaveKey = function (name) {
 window.adminTestKey = async function (name) {
   const btn = document.getElementById(`${name}-test-btn`);
   const status = document.getElementById(`${name}-key-status`) || document.getElementById('admin-key-status');
-  if (!btn || typeof ChainAPIs === 'undefined') return;
-  const key = document.getElementById(`admin-${name}-key`)?.value?.trim();
-  if (!key) { if (status) { status.textContent = `No ${name} key entered`; status.style.color = '#f59e0b'; } return; }
+  if (!btn) return;
   btn.textContent = 'Testing…'; btn.disabled = true;
   try {
-    if (name === 'coingecko') {
-      const result = await ChainAPIs.testCoinGeckoKey(key);
-      if (status) {
-        if (result.valid) {
-          let msg = `✓ CoinGecko key is valid!`;
-          if (result.usage) msg += ` (${result.usage.remaining}/${result.usage.limit} remaining)`;
-          if (result.error) msg += ` ⚠️ ${result.error}`;
-          status.textContent = msg;
-          status.style.color = result.error ? '#f59e0b' : 'var(--accent-green)';
-        } else {
-          status.textContent = `✗ ${result.error || 'CoinGecko key invalid'}`;
-          status.style.color = '#ef4444';
+    // OpenAI: key is never sent to the browser — test by calling the Edge Function
+    if (name === 'openai') {
+      if (typeof AIFallback === 'undefined' || !AIFallback.isConfigured()) {
+        if (status) { status.textContent = 'Edge Function not configured (SUPABASE_URL missing)'; status.style.color = '#f59e0b'; }
+      } else {
+        const result = await AIFallback.testKey().catch(e => ({ ok: false, error: e.message }));
+        if (status) {
+          status.textContent = result.ok
+            ? `✓ OpenAI ${result.model} — ${result.latency_ms}ms`
+            : `✗ ${result.error || 'OpenAI key invalid or Edge Function error'}`;
+          status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
         }
       }
-    } else if (name === 'etherscan') {
-      // Etherscan test: tries v2 API first (new keys), falls back to v1 (legacy keys)
-      const result = await ChainAPIs.testEtherscanKey(key);
-      if (status) {
-        status.textContent = result.ok ? '✓ Etherscan key is valid!' : `✗ ${result.error || 'Etherscan key invalid or quota exceeded'}`;
-        status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
-      }
-    } else if (name === 'basescan' || name === 'arbiscan' || name === 'monadscan') {
-      const testFn = name === 'basescan' ? ChainAPIs.testBasescanKey
-                   : name === 'arbiscan' ? ChainAPIs.testArbiscanKey
-                   : ChainAPIs.testMonadscanKey;
-      const result = await testFn(key);
-      if (status) {
-        status.textContent = result.ok ? `✓ ${name} key is valid!` : `✗ ${result.error || name + ' key invalid'}`;
-        status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
-      }
-    } else {
-      const ok = name === 'birdeye'
-        ? await ChainAPIs.testBirdeyeKey(key)
-        : await ChainAPIs.testHeliusKey(key);
-      if (status) {
-        status.textContent = ok ? `✓ ${name} key is valid!` : `✗ ${name} key invalid or quota exceeded`;
-        status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+    } else if (typeof ChainAPIs !== 'undefined') {
+      const key = document.getElementById(`admin-${name}-key`)?.value?.trim();
+      if (!key) {
+        if (status) { status.textContent = `No ${name} key entered`; status.style.color = '#f59e0b'; }
+      } else if (name === 'coingecko') {
+        const result = await ChainAPIs.testCoinGeckoKey(key);
+        if (status) {
+          if (result.valid) {
+            let msg = `✓ CoinGecko key is valid!`;
+            if (result.usage) msg += ` (${result.usage.remaining}/${result.usage.limit} remaining)`;
+            if (result.error) msg += ` ⚠️ ${result.error}`;
+            status.textContent = msg;
+            status.style.color = result.error ? '#f59e0b' : 'var(--accent-green)';
+          } else {
+            status.textContent = `✗ ${result.error || 'CoinGecko key invalid'}`;
+            status.style.color = '#ef4444';
+          }
+        }
+      } else if (name === 'etherscan') {
+        const result = await ChainAPIs.testEtherscanKey(key);
+        if (status) {
+          status.textContent = result.ok ? '✓ Etherscan key is valid!' : `✗ ${result.error || 'Etherscan key invalid or quota exceeded'}`;
+          status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
+        }
+      } else if (name === 'basescan' || name === 'arbiscan' || name === 'monadscan') {
+        const testFn = name === 'basescan' ? ChainAPIs.testBasescanKey
+                     : name === 'arbiscan' ? ChainAPIs.testArbiscanKey
+                     : ChainAPIs.testMonadscanKey;
+        const result = await testFn(key);
+        if (status) {
+          status.textContent = result.ok ? `✓ ${name} key is valid!` : `✗ ${result.error || name + ' key invalid'}`;
+          status.style.color = result.ok ? 'var(--accent-green)' : '#ef4444';
+        }
+      } else {
+        const ok = name === 'birdeye'
+          ? await ChainAPIs.testBirdeyeKey(key)
+          : await ChainAPIs.testHeliusKey(key);
+        if (status) {
+          status.textContent = ok ? `✓ ${name} key is valid!` : `✗ ${name} key invalid or quota exceeded`;
+          status.style.color = ok ? 'var(--accent-green)' : '#ef4444';
+        }
       }
     }
   } catch (e) {

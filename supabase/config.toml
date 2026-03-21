@@ -1,13 +1,2 @@
-# Supabase project configuration.
-# Replace YOUR_SUPABASE_PROJECT_REF with the project ref from your Supabase dashboard URL.
-# Example: if your dashboard URL is https://app.supabase.com/project/abcdefghijklmnop
-# then project_id = "abcdefghijklmnop"
-
-[api]
-project_id = "YOUR_SUPABASE_PROJECT_REF"
-
-[db]
-port = 54322
-
 [functions.ai-fallback]
-verify_jwt = false   # Set to true once you add user auth tokens to the client calls
+verify_jwt = false

@@ -29,6 +29,8 @@ const TaxUI = (() => {
     pipelinePct: 0,
     pipelineMsg: '',
     pipelineRunning: false,
+    pipelineDirty: false,         // true after data edits until pipeline re-runs
+    canonicalPipelineId: null,    // opaque stamp — changes each pipeline:done; use for debug sync check
     // Portfolio dashboard
     portfolioSnap: null,   // live-price enriched snapshot
     portfolioHist: null,   // time-series history for chart
@@ -90,6 +92,8 @@ const TaxUI = (() => {
     });
     TaxEngine.Events.on('pipeline:done', ({ totalTxns, reviewIssues }) => {
       S.pipelineRunning = false;
+      S.pipelineDirty = false;
+      S.canonicalPipelineId = `run-${Date.now().toString(36)}`;
       S.taxResult = null; S.portfolioSnap = null; S.portfolioHist = null; // force recompute
       hidePipelineBar();
       render();
@@ -3095,16 +3099,39 @@ const TaxUI = (() => {
   };
 
   function renderReview() {
-    const taxResult  = S.taxResult || null;
+    // ── Canonical state — MUST use same computation path as Reports ────────────
+    // BUG GUARD: Do NOT read S.taxResult directly here. S.taxResult is nulled
+    // after every bulk action so that the next render gets a fresh computation.
+    // If we read it as null and fall back to transaction-level issue flags, Review
+    // and Reports diverge: Review shows post-action transaction state, Reports
+    // shows pre-action disposal state. Both must use the same getOrComputeTaxResult()
+    // call so they always render from the same computeTaxYear() snapshot.
+    const taxResult  = getOrComputeTaxResult();
     const issues     = TaxEngine.getReviewIssues(null, taxResult);
     const collapsed  = S.collapsedGroups || new Set(['received_not_sold']);
     const activeTab  = S.reviewTab || 'blockers';
 
     // ── Canonical status summary (single source of truth, shared with Reports) ──
-    // Use this instead of deriving counts locally so both pages agree.
-    const k4Report = S.k4Report;
+    // Generate a FRESH k4Report from the same taxResult — not S.k4Report which
+    // was last populated by renderReports() and may be from a different render cycle.
+    const k4Report = (TaxEngine.generateK4Report && taxResult)
+      ? TaxEngine.generateK4Report(taxResult)
+      : S.k4Report;
+    if (k4Report) S.k4Report = k4Report; // keep in sync for sidebar + Reports
     const ss = (taxResult && k4Report && TaxEngine.computeStatusSummary)
       ? TaxEngine.computeStatusSummary(taxResult, k4Report) : null;
+
+    // ── Consistency assertion (dev) ──────────────────────────────────────────
+    // After this fix, Review and Reports use the exact same ss object, so these
+    // should always be equal. Log a hard error if they ever diverge.
+    if (ss && S.canonicalPipelineId) {
+      const _repResult = S.taxResult; // just computed above via getOrComputeTaxResult
+      if (_repResult && _repResult !== taxResult) {
+        console.error('[T-CMD CONSISTENCY] renderReview taxResult !== S.taxResult — state fork detected', {
+          pipelineId: S.canonicalPipelineId,
+        });
+      }
+    }
 
     // ── Issue counts per severity tier ─────────────────────────────────────────
     // HARD BLOCKERS: only rows that genuinely prevent the K4 export from being valid.
@@ -3178,11 +3205,21 @@ const TaxUI = (() => {
       <div class="tax-page">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Granska transaktioner</h1>
-          <span class="tax-page-subtitle">${nHardBlockers > 0 ? `⛔ ${nHardBlockers} blockerare` : '✅ Inga blockerare'} · ${confidencePct}% konfidens</span>
+          <span class="tax-page-subtitle">${nHardBlockers > 0 ? `⛔ ${nHardBlockers} blockerare` : '✅ Inga blockerare'} · ${confidencePct}% konfidens${S.canonicalPipelineId && window.location.hash === '#debug' ? ` · <code style="font-size:10px;opacity:.5">${S.canonicalPipelineId}</code>` : ''}</span>
           <div class="tax-page-actions" style="gap:8px">
             <button class="tax-btn tax-btn-sm tax-btn-ghost" onclick="TaxUI.markAllReviewed()">✓ Markera alla OK</button>
           </div>
         </div>
+
+        ${S.pipelineDirty ? `
+        <div style="margin-bottom:12px;padding:8px 14px;border-radius:8px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.22);display:flex;align-items:center;gap:10px">
+          <span style="font-size:15px">⚠️</span>
+          <div style="flex:1;font-size:12px;color:#fbbf24">
+            <strong>Transaktionsdata ändrad</strong> — K4-siffrorna visar föregående pipeline-körning.
+            Kör om pipelinen för ett aktuellt resultat.
+          </div>
+          <button class="tax-btn tax-btn-sm" style="background:rgba(251,191,36,.12);color:#fbbf24;border-color:rgba(251,191,36,.28);white-space:nowrap" onclick="TaxUI.rerunPipeline()">🔄 Kör om nu</button>
+        </div>` : ''}
 
         ${staleSolanaCount > 0 ? `
         <div style="margin-bottom:12px;padding:12px 16px;border-radius:10px;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.3);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -4257,8 +4294,18 @@ const TaxUI = (() => {
       <div class="tax-page">
         <div class="tax-page-header">
           <h1 class="tax-page-title">Tax Reports</h1>
-          <span class="tax-page-subtitle">${S.taxYear} — Skatteverket K4</span>
+          <span class="tax-page-subtitle">${S.taxYear} — Skatteverket K4${S.canonicalPipelineId && window.location.hash === '#debug' ? ` · <code style="font-size:10px;opacity:.5">${S.canonicalPipelineId}</code>` : ''}</span>
         </div>
+
+        ${S.pipelineDirty ? `
+        <div style="margin-bottom:12px;padding:8px 14px;border-radius:8px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.22);display:flex;align-items:center;gap:10px">
+          <span style="font-size:15px">⚠️</span>
+          <div style="flex:1;font-size:12px;color:#fbbf24">
+            <strong>Transaktionsdata ändrad</strong> — siffrorna nedan baseras på föregående pipeline-körning.
+            Kör om pipelinen för ett aktuellt K4-resultat.
+          </div>
+          <button class="tax-btn tax-btn-sm" style="background:rgba(251,191,36,.12);color:#fbbf24;border-color:rgba(251,191,36,.28);white-space:nowrap" onclick="TaxUI.rerunPipeline()">🔄 Kör om nu</button>
+        </div>` : ''}
 
         ${(ss || health) ? `
         <div style="margin-bottom:16px;padding:${isInvalid?'16px':'12px'} 16px;border-radius:12px;background:${healthStyle.bg};border:${isInvalid?'2px':'1px'} solid ${healthStyle.border}">
@@ -5267,7 +5314,7 @@ const TaxUI = (() => {
       manualCategory: true, priceSource: 'manual',
       ...(inAsset ? { inAsset, inAmount } : {}),
     });
-    S.editTxId = null; S.taxResult = null; render();
+    S.editTxId = null; S.taxResult = null; S.pipelineDirty = true; render();
     showTaxToast('✅', 'Transaction updated');
   }
 
@@ -5290,7 +5337,7 @@ const TaxUI = (() => {
     if (!confirm(`Delete ${dups.length} duplicate transactions? This cannot be undone.`)) return;
     const clean = txns.filter(t => !t.isDuplicate);
     TaxEngine.saveTransactions(clean);
-    S.taxResult = null;
+    S.taxResult = null; S.pipelineDirty = true;
     showTaxToast('🗑', 'Duplicates removed', `${dups.length} duplicate transactions deleted.`, 'success');
     render();
   }
@@ -5306,7 +5353,7 @@ const TaxUI = (() => {
       ids.has(t.id) ? { ...t, category: 'spam', autoClassified: true, needsReview: false, userReviewed: true } : t
     );
     TaxEngine.saveTransactions(updated);
-    S.taxResult = null;
+    S.taxResult = null; S.pipelineDirty = true;
     showTaxToast('🚫', 'Marked as spam', `${affected.length} transactions excluded from calculations.`, 'success');
     render();
   }
@@ -5321,7 +5368,7 @@ const TaxUI = (() => {
       priceSource: 'missing', priceConfidence: 'spam_zero',
       needsReview: false, reviewReason: 'spam_token', userReviewed: true,
     });
-    S.taxResult = null;
+    S.taxResult = null; S.pipelineDirty = true;
     // Check for similar rows and show toast
     if (txn) {
       const similar = findSimilarRows(Object.assign({}, txn, { _reviewReason: 'spam_token' }));
@@ -5454,7 +5501,7 @@ const TaxUI = (() => {
       } : t
     );
     TaxEngine.saveTransactions(updated);
-    S.taxResult = null;
+    S.taxResult = null; S.pipelineDirty = true;
     showTaxToast('🚫', 'Marked as spam', `${affected.length} transactions set to zero value.`, 'success');
     render();
   }
@@ -5491,7 +5538,7 @@ const TaxUI = (() => {
       };
     });
     TaxEngine.saveTransactions(updated);
-    S.taxResult = null;
+    S.taxResult = null; S.pipelineDirty = true;
     showTaxToast('0️⃣', 'Zero cost set', `${affected.length} transactions will use full proceeds as gain.`, 'info');
     render();
   }
@@ -5510,7 +5557,7 @@ const TaxUI = (() => {
       } : t
     );
     TaxEngine.saveTransactions(updated);
-    S.taxResult = null;
+    S.taxResult = null; S.pipelineDirty = true;
     showTaxToast('🔄', 'Reclassified', `${affected.length} transactions set to "${newCategory}".`, 'success');
     render();
   }
@@ -6869,6 +6916,7 @@ const TaxUI = (() => {
     toggleAssetGroup, expandReviewGroup,
     bulkClassifySelected, bulkPriceSelected,
     applySimilarAction, dismissSimilarToast,
+    rerunPipeline: () => triggerPipeline(),
     deleteDuplicates, removeAccount, clearAllData, deleteOrphanedTransactions,
     downloadK4CSV, downloadK4PDF, downloadAccountantReport, downloadAuditCSV, downloadHoldingsCSV, printReport,
     setUserInfo, resyncAccount, purgeAndResync, manualCloudSync, reprocessAndSaveSolana,

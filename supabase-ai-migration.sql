@@ -21,10 +21,12 @@ ON CONFLICT (name) DO NOTHING;
 
 -- ── 2. AI Fallback tables ────────────────────────────────────────────
 
--- Drop old policies if re-running
-DROP POLICY IF EXISTS "aifb_jobs_rw"     ON ai_fallback_jobs;
-DROP POLICY IF EXISTS "aifb_results_rw"  ON ai_fallback_results;
-DROP POLICY IF EXISTS "aifb_attempts_rw" ON ai_fallback_attempts;
+-- Drop old policies safely (tables may not exist yet on first run)
+DO $$ BEGIN
+  DROP POLICY IF EXISTS "aifb_jobs_rw"     ON ai_fallback_jobs;
+  DROP POLICY IF EXISTS "aifb_results_rw"  ON ai_fallback_results;
+  DROP POLICY IF EXISTS "aifb_attempts_rw" ON ai_fallback_attempts;
+EXCEPTION WHEN others THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS ai_fallback_jobs (
   id             uuid        DEFAULT gen_random_uuid() PRIMARY KEY,

@@ -338,8 +338,8 @@ async function handleTest(sb: SupabaseClient): Promise<Response> {
     },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
-      instructions: 'Reply with exactly: {"ok":true}',
-      input: 'ping',
+      instructions: 'You are a ping responder. Reply with valid json containing exactly: {"ok":true}',
+      input: 'ping — respond with json',
       text: { format: { type: 'json_object' } },
     }),
   });

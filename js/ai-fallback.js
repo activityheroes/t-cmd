@@ -179,6 +179,45 @@ const AIFallback = (() => {
     return rows;
   }
 
+  // ── classifyTokens ───────────────────────────────────────
+  // AI token-group classifier. Accepts UnknownTokenGroup[] from
+  // TaxEngine.groupUnknownTokensForAI() and returns classification results.
+  // The Edge Function handles sub-batching (15 groups per OpenAI request)
+  // and DB caching — repeated tokens are never re-sent to OpenAI.
+  //
+  // Returns { results, summary, resolvedCount, inputCount }
+  async function classifyTokens(groups, { batchId, userId, onProgress } = {}) {
+    if (!Array.isArray(groups) || !groups.length) {
+      return { results: [], summary: {}, inputCount: 0, resolvedCount: 0 };
+    }
+    if (onProgress) onProgress(5, `Sending ${groups.length} token groups to AI…`);
+
+    const result = await _call('classify_tokens', {
+      groups,
+      batch_id: batchId || `client_${Date.now()}`,
+      user_id:  userId  || 'anonymous',
+    });
+
+    if (onProgress) onProgress(100, `AI classified ${result.resolvedCount ?? 0} token groups`);
+    return result;
+  }
+
+  // ── previewTokenClassification ───────────────────────────
+  // Estimate cost without calling OpenAI.
+  function previewTokenClassification(groups) {
+    if (!Array.isArray(groups) || !groups.length) {
+      return { inputCount: 0, estimatedCostUsd: 0, batches: 0 };
+    }
+    const BATCH_SIZE = 15;
+    const COST_PER_BATCH = BATCH_SIZE * 0.0006;
+    const batches = Math.ceil(groups.length / BATCH_SIZE);
+    return {
+      inputCount:       groups.length,
+      estimatedCostUsd: +(batches * COST_PER_BATCH).toFixed(4),
+      batches,
+    };
+  }
+
   // ── Public API ───────────────────────────────────────────
   return {
     isConfigured,
@@ -188,6 +227,8 @@ const AIFallback = (() => {
     getJob,
     apply,
     pollUntilComplete,
+    classifyTokens,
+    previewTokenClassification,
   };
 
 })();

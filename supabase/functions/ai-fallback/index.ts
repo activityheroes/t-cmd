@@ -145,11 +145,53 @@ Rules:
 `.trim(),
 };
 
+// Token-group batch classifier prompt (one prompt per batch of groups, not per row)
+const TOKEN_GROUP_CLASSIFIER_PROMPT = `
+You are a crypto tax assistant that classifies unresolved tokens for a Swedish tax-review workflow.
+
+You receive a JSON array of token groups. Each group represents one unique token observed
+across one or more transactions. Classify EACH group into exactly one of:
+
+  spam              — zero-value airdrop, contract address token, obvious scam, pump-dump
+  swap_intermediate — token only appears as an intermediate hop in a DEX route (never held)
+  low_value         — real token but total observed value appears < ~50 SEK
+  likely_airdrop    — received for free (no purchase), may or may not have value
+  real_token        — genuine token with trading history and economic value
+  unknown_real      — cannot classify with available evidence (low confidence)
+
+Classification rules:
+- appearsOnlyInSwapLegs: true AND appearsOnlyOutgoing: true → strong swap_intermediate signal
+- mint ending in "pump" or "bonk" → spam or low_value (pump.fun / BonkFork derivative)
+- rowCount <= 2, appearsOnlyIncoming: true, hasKnownLiquidityHint: false → likely spam or likely_airdrop
+- Use web_search_preview to look up the mint address on Solscan, DexScreener, or CoinGecko
+- If evidence is weak → unknown_real with confidence "low"
+- NEVER invent token identities — lower confidence is always better than a wrong guess
+
+Return strict JSON only. No markdown fences. No prose outside the JSON.
+Output schema:
+{
+  "results": [
+    {
+      "tokenKey": "string",
+      "classification": "spam|swap_intermediate|low_value|likely_airdrop|real_token|unknown_real",
+      "confidence": "high|medium|low",
+      "recommendedAction": "hide|collapse_into_swap|ignore_low_value|suggest_airdrop|keep_for_review",
+      "displayName": "string or null",
+      "symbol": "string or null",
+      "explanation": "short string",
+      "evidence": ["string"],
+      "warnings": ["string"]
+    }
+  ]
+}
+`.trim();
+
 // Cost estimate per job type (gpt-4o-mini, approximate)
 const COST_PER_JOB_USD: Record<string, number> = {
   unknown_token_classifier: 0.0004,
   missing_price_explainer:  0.0008,
   suggested_price_assistant: 0.0015,
+  classify_token_group:     0.0006,
 };
 
 // ---------------------------------------------------------------------------
@@ -533,6 +575,151 @@ async function handleApply(
 }
 
 // ---------------------------------------------------------------------------
+// classify_tokens  — batch token-group classifier
+// ---------------------------------------------------------------------------
+// Input:  { action: 'classify_tokens', groups: UnknownTokenGroup[], batch_id?: string }
+// Output: { results: AITokenClassificationResult[], batchId, inputCount, resolvedCount,
+//           summary: { spam, swap_intermediate, low_value, likely_airdrop, real_token, unknown_real } }
+//
+// Strategy:
+//   • Deterministic pre-filter eliminates obvious cases (done client-side before calling us)
+//   • We split remaining groups into sub-batches of up to BATCH_SIZE, call OpenAI per sub-batch
+//   • Results are stored in ai_token_classifications table for cache reuse
+
+async function handleClassifyTokens(
+  body: Record<string, unknown>,
+  sb: SupabaseClient,
+  openAIKey: string,
+): Promise<Response> {
+  const groups   = (body.groups  as unknown[]) ?? [];
+  const batchId  = (body.batch_id as string) ?? `batch_${Date.now()}`;
+  const userId   = (body.user_id  as string) ?? 'anonymous';
+
+  if (!groups.length) {
+    return json({ results: [], batchId, inputCount: 0, resolvedCount: 0,
+                  summary: { spam: 0, swap_intermediate: 0, low_value: 0, likely_airdrop: 0, real_token: 0, unknown_real: 0 } });
+  }
+
+  const BATCH_SIZE = 15; // groups per OpenAI request
+  const allResults: unknown[] = [];
+  const errors: string[] = [];
+
+  // ── Sub-batch loop ──────────────────────────────────────────────────────
+  for (let i = 0; i < groups.length; i += BATCH_SIZE) {
+    const subBatch = groups.slice(i, i + BATCH_SIZE);
+
+    // Check cache first — look up already-classified token keys
+    const tokenKeys = subBatch.map((g: unknown) => (g as Record<string, unknown>).tokenKey as string);
+    const { data: cached } = await sb
+      .from('ai_token_classifications')
+      .select('token_key, classification, confidence, recommended_action, display_name, explanation, evidence, warnings')
+      .in('token_key', tokenKeys);
+
+    const cachedMap = new Map<string, unknown>();
+    for (const row of (cached ?? [])) {
+      cachedMap.set(row.token_key, {
+        tokenKey:          row.token_key,
+        classification:    row.classification,
+        confidence:        row.confidence,
+        recommendedAction: row.recommended_action,
+        displayName:       row.display_name,
+        explanation:       row.explanation,
+        evidence:          row.evidence ?? [],
+        warnings:          row.warnings ?? [],
+        _fromCache:        true,
+      });
+    }
+
+    // Separate groups that need fresh AI classification
+    const needsAI  = subBatch.filter((g: unknown) => !cachedMap.has((g as Record<string, unknown>).tokenKey as string));
+    const fromCache = subBatch
+      .filter((g: unknown) => cachedMap.has((g as Record<string, unknown>).tokenKey as string))
+      .map((g: unknown) => cachedMap.get((g as Record<string, unknown>).tokenKey as string));
+
+    allResults.push(...fromCache);
+
+    if (!needsAI.length) continue;
+
+    // Call OpenAI with fresh groups
+    try {
+      const userPayload = JSON.stringify({ groups: needsAI }, null, 0);
+      const { output } = await callOpenAI(
+        openAIKey,
+        TOKEN_GROUP_CLASSIFIER_PROMPT,
+        `Classify these json token groups:\n${userPayload}`,
+      );
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        errors.push(`Sub-batch ${i}: invalid JSON from OpenAI`);
+        continue;
+      }
+
+      const results = ((parsed as Record<string, unknown>).results as unknown[]) ?? [];
+
+      // Persist to cache table
+      const upsertRows = results.map((r: unknown) => {
+        const res = r as Record<string, unknown>;
+        return {
+          token_key:          res.tokenKey as string,
+          chain:              (needsAI.find((g: unknown) => (g as Record<string, unknown>).tokenKey === res.tokenKey) as Record<string, unknown>)?.chain ?? 'solana',
+          mint_or_contract:   (needsAI.find((g: unknown) => (g as Record<string, unknown>).tokenKey === res.tokenKey) as Record<string, unknown>)?.mintOrContract ?? null,
+          symbol_observed:    (res.symbol ?? null) as string | null,
+          classification:     res.classification as string,
+          confidence:         res.confidence as string,
+          recommended_action: res.recommendedAction as string,
+          display_name:       (res.displayName ?? null) as string | null,
+          explanation:        res.explanation as string,
+          evidence:           res.evidence ?? [],
+          warnings:           res.warnings ?? [],
+          source:             'openai',
+          prompt_version:     '1.0',
+          model_name:         'gpt-4o-mini',
+          updated_at:         new Date().toISOString(),
+        };
+      });
+
+      if (upsertRows.length) {
+        await sb.from('ai_token_classifications').upsert(upsertRows, { onConflict: 'token_key' });
+      }
+
+      allResults.push(...results);
+    } catch (e) {
+      errors.push(`Sub-batch ${i}: ${(e as Error).message}`);
+    }
+  }
+
+  // ── Record job ──────────────────────────────────────────────────────────
+  const summary: Record<string, number> = {
+    spam: 0, swap_intermediate: 0, low_value: 0, likely_airdrop: 0, real_token: 0, unknown_real: 0,
+  };
+  for (const r of allResults) {
+    const cls = ((r as Record<string, unknown>).classification as string) ?? 'unknown_real';
+    if (cls in summary) summary[cls]++;
+    else summary.unknown_real++;
+  }
+
+  await sb.from('ai_token_classification_jobs').insert({
+    user_id:       userId,
+    status:        errors.length > 0 ? 'partial' : 'completed',
+    input_count:   groups.length,
+    resolved_count: allResults.length,
+    summary,
+  });
+
+  return json({
+    results:       allResults,
+    batchId,
+    inputCount:    groups.length,
+    resolvedCount: allResults.length,
+    summary,
+    errors:        errors.length ? errors : undefined,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -579,6 +766,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     if (action === 'apply') {
       return await handleApply(body, sb);
+    }
+
+    if (action === 'classify_tokens') {
+      const openAIKey = await getOpenAIKey(sb);
+      return await handleClassifyTokens(body, sb, openAIKey);
     }
 
     return err(`Unknown action: ${action}`, 400);

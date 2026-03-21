@@ -1005,6 +1005,131 @@ const TaxEngine = (() => {
              reason: 'Kunde inte klassificeras automatiskt — manuell granskning krävs' };
   }
 
+  // ── Group unknown_real tokens for AI batch classification ────────────────
+  //
+  // Returns UnknownTokenGroup[] — one entry per unique token (by mint or symbol).
+  // Only includes tokens whose deterministic classifier returned 'unknown_real'.
+  // The AI receives these compact groups (not individual rows) to minimise cost.
+  //
+  function groupUnknownTokensForAI(txns) {
+    const txsByHash  = {};
+    const symToTxns  = {};
+    for (const t of txns) {
+      if (t.txHash) { txsByHash[t.txHash] = txsByHash[t.txHash] || []; txsByHash[t.txHash].push(t); }
+      const s = (t.assetSymbol || '').toUpperCase();
+      symToTxns[s] = symToTxns[s] || []; symToTxns[s].push(t);
+    }
+
+    const unknownRealTxns = txns.filter(t => {
+      if (t.manualCategory || t.userReviewed) return false;
+      if (!t.needsReview || t.reviewReason !== 'unknown_asset') return false;
+      const cls = classifyUnknownToken(t, txsByHash, symToTxns);
+      return cls.type === 'unknown_real';
+    });
+    if (!unknownRealTxns.length) return [];
+
+    const groups = new Map();
+    for (const t of unknownRealTxns) {
+      const chain    = t.chain || 'solana';
+      const mint     = t.mintAddress || t.contractAddress || null;
+      const sym      = (t.assetSymbol || '').toUpperCase();
+      const tokenKey = mint ? `${chain}:${mint}` : `${chain}:sym:${sym}`;
+
+      if (!groups.has(tokenKey)) {
+        groups.set(tokenKey, {
+          tokenKey, chain,
+          mintOrContract:       mint,
+          symbolObserved:       sym || null,
+          displayNameObserved:  t.assetName && t.assetName !== sym ? t.assetName : null,
+          rowCount:             0,
+          totalObservedAmount:  0,
+          firstSeen:            t.date,
+          lastSeen:             t.date,
+          hasKnownLiquidityHint:  !!(t.coinGeckoId),
+          hasKnownMetadataHint:   !!(t.assetName && t.assetName !== sym),
+          appearsOnlyInSwapLegs:  true,
+          appearsOnlyIncoming:    true,
+          appearsOnlyOutgoing:    true,
+          _seenWallets:           new Set(),
+          sampleRows:             [],
+        });
+      }
+      const g = groups.get(tokenKey);
+      g.rowCount++;
+      g.totalObservedAmount += Math.abs(t.amount || 0);
+      if (t.date < g.firstSeen) g.firstSeen = t.date;
+      if (t.date > g.lastSeen)  g.lastSeen  = t.date;
+      if (t.category !== CAT.TRADE) g.appearsOnlyInSwapLegs = false;
+      if (![CAT.SEND, CAT.TRANSFER_OUT].includes(t.category)) g.appearsOnlyIncoming = false;
+      if (![CAT.RECEIVE, CAT.TRANSFER_IN].includes(t.category)) g.appearsOnlyOutgoing = false;
+      if (t.accountId) g._seenWallets.add(t.accountId);
+
+      if (g.sampleRows.length < 5) {
+        const hg = t.txHash ? (txsByHash[t.txHash] || []) : [];
+        const peer = hg.find(x => x.id !== t.id && x.assetSymbol);
+        g.sampleRows.push({
+          rowId:               t.id,
+          timestamp:           t.date,
+          sourcePlatform:      t.source || null,
+          rowType:             t.category || t.rawType || null,
+          tag:                 t.tag || (t.economicContext?.tag) || null,
+          amount:              t.amount || 0,
+          txHash:              t.txHash || null,
+          hasSwapContext:      hg.length > 1,
+          hasRouteContext:     !!(t.economicContext?.has_route_context),
+          counterAssetSymbol:  peer?.assetSymbol || null,
+          counterAssetAmount:  peer?.amount || null,
+          explorerUrl:         t.txHash
+            ? (t.chain === 'ethereum'
+               ? `https://etherscan.io/tx/${t.txHash}`
+               : `https://solscan.io/tx/${t.txHash}`)
+            : null,
+        });
+      }
+    }
+
+    return Array.from(groups.values()).map(g => {
+      const out = { ...g, appearsInManyWallets: g._seenWallets.size > 1 };
+      delete out._seenWallets;
+      return out;
+    });
+  }
+
+  // ── Apply AI token classifications back to transactions ───────────────────
+  //
+  // classificationMap: tokenKey → AITokenClassificationResult
+  // Updates t.tokenClass so getReviewIssues picks up the AI result.
+  //
+  function applyAITokenClassifications(txns, classificationMap) {
+    return txns.map(t => {
+      if (!t.needsReview || t.reviewReason !== 'unknown_asset') return t;
+      if (t.manualCategory || t.userReviewed) return t;
+
+      const chain    = t.chain || 'solana';
+      const mint     = t.mintAddress || t.contractAddress || null;
+      const sym      = (t.assetSymbol || '').toUpperCase();
+      const tokenKey = mint ? `${chain}:${mint}` : `${chain}:sym:${sym}`;
+
+      const result = classificationMap[tokenKey];
+      if (!result) return t;
+
+      return {
+        ...t,
+        tokenClass: {
+          source:      'ai',
+          type:        result.classification,
+          confidence:  result.confidence,
+          autoAction:  result.recommendedAction,
+          reason:      result.explanation,
+          evidence:    result.evidence   || [],
+          warnings:    result.warnings   || [],
+          displayName: result.displayName || null,
+          symbol:      result.symbol      || sym,
+        },
+      };
+    });
+  }
+
   // STEP 3 — DETECT SPAM TOKENS
   // Mark spam BEFORE classification to avoid polluting K4.
   // ════════════════════════════════════════════════════════════
@@ -8923,6 +9048,8 @@ const TaxEngine = (() => {
     generateK4Report, generateK4CSV, generateAuditCSV,
     // Review
     getReviewIssues, isTaxableCategory, REVIEW_DESCRIPTIONS,
+    // AI token classification
+    groupUnknownTokensForAI, applyAITokenClassifications,
     // CSV parsers
     parseBinanceCSV, parseKrakenCSV, parseBybitCSV, parseCoinbaseCSV, parseGenericCSV,
     parseRevolutCSV, parseMEXCCSV, parseSolscanCSV,

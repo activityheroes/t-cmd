@@ -62,6 +62,9 @@ const TaxUI = (() => {
     aiFallbackResults: new Map(),          // rowId → result record
     aiFallbackRunning: false,              // true while polling / awaiting run()
     aiFallbackJobType: null,              // which job type is currently running
+    // AI token classification state
+    aiTokenAnalysis: null,                // null | { status:'idle'|'running'|'done', groups, results, summary, error }
+    aiTokenApplied: false,                // true after applyAITokenCleanup() completes
   };
 
   let _pendingCSVText = null;
@@ -3281,6 +3284,137 @@ const TaxUI = (() => {
           </div>`;
         })()}
 
+        <!-- ── AI token classifier panel ─────────────────────── -->
+        ${(() => {
+          if (typeof AIFallback === 'undefined' || !AIFallback.isConfigured()) return '';
+          const allTxns      = TaxEngine.getTransactions();
+          const utIssues     = issues.filter(i => i.reason === 'unknown_asset');
+          const unknownRealN = utIssues.filter(i => !i.tokenClass || i.tokenClass.type === 'unknown_real').length;
+          const autoHideN    = utIssues.filter(i => ['swap_intermediate','contract_spam','meme_coin'].includes(i.tokenClass?.type)).length;
+          const lowValN      = utIssues.filter(i => i.tokenClass?.type === 'low_value').length;
+          const aiDoneN      = utIssues.filter(i => i.tokenClass?.source === 'ai').length;
+          const ana          = S.aiTokenAnalysis;
+
+          // Only show panel if there are unknown tokens to process
+          if (utIssues.length === 0) return '';
+
+          const pill = (n, label, color) => n > 0
+            ? `<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:10px;
+                            background:${color}15;border:1px solid ${color}40;font-size:11px;color:${color}">
+                <b>${n}</b> ${label}</span>`
+            : '';
+
+          // ── State: idle / no AI analysis yet ────────────────────────────────
+          if (!ana || ana.status === 'idle') {
+            const groups = TaxEngine.groupUnknownTokensForAI ? TaxEngine.groupUnknownTokensForAI(allTxns) : [];
+            const est    = AIFallback.previewTokenClassification(groups);
+            return `
+            <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;
+              background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.2)">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <span style="font-size:15px">⚡</span>
+                <span style="font-size:13px;font-weight:700;color:#818cf8">AI-analys av okända tokens</span>
+                <span style="font-size:11px;color:#475569;flex:1">${utIssues.length} rader · ${groups.length} unika tokens</span>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+                ${pill(autoHideN, 'auto-döljbara', '#4ade80')}
+                ${pill(lowValN,   'lågvärde',      '#fbbf24')}
+                ${pill(unknownRealN, 'oklar – AI kan hjälpa', '#818cf8')}
+              </div>
+              ${unknownRealN > 0 ? `
+              <div style="font-size:12px;color:#64748b;margin-bottom:10px">
+                Deterministic filter hanterade ${autoHideN + lowValN} av ${utIssues.length} rader.
+                ${unknownRealN} token${unknownRealN !== 1 ? 's är' : ' är'} fortfarande oklara — OpenAI kan klassificera dem.
+                ${est.estimatedCostUsd > 0 ? `Uppskattad kostnad: ~$${est.estimatedCostUsd.toFixed(3)} (${est.batches} batch${est.batches !== 1 ? 'ar' : ''})` : ''}
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button onclick="TaxUI.analyzeUnknownTokens()" style="padding:7px 16px;border-radius:8px;border:none;
+                  background:rgba(99,102,241,.25);color:#c7d2fe;font-size:12px;font-weight:600;cursor:pointer">
+                  ⚡ Analysera ${groups.length} token${groups.length !== 1 ? 's' : ''} med AI
+                </button>
+                ${autoHideN + lowValN > 0 ? `<button onclick="TaxUI.bulkApplyDeterministicCleanup()" style="padding:7px 14px;border-radius:8px;
+                  border:1px solid rgba(74,222,128,.3);background:rgba(74,222,128,.08);color:#4ade80;font-size:12px;cursor:pointer">
+                  🚫 Dölj ${autoHideN + lowValN} deterministic rader nu
+                </button>` : ''}
+              </div>` : `
+              <div style="font-size:12px;color:#64748b;margin-bottom:8px">
+                Deterministic filter hanterade alla ${utIssues.length} rader — inga oklara tokens kvar.
+              </div>
+              ${autoHideN + lowValN > 0 ? `<button onclick="TaxUI.bulkApplyDeterministicCleanup()" style="padding:7px 14px;border-radius:8px;
+                border:1px solid rgba(74,222,128,.3);background:rgba(74,222,128,.08);color:#4ade80;font-size:12px;cursor:pointer">
+                🚫 Dölj ${autoHideN + lowValN} rader nu
+              </button>` : ''}
+              `}
+            </div>`;
+          }
+
+          // ── State: running ───────────────────────────────────────────────────
+          if (ana.status === 'running') {
+            return `
+            <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;
+              background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.2)">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:15px">⏳</span>
+                <span style="font-size:13px;font-weight:600;color:#818cf8">AI analyserar tokens…</span>
+                <span style="font-size:11px;color:#475569">${ana.groups?.length ?? 0} grupper skickade</span>
+              </div>
+              ${ana.progress ? `<div style="margin-top:8px;font-size:11px;color:#64748b">${ana.progress}</div>` : ''}
+            </div>`;
+          }
+
+          // ── State: done ──────────────────────────────────────────────────────
+          if (ana.status === 'done') {
+            const sm = ana.summary || {};
+            const totalResolved  = ana.resolvedCount ?? 0;
+            const totalRemaining = (sm.unknown_real ?? 0) + (sm.real_token ?? 0);
+            const totalCleanable = (sm.spam ?? 0) + (sm.swap_intermediate ?? 0) + (sm.low_value ?? 0) + (sm.likely_airdrop ?? 0);
+
+            return `
+            <div style="margin-bottom:16px;padding:14px 16px;border-radius:12px;
+              background:rgba(34,197,94,.04);border:1px solid rgba(34,197,94,.25)">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+                <span style="font-size:15px">✅</span>
+                <span style="font-size:13px;font-weight:700;color:#4ade80">AI-analys klar</span>
+                <span style="font-size:11px;color:#475569;flex:1">${totalResolved} av ${ana.groups?.length ?? 0} token${(ana.groups?.length ?? 0) !== 1 ? 's' : ''} klassificerade</span>
+                <button onclick="S.aiTokenAnalysis=null;TaxUI.render()" style="font-size:10px;padding:2px 8px;border-radius:4px;
+                  border:1px solid rgba(148,163,184,.2);background:transparent;color:#64748b;cursor:pointer">↺ Kör om</button>
+              </div>
+
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px">
+                ${[
+                  { key:'spam',             label:'Spam / skräp',       color:'#f87171', action:'Dölj' },
+                  { key:'swap_intermediate',label:'Swap-mellanled',     color:'#fb923c', action:'Kollapsa' },
+                  { key:'low_value',        label:'Lågvärde',           color:'#fbbf24', action:'Ignorera' },
+                  { key:'likely_airdrop',   label:'Trolig airdrop',     color:'#818cf8', action:'Bekräfta' },
+                  { key:'real_token',       label:'Riktig token',       color:'#38bdf8', action:'Granska' },
+                  { key:'unknown_real',     label:'Fortfarande oklart', color:'#94a3b8', action:'Granska' },
+                ].filter(b => (sm[b.key] ?? 0) > 0).map(b => `
+                  <div style="padding:8px 10px;border-radius:8px;background:${b.color}0f;border:1px solid ${b.color}30;text-align:center">
+                    <div style="font-size:18px;font-weight:700;color:${b.color};line-height:1">${sm[b.key] ?? 0}</div>
+                    <div style="font-size:10px;color:#94a3b8;margin-top:2px">${b.label}</div>
+                  </div>`).join('')}
+              </div>
+
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                ${totalCleanable > 0 && !S.aiTokenApplied ? `
+                <button onclick="TaxUI.applyAITokenCleanup()" style="padding:7px 16px;border-radius:8px;border:none;
+                  background:rgba(34,197,94,.2);color:#4ade80;font-size:12px;font-weight:600;cursor:pointer">
+                  ⚡ Tillämpa städning (${totalCleanable} rader)
+                </button>` : ''}
+                ${S.aiTokenApplied ? `<span style="font-size:12px;color:#4ade80;padding:7px 0">✓ Städning tillämpad</span>` : ''}
+                ${totalRemaining > 0 ? `
+                <button onclick="TaxUI.scrollToUnknownReal()" style="padding:7px 14px;border-radius:8px;
+                  border:1px solid rgba(148,163,184,.2);background:transparent;color:#94a3b8;font-size:12px;cursor:pointer">
+                  Granska ${totalRemaining} kvar →
+                </button>` : ''}
+                ${ana.errors?.length ? `<span style="font-size:11px;color:#f87171">⚠ ${ana.errors.length} fel vid analys</span>` : ''}
+              </div>
+            </div>`;
+          }
+
+          return '';
+        })()}
+
         <!-- ── AI-assisted review panel ─────────────────────── -->
         ${(() => {
           if (typeof AIFallback === 'undefined' || !AIFallback.isConfigured()) return '';
@@ -5783,6 +5917,148 @@ const TaxUI = (() => {
     render();
   }
 
+  // ── AI token classifier handlers ─────────────────────────────────────
+
+  async function analyzeUnknownTokens() {
+    if (typeof AIFallback === 'undefined' || !AIFallback.isConfigured()) {
+      showTaxToast('⚠️', 'AI inte konfigurerat', 'Lägg till OpenAI-nyckel i Admin → API Keys.', 'warning');
+      return;
+    }
+    if (typeof TaxEngine.groupUnknownTokensForAI !== 'function') {
+      showTaxToast('⚠️', 'Uppdatering krävs', 'Ladda om sidan (Ctrl+Shift+R).', 'warning');
+      return;
+    }
+
+    const allTxns = TaxEngine.getTransactions();
+    const groups  = TaxEngine.groupUnknownTokensForAI(allTxns);
+
+    if (!groups.length) {
+      showTaxToast('ℹ️', 'Inga oklara tokens', 'Alla okända tokens är redan klassificerade.', 'info');
+      return;
+    }
+
+    S.aiTokenAnalysis  = { status: 'running', groups, results: [], summary: {}, progress: 'Skickar till AI…' };
+    S.aiTokenApplied   = false;
+    render();
+
+    try {
+      const result = await AIFallback.classifyTokens(groups, {
+        onProgress: (pct, msg) => {
+          if (S.aiTokenAnalysis) { S.aiTokenAnalysis.progress = msg; render(); }
+        },
+      });
+
+      S.aiTokenAnalysis = {
+        status:        'done',
+        groups,
+        results:       result.results ?? [],
+        summary:       result.summary ?? {},
+        resolvedCount: result.resolvedCount ?? 0,
+        errors:        result.errors ?? [],
+      };
+      showTaxToast('✅', 'AI-analys klar', `${result.resolvedCount ?? 0} token-grupper klassificerade.`, 'success');
+    } catch (e) {
+      S.aiTokenAnalysis = {
+        status: 'done', groups, results: [], summary: {}, resolvedCount: 0,
+        errors: [e.message || 'Okänt fel'],
+      };
+      showTaxToast('❌', 'AI-analys misslyckades', e.message, 'error');
+    }
+    render();
+  }
+
+  async function applyAITokenCleanup() {
+    const ana = S.aiTokenAnalysis;
+    if (!ana || ana.status !== 'done' || !ana.results?.length) return;
+    if (typeof TaxEngine.applyAITokenClassifications !== 'function') return;
+
+    // Build tokenKey → result map
+    const classMap = {};
+    for (const r of ana.results) {
+      if (r?.tokenKey) classMap[r.tokenKey] = r;
+    }
+
+    // Apply to stored transactions
+    const allTxns = TaxEngine.getTransactions();
+    const updated = TaxEngine.applyAITokenClassifications(allTxns, classMap);
+    TaxEngine.saveTransactions(updated);
+
+    // Auto-hide spam and swap intermediates, ignore low_value, group airdrops
+    const AUTO_HIDE_TYPES = new Set(['spam', 'swap_intermediate', 'low_value']);
+    let hiddenCount = 0;
+    for (const t of updated) {
+      const cls = t.tokenClass;
+      if (!cls || cls.source !== 'ai') continue;
+      if (!AUTO_HIDE_TYPES.has(cls.type)) continue;
+      if (t.manualCategory || t.userReviewed) continue;
+
+      // Mark as reviewed (spam → zero, others → dismissed)
+      t.userReviewed  = true;
+      t.needsReview   = false;
+      t.reviewReason  = null;
+      if (cls.type === 'spam') {
+        t.category          = 'spam';
+        t.autoClassified    = true;
+        t.priceSEKPerUnit   = 0;
+        t.costBasisSEK      = 0;
+      }
+      hiddenCount++;
+    }
+    TaxEngine.saveTransactions(updated);
+
+    S.aiTokenApplied = true;
+    showTaxToast('✅', `${hiddenCount} rader städade`, 'Spam, swap-mellanled och lågvärde-tokens dolda.', 'success');
+
+    // Re-run the tax pipeline to pick up category changes
+    await triggerPipeline();
+  }
+
+  async function bulkApplyDeterministicCleanup() {
+    // Hide all rows that the deterministic classifier already marked as auto-hideable
+    const allTxns = TaxEngine.getTransactions();
+    const AUTO_TYPES = new Set(['swap_intermediate','contract_spam','meme_coin','low_value']);
+    const txsByHash  = {};
+    const symToTxns  = {};
+    for (const t of allTxns) {
+      if (t.txHash) { txsByHash[t.txHash] = txsByHash[t.txHash] || []; txsByHash[t.txHash].push(t); }
+      const s = (t.assetSymbol || '').toUpperCase();
+      symToTxns[s] = symToTxns[s] || []; symToTxns[s].push(t);
+    }
+
+    let hiddenCount = 0;
+    const updated = allTxns.map(t => {
+      if (!t.needsReview || t.reviewReason !== 'unknown_asset') return t;
+      if (t.manualCategory || t.userReviewed) return t;
+      const cls = t.tokenClass || (typeof TaxEngine.classifyUnknownToken === 'function'
+        ? TaxEngine.classifyUnknownToken(t, txsByHash, symToTxns) : null);
+      if (!cls || !AUTO_TYPES.has(cls.type)) return t;
+      hiddenCount++;
+      const out = { ...t, userReviewed: true, needsReview: false, reviewReason: null };
+      if (cls.type === 'contract_spam' || cls.autoAction === 'hide') {
+        out.category       = 'spam';
+        out.autoClassified = true;
+        out.priceSEKPerUnit = 0;
+        out.costBasisSEK   = 0;
+      }
+      return out;
+    });
+
+    TaxEngine.saveTransactions(updated);
+    showTaxToast('✅', `${hiddenCount} rader dolda`, 'Deterministic filter tillämpat.', 'success');
+    await triggerPipeline();
+  }
+
+  function scrollToUnknownReal() {
+    // Expand the 'unknown_real' sub-group and scroll to it
+    S.reviewGroupExpanded.add('tokencls:unknown_real');
+    S.reviewGroupExpanded.add('tokencls:real_token');
+    render();
+    requestAnimationFrame(() => {
+      const el = document.querySelector('[data-cls="unknown_real"], .tax-review-group');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
   // ── AI Fallback panel handlers ─────────────────────────────────────
 
   async function runAIFallback(jobType) {
@@ -6608,6 +6884,8 @@ const TaxUI = (() => {
     openAssetAudit, closeAssetAudit,
     // AI Fallback panel
     runAIFallback, applyAIResult, rejectAIResult,
+    // AI token classifier
+    analyzeUnknownTokens, applyAITokenCleanup, bulkApplyDeterministicCleanup, scrollToUnknownReal,
     // Per-asset provenance view toggle
     toggleProvenanceAll() {
       S.provenanceShowAll = !S.provenanceShowAll;

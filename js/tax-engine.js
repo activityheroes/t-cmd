@@ -1133,6 +1133,9 @@ const TaxEngine = (() => {
     if (t.userReviewed) return false;  // user explicitly dismissed — never re-flag
     if (cat === CAT.SPAM || cat === CAT.APPROVAL || cat === CAT.FEE) return false;
     if (t.isInternalTransfer) return false;
+    // Stablecoin outbounds never need manual review — price is always resolvable via peg+FX
+    if (STABLES.has((t.assetSymbol || '').toUpperCase()) &&
+        (cat === CAT.SEND || cat === CAT.TRANSFER_OUT || cat === CAT.BRIDGE_OUT)) return false;
     // Missing SEK price on taxable event
     if (isTaxableCategory(cat) && !t.priceSEKPerUnit && !t.costBasisSEK) return true;
     // Unknown asset in taxable event
@@ -1236,11 +1239,13 @@ const TaxEngine = (() => {
       }
     }
 
-    // ── Pass 1: Same-chain wallet→wallet (24 h, 2% fee tolerance) ──
+    // ── Pass 1: Same-chain wallet→wallet (72 h, 4% fee tolerance) ──
+    // Window widened from 24 h → 72 h: exchange withdrawals can queue for
+    // 1–2 days; 4% covers gas/withdrawal fees on most chains.
     runPass(
       [CAT.TRANSFER_OUT, CAT.SEND],
       [CAT.TRANSFER_IN,  CAT.RECEIVE],
-      24 * 3600_000, 0.02, false,
+      72 * 3600_000, 0.04, false,
     );
 
     // ── Pass 2: Cross-chain bridge (72 h, 5% bridge fee tolerance) ──
@@ -1353,6 +1358,22 @@ const TaxEngine = (() => {
           // The BUY must remain unmatched so it enters taxPool normally.
         }
       }
+    }
+
+    // ── Pass 6: Tag unmatched SENDs as internal_transfer_candidate ────────
+    // Any SEND that survived all passes without being matched is more likely
+    // a transfer to an own account (exchange, cold wallet) than a taxable
+    // disposal.  Tag it so the review UI shows softer messaging and the lot
+    // engine can downgrade severity for stablecoins.
+    for (const t of txns) {
+      if (matched.has(t.id)) continue;
+      if (t.category !== CAT.SEND) continue;
+      if (t.isInternalTransfer) continue;
+      if (t.manualCategory || t.userReviewed) continue;
+      if (t.burnDisposal || t.isTokenAccountClose) continue;
+      t.isInternalTransferCandidate = true;
+      t.reviewReason = 'internal_transfer_candidate';
+      t.needsReview  = true;
     }
 
     return txns;
@@ -2024,6 +2045,32 @@ const TaxEngine = (() => {
       return { ...t, priceSEKPerUnit: 0, costBasisSEK: 0,
                priceSource: PS.TRADE_EXACT, priceConfidence: 'high' };
     }
+    // Stablecoin SEND/TRANSFER_OUT/BRIDGE_OUT — always price via peg×FX.
+    // These are not in isTaxableCategory, but the lot engine still needs a
+    // correct proceedsSEK on them (either for disposal recording or holdings
+    // reduction). Apply stablecoin pricing before the non-taxable skip.
+    {
+      const _sym = (t.assetSymbol || '').toUpperCase();
+      if (STABLES.has(_sym) &&
+          (t.category === CAT.SEND || t.category === CAT.TRANSFER_OUT || t.category === CAT.BRIDGE_OUT)) {
+        const _date = (t.date || '').slice(0, 10);
+        const _amt  = t.amount || 0;
+        const _sr   = resolveStablecoinPrice(_sym, _date, fxByYear, null);
+        const _ps   = _sr.source === 'stable_historical_fx' ? PS.STABLE_HIST_FX : PS.STABLE_APPROX;
+        return {
+          ...t,
+          priceSEKPerUnit: _sr.sekPrice,
+          costBasisSEK:    _sr.sekPrice * _amt,
+          priceSource:     _ps,
+          priceConfidence: _sr.confidence,
+          needsReview:     false, reviewReason: null,
+          priceStatus:     _sr.source === 'stable_historical_fx'
+                             ? 'resolved_stable_fx' : 'resolved_stable_approx',
+          depegWarning:    _sr.depegWarning || false,
+        };
+      }
+    }
+
     // Non-taxable / spam: skip (FEE rows are also non-taxable)
     if (!isTaxableCategory(t.category)) return t;
 
@@ -3297,6 +3344,10 @@ const TaxEngine = (() => {
       bulkActions: ['confirm_spam', 'override_price'] },
     unknown_asset:        { label: 'Unknown token',               icon: '❓', why: 'Token metadata could not be resolved — symbol may be a contract address.', fix: 'Enter the price manually or mark as spam if worthless.' },
     unmatched_transfer:   { label: 'Unmatched transfer',          icon: '🔗', why: 'This send/receive could not be matched to your other accounts. If it left your control it may be a taxable disposal.', fix: 'Connect the destination account, or reclassify as sell/donation.' },
+    internal_transfer_candidate: { label: 'Trolig intern överföring', icon: '🔀', priority: 'medium', isK4Blocker: false,
+      why: 'Denna utskickning kunde inte matchas mot ett mottagande på dina andra konton — troligen en överföring till börs, coldwallet eller annan egenkontrollerad adress. Inte klassad som avyttring.',
+      fix: 'Importera destinationskontot (börs-CSV, annan plånbok) så matchas raden automatiskt. Annars: klassificera manuellt som Avyttring om du faktiskt sålde.',
+      bulkActions: ['import_account', 'mark_transfer', 'mark_sell'] },
     negative_balance:     { label: 'Saknad köphistorik',           icon: '⚠️', priority: 'high', isK4Blocker: true,
       why: 'Vi hittade en avyttring men inte det tidigare köpet i importerad historik. Det beror oftast på att tillgången kom från en annan plånbok, börs, airdrop, eller ägdes redan innan importen.',
       fix: 'Använd den guidade hjälpen nedan — motorn föreslår den mest troliga förklaringen och nästa steg för varje rad.',
@@ -4337,6 +4388,45 @@ const TaxEngine = (() => {
               reviewReasons   : ['burn_disposal: proceeds forced to 0 (incinerator/burn program)'],
               eventSubtype    : 'burn',
             });
+            if (inYear) disposals.push(d);
+          } else if (STABLES.has(sym)) {
+            // ── Unmatched stablecoin SEND → non-taxable holdings reduction ──
+            // USDT/USDC/DAI sends are almost always transfers to exchanges or
+            // own wallets.  Even if unmatched, treat like TRANSFER_OUT:
+            // reduce holdings + taxPool without creating a K4 disposal entry.
+            const stQty = Math.min(t.amount, h.totalQty);
+            const stCb  = avg(sym) * stQty;
+            h.totalQty     = Math.max(0, h.totalQty - stQty);
+            h.totalCostSEK = Math.max(0, h.totalCostSEK - stCb);
+            const tpSt = taxPool[sym];
+            if (tpSt && tpSt.totalQty > 0) {
+              const tpQ = Math.min(stQty, tpSt.totalQty);
+              tpSt.totalQty     = Math.max(0, tpSt.totalQty - tpQ);
+              tpSt.totalCostSEK = Math.max(0, tpSt.totalCostSEK - taxAvg(sym) * tpQ);
+            }
+            // Audit trail only — excluded from K4
+            if (inYear) {
+              const d = recordDisposal(t, sym, t.amount, 0, 0, {
+                contractAddress: t.contractAddress || null,
+                valuationStatus: 'excluded_stable_send',
+                excludeFromK4:   true,
+                eventSubtype:    'stablecoin_unmatched_send',
+                reviewReasons:   [`stablecoin_unmatched_send: ${sym} send without matching receive — treated as non-taxable internal transfer`],
+              });
+              disposals.push(d);
+            }
+          } else if (t.isInternalTransferCandidate) {
+            // ── Unmatched non-stablecoin SEND (likely transfer) ──────────────
+            // Could be a transfer to an own wallet not yet imported.
+            // Record as a low-severity disposal candidate — user must confirm.
+            const candValuation = deriveProceedsValuation(t, null);
+            const d = recordDisposal(t, sym, t.amount, proceedsSEK, feeSEK, {
+              contractAddress: t.contractAddress || null, ...candValuation,
+              reviewReasons: ['internal_transfer_candidate: unmatched SEND — confirm is disposal or import destination account'],
+              valuationStatus: candValuation.valuationStatus || 'estimated_reviewable',
+            });
+            applyAnomalyCheck(d, t, sym);
+            applySanityChecks(d, t, sym, acquisitionMap);
             if (inYear) disposals.push(d);
           } else {
             // Unmatched SEND that wasn't caught as internal transfer

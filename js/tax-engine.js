@@ -1509,31 +1509,73 @@ const TaxEngine = (() => {
     polygon_pos: 'polygon_pos', avax: 'avax', bsc: 'bsc',
   };
 
-  // In-session cache: token mint address → top pool address (or null if not found).
+  // Pool address cache — persisted to localStorage so we don't rediscover on every reload.
   // GeckoTerminal OHLCV endpoint (/pools/{address}/ohlcv) requires a POOL address,
   // not a token mint address.  We must discover the pool first.
-  const _gtPoolCache = new Map();
+  const GT_POOL_CACHE_KEY = 'tcmd_gt_pool_cache';
+  let _gtPoolCache = null; // lazy-loaded
+
+  function _loadGtPoolCache() {
+    if (_gtPoolCache) return _gtPoolCache;
+    try { _gtPoolCache = JSON.parse(localStorage.getItem(GT_POOL_CACHE_KEY) || '{}'); }
+    catch { _gtPoolCache = {}; }
+    return _gtPoolCache;
+  }
+
+  function _saveGtPoolCache(key, value) {
+    const store = _loadGtPoolCache();
+    store[key] = value;
+    _gtPoolCache = store;
+    try { localStorage.setItem(GT_POOL_CACHE_KEY, JSON.stringify(store)); } catch { /* quota */ }
+  }
+
+  // Returns true for pump.fun minted tokens and similar DEX-spam addresses.
+  // These are recognized by Solana address suffix patterns used by pump.fun / BonkFork.
+  // They never have CoinGecko-tracked pools, so pool discovery would just return 404.
+  function isKnownDexSpamAddress(address) {
+    if (!address || address.length < 40) return false;
+    const lower = address.toLowerCase();
+    // pump.fun tokens end in "pump"; BonkFork in "bonk"; common spam patterns
+    return lower.endsWith('pump') || lower.endsWith('bonk');
+  }
 
   // Discover the top liquidity pool for a token mint address.
   // Calls /onchain/networks/{network}/tokens/{mintAddress}/pools (Demo key supported).
   // Returns the pool address string, or null on failure.
+  // Results are persisted to localStorage so they survive page reloads.
   async function fetchGeckoTerminalPool(mintAddress, gtNetwork, cgKey) {
-    const cacheKey = `${gtNetwork}:${mintAddress}`;
-    if (_gtPoolCache.has(cacheKey)) return _gtPoolCache.get(cacheKey);
+    // Hard skip for pump/spam tokens — they have no CoinGecko-tracked pools
+    if (isKnownDexSpamAddress(mintAddress)) return null;
+
+    const storeCacheKey = `${gtNetwork}:${mintAddress}`;
+    const store = _loadGtPoolCache();
+    if (storeCacheKey in store) return store[storeCacheKey]; // cached (may be null)
+
+    // Also short-circuit if CG quota is exhausted (saves 429s)
+    if (typeof ChainAPIs !== 'undefined' && ChainAPIs.cgIsExhausted && ChainAPIs.cgIsExhausted()) {
+      _saveGtPoolCache(storeCacheKey, null);
+      return null;
+    }
+
     try {
       const keyParam = cgKey ? `?x_cg_demo_api_key=${encodeURIComponent(cgKey)}` : '';
       const url = `https://api.coingecko.com/api/v3/onchain/networks/${gtNetwork}/tokens/${mintAddress}/pools${keyParam}`;
       const r = await fetchWithTimeout(url, 8000);
-      if (!r || !r.ok) { _gtPoolCache.set(cacheKey, null); return null; }
+      if (!r || !r.ok) {
+        if (r?.status === 429) console.debug('[GT Pool] Rate limited — will retry on next run');
+        // On 429 do NOT cache (allow retry), on other errors cache as null
+        if (!r || r.status !== 429) _saveGtPoolCache(storeCacheKey, null);
+        return null;
+      }
       const json = await r.json();
       // Response: { data: [{ id: "solana_POOL_ADDRESS", type: "pool" }, ...] }
       const topPoolId = json?.data?.[0]?.id;
-      if (!topPoolId) { _gtPoolCache.set(cacheKey, null); return null; }
+      if (!topPoolId) { _saveGtPoolCache(storeCacheKey, null); return null; }
       // id is "{network}_{poolAddress}" — strip the network prefix
       const poolAddress = topPoolId.replace(/^[^_]+_/, '') || null;
-      _gtPoolCache.set(cacheKey, poolAddress);
+      _saveGtPoolCache(storeCacheKey, poolAddress);
       return poolAddress;
-    } catch { _gtPoolCache.set(cacheKey, null); return null; }
+    } catch { _saveGtPoolCache(storeCacheKey, null); return null; }
   }
 
   // Fetch OHLCV for a token by contract/mint address for a given year.
@@ -2797,7 +2839,12 @@ const TaxEngine = (() => {
     const cgRequests = [];
     const MAX_CG = 40; // Limit to stay within Demo tier rate limits
 
-    if (typeof CoinGeckoPricing !== 'undefined' && CoinGeckoPricing.isConfigured()) {
+    // Only attempt CoinGecko Demo if the key is valid and not quota-exhausted this session.
+    // cgIsExhausted() is set on first 401 response, preventing redundant error spam.
+    const cgReady = typeof CoinGeckoPricing !== 'undefined' && CoinGeckoPricing.isConfigured()
+      && !(typeof ChainAPIs !== 'undefined' && ChainAPIs.cgIsExhausted && ChainAPIs.cgIsExhausted());
+
+    if (cgReady) {
       for (const t of txns) {
         if (cgRequests.length >= MAX_CG) break;
         if (t.isInternalTransfer) continue;
@@ -2894,13 +2941,15 @@ const TaxEngine = (() => {
     // obscure DEX token not indexed in CoinGecko's standard coin list.
     // Discovery-quality source — not for final K4 without verification.
     const gtNeeded = new Map(); // "address|chain|year" → { address, chain, year }
-    const MAX_GT = 30; // Limit to avoid rate-limiting
+    const MAX_GT = 10; // Keep small — each entry costs 2 API calls (pool discovery + OHLCV)
 
     for (const t of txns) {
       if (t.isInternalTransfer) continue;
       if (!isTaxableCategory(t.category)) continue; // fees never reach external DEX APIs
-      if (t.priceSEKPerUnit > 0 || t.coinGeckoId) continue; // already priced or has CG
+      if (t.priceSEKPerUnit > 0 || t.coinGeckoId) continue; // already priced or has CG ID
       if (!t.contractAddress) continue;
+      // Skip pump.fun / BonkFork spam addresses — they have no CoinGecko-indexed pools
+      if (isKnownDexSpamAddress(t.contractAddress)) continue;
       const network = GT_NETWORK_MAP[t.chain] || GT_NETWORK_MAP[chainFromSource(t.source)];
       if (!network) continue;
       const year = parseInt((t.date || '').slice(0, 4));

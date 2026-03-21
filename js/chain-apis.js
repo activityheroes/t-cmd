@@ -302,6 +302,14 @@ const ChainAPIs = (() => {
   // ── CoinGecko Demo API ──────────────────────────────────────
   function cgKey() { return getKeys().coingecko; }
 
+  // ── CoinGecko quota guard ─────────────────────────────────────────────
+  // When the Demo key returns 401 (monthly quota exhausted or key invalid),
+  // all subsequent CG calls are skipped for the rest of the session.
+  // This prevents hundreds of redundant 401 errors flooding the console.
+  let _cgQuotaExhausted = false;
+  function cgResetQuota() { _cgQuotaExhausted = false; }
+  function cgIsExhausted() { return _cgQuotaExhausted; }
+
   /**
    * Build a CoinGecko URL with the API key as a query parameter.
    * Using a query param avoids CORS preflight (custom headers trigger OPTIONS).
@@ -312,11 +320,37 @@ const ChainAPIs = (() => {
     return `${CG_BASE}${path}${sep}x_cg_demo_api_key=${encodeURIComponent(k)}`;
   }
 
-  /** Authenticated GET request to CoinGecko Demo API */
+  /** Authenticated GET request to CoinGecko Demo API.
+   *  Automatically disables CG for the session on 401 (quota exhausted / key invalid). */
   async function cgGet(path, overrideKey) {
     const key = overrideKey || cgKey();
     if (!key) return null;
-    return apiFetch(cgUrl(path, key), { headers: { 'accept': 'application/json' } }, 12000);
+    // If the key already returned 401 this session, stop wasting API budget.
+    if (_cgQuotaExhausted) return null;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch(cgUrl(path, key), {
+        headers: { 'accept': 'application/json' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res.status === 401 || res.status === 403) {
+        _cgQuotaExhausted = true;
+        console.warn('[ChainAPIs] CoinGecko Demo key quota exhausted (HTTP 401). ' +
+          'Disabling CG for this session — CryptoCompare will be used as fallback. ' +
+          'The quota resets monthly on your CoinGecko account.');
+        return null;
+      }
+      if (!res.ok) {
+        console.warn(`[ChainAPIs] CoinGecko HTTP ${res.status} — ${path.slice(0, 80)}`);
+        return null;
+      }
+      return await res.json();
+    } catch (e) {
+      if (e.name !== 'AbortError') console.warn('[ChainAPIs] CG fetch error:', e.message);
+      return null;
+    }
   }
 
   /**
@@ -484,6 +518,7 @@ const ChainAPIs = (() => {
     heliusTxns, heliusTxn, heliusTokenMeta, heliusRPC, getSolanaTokenCreator,
     // CoinGecko Demo
     cgGet, cgHistoricalPrice, cgHistoricalByContract, cgSimplePrice,
+    cgResetQuota, cgIsExhausted,
     // Helpers
     isBurnAddress, isLockerContract, isSafeLP,
     // Key testing
